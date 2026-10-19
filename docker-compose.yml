@@ -1,0 +1,19 @@
+services:
+  middleware:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    container_name: retro68k-middleware
+    restart: unless-stopped
+    ports:
+      - "6800:6800/tcp"
+      - "6801:6801/udp"
+    environment:
+      - PORT=6800
+      - UDP_DISCOVERY_PORT=6801
+      - DATA_DIR=/app/data
+      - HOST_LAN_IP=${HOST_LAN_IP:-}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:6800/api/spotify/callback}
+    volumes:
+      - ./data:/app/data

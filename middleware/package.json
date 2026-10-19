@@ -1,0 +1,14 @@
+{
+  "name": "retro68k-middleware",
+  "version": "1.0.0",
+  "description": "Modular middleware server for 68k Macintosh clients (Spotify Connect & future services)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node tests/test-milestone1.js && node tests/test-milestone2.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
