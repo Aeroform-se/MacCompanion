@@ -92,8 +92,36 @@
       text-align: left;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
       background: #fafafa;
+    }
+
+    .instructions-box {
+      font-size: 12px;
+      line-height: 1.5;
+      border-bottom: 1px dotted #000;
+      padding-bottom: 10px;
+    }
+
+    .instructions-box ol {
+      margin: 6px 0 0 0;
+      padding-left: 18px;
+    }
+
+    .instructions-box li {
+      margin-bottom: 6px;
+    }
+
+    .code-pill {
+      display: inline-block;
+      font-family: "Monaco", "Courier New", monospace;
+      font-size: 11px;
+      background: #eee;
+      border: 1px solid #000;
+      padding: 2px 6px;
+      margin-top: 2px;
+      user-select: all;
+      word-break: break-all;
     }
 
     .field-group {
@@ -116,11 +144,6 @@
       color: #000;
       outline: none;
       width: 100%;
-    }
-
-    .field-hint {
-      font-size: 11px;
-      color: #333;
     }
 
     .btn-row {
@@ -154,17 +177,6 @@
       color: #fff;
     }
 
-    .subtle-link {
-      font-size: 11px;
-      color: #000;
-      text-decoration: underline;
-      cursor: pointer;
-      background: none;
-      border: none;
-      font-family: inherit;
-      padding: 0;
-    }
-
     .meta-footer {
       font-size: 11px;
       border-top: 1px dotted #000;
@@ -184,11 +196,11 @@
 <body>
   <div class="mac-dialog">
     <div class="mac-dialog-inner">
-      <!-- Happy Mac or Sad Mac PNG from ui/src -->
+      <!-- Defaults to Sad Mac until Spotify is configured & logged in -->
       <img
         id="mac-icon"
         class="mac-icon"
-        src="/img/happymac.png"
+        src="/img/sadmac.png"
         width="100"
         height="128"
         alt="Macintosh Status Icon"
@@ -196,14 +208,26 @@
 
       <div id="error-code-badge" class="error-code hidden">0000000F</div>
 
-      <h1 class="retro-title" id="headline">Welcome to Macintosh.</h1>
+      <h1 class="retro-title" id="headline">Retro68k Spotify Setup</h1>
 
       <div class="retro-status" id="status-box">
         Checking middleware services...
       </div>
 
-      <!-- Configuration Form (shown when awaiting config or editing settings) -->
+      <!-- STEP A: Client ID Configuration Form -->
       <form id="config-form" class="config-panel hidden" onsubmit="saveConfig(event)">
+        <div class="instructions-box">
+          <strong>Spotify App Setup Instructions:</strong>
+          <ol>
+            <li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> and click <strong>Create app</strong>.</li>
+            <li>
+              Set <strong>Redirect URI</strong> to:<br/>
+              <code class="code-pill" id="redirect-uri-pill">https://aeroform-se.github.io/spotify68k/callback.html</code>
+            </li>
+            <li>Check <strong>Web API</strong> under APIs used, save, and paste your <strong>Client ID</strong> below:</li>
+          </ol>
+        </div>
+
         <div class="field-group">
           <label for="client-id-input">Spotify Client ID:</label>
           <input
@@ -212,55 +236,20 @@
             placeholder="e.g. 4b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e"
             required
           />
-          <span class="field-hint" id="config-source-hint">
-            Can also be set via SPOTIFY_CLIENT_ID environment variable.
-          </span>
-        </div>
-
-        <div class="field-group">
-          <label for="redirect-uri-input">Redirect URI (in Spotify Developer Dashboard):</label>
-          <input
-            type="text"
-            id="redirect-uri-input"
-            value="http://127.0.0.1:6800/api/spotify/callback"
-            required
-          />
         </div>
 
         <div class="btn-row">
-          <button type="submit" class="mac-btn primary">Save Configuration</button>
+          <button type="submit" class="mac-btn primary">Save Client ID</button>
           <button type="button" id="cancel-config-btn" class="mac-btn hidden" onclick="toggleConfigEditor(false)">Cancel</button>
         </div>
       </form>
 
-      <!-- Action Buttons (shown when Client ID is configured & awaiting login or in error state) -->
+      <!-- STEP B: One-Click Login Action Row -->
       <div id="action-area" class="btn-row hidden">
         <a href="/api/spotify/login" class="mac-btn primary" id="login-btn">Connect Spotify</a>
-        <button type="button" class="mac-btn" id="edit-config-btn" onclick="toggleConfigEditor(true)">Configure Client ID</button>
+        <button type="button" class="mac-btn" id="edit-config-btn" onclick="toggleConfigEditor(true)">Change Client ID</button>
         <button type="button" class="mac-btn hidden" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
       </div>
-
-      <!-- Optional Manual Callback Paste (helpful if logging in from another LAN machine) -->
-      <div id="manual-callback-toggle" class="hidden">
-        <button type="button" class="subtle-link" onclick="toggleManualCallback()">
-          Logging in from another device on the LAN? Paste callback URL/code
-        </button>
-      </div>
-
-      <form id="manual-callback-form" class="config-panel hidden" onsubmit="submitManualCallback(event)">
-        <div class="field-group">
-          <label for="callback-url-input">Paste Redirected Callback URL or Code:</label>
-          <input
-            type="text"
-            id="callback-url-input"
-            placeholder="http://127.0.0.1:6800/api/spotify/callback?code=..."
-            required
-          />
-        </div>
-        <div class="btn-row">
-          <button type="submit" class="mac-btn primary">Complete Login</button>
-        </div>
-      </form>
 
       <div class="meta-footer" id="footer-info">
         <span id="lan-ip">IP: ...</span>
@@ -271,7 +260,11 @@
 
   <script>
     let editingConfig = false;
-    let lastKnownConfig = { clientId: '', redirectUri: 'http://127.0.0.1:6800/api/spotify/callback', source: 'none' };
+    let lastKnownConfig = {
+      clientId: '',
+      redirectUri: 'https://aeroform-se.github.io/spotify68k/callback.html',
+      source: 'none',
+    };
 
     function setMacIcon(isSad, errorCodeText) {
       const icon = document.getElementById('mac-icon');
@@ -280,8 +273,8 @@
       if (!icon.src.endsWith(targetSrc)) {
         icon.src = targetSrc;
       }
-      if (isSad) {
-        badge.textContent = errorCodeText || '0000000F';
+      if (isSad && errorCodeText) {
+        badge.textContent = errorCodeText;
         badge.classList.remove('hidden');
       } else {
         badge.classList.add('hidden');
@@ -291,33 +284,30 @@
     function toggleConfigEditor(show) {
       editingConfig = show;
       const form = document.getElementById('config-form');
+      const actionArea = document.getElementById('action-area');
       const cancelBtn = document.getElementById('cancel-config-btn');
       if (show) {
         document.getElementById('client-id-input').value = lastKnownConfig.clientId || '';
-        document.getElementById('redirect-uri-input').value =
-          lastKnownConfig.redirectUri || 'http://127.0.0.1:6800/api/spotify/callback';
         form.classList.remove('hidden');
+        actionArea.classList.add('hidden');
         cancelBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
       } else {
         form.classList.add('hidden');
+        if (lastKnownConfig.clientId) {
+          actionArea.classList.remove('hidden');
+        }
       }
-    }
-
-    function toggleManualCallback() {
-      const form = document.getElementById('manual-callback-form');
-      form.classList.toggle('hidden');
     }
 
     async function saveConfig(e) {
       e.preventDefault();
       const clientId = document.getElementById('client-id-input').value.trim();
-      const redirectUri = document.getElementById('redirect-uri-input').value.trim();
 
       try {
         const res = await fetch('/api/spotify/config', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clientId, redirectUri }),
+          body: JSON.stringify({ clientId }),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -329,27 +319,6 @@
         setMacIcon(true, 'CFG_ERR');
         document.getElementById('status-box').classList.remove('hidden');
         document.getElementById('status-box').textContent = err.message;
-      }
-    }
-
-    async function submitManualCallback(e) {
-      e.preventDefault();
-      const callbackInput = document.getElementById('callback-url-input').value.trim();
-      try {
-        const res = await fetch('/api/spotify/callback-manual', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ callbackInput }),
-        });
-        const data = await res.json();
-        if (!res.ok || !data.ok) {
-          throw new Error(data.error || 'Callback exchange failed');
-        }
-        document.getElementById('manual-callback-form').classList.add('hidden');
-        document.getElementById('callback-url-input').value = '';
-        await pollStatus();
-      } catch (err) {
-        await pollStatus();
       }
     }
 
@@ -366,11 +335,10 @@
       const spotify = data.modules && data.modules.spotify;
       const statusBox = document.getElementById('status-box');
       const headline = document.getElementById('headline');
-      const actionArea = document.getElementById('action-area');
       const configForm = document.getElementById('config-form');
+      const actionArea = document.getElementById('action-area');
       const loginBtn = document.getElementById('login-btn');
       const retryBtn = document.getElementById('retry-btn');
-      const manualToggle = document.getElementById('manual-callback-toggle');
 
       document.getElementById('lan-ip').textContent = `IP: ${data.server.ip}:${data.server.httpPort}`;
       document.getElementById('footer-right').textContent = `UDP: ${data.server.udpPort}`;
@@ -379,15 +347,26 @@
 
       if (spotify.config) {
         lastKnownConfig = spotify.config;
-        const hint = document.getElementById('config-source-hint');
-        if (spotify.config.source === 'env') {
-          hint.textContent = 'Currently supplied via SPOTIFY_CLIENT_ID environment variable.';
-        } else {
-          hint.textContent = 'Saved in persistent ./data/spotify.json (or set via SPOTIFY_CLIENT_ID env var).';
+        if (spotify.config.redirectUri) {
+          document.getElementById('redirect-uri-pill').textContent = spotify.config.redirectUri;
         }
       }
 
-      // 1. Error State -> Show Sad Mac
+      // Pass current browser origin to /api/spotify/login so the GitHub Pages static callback
+      // automatically redirects back to this exact server IP & port
+      loginBtn.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
+
+      // 1. Operational & Logged In -> Display Happy Mac & retro bitmap font stating Spotify service is running OK
+      if (spotify.ok && spotify.state === 'READY' && !spotify.error) {
+        setMacIcon(false);
+        headline.textContent = 'Spotify service is running OK';
+        statusBox.classList.add('hidden');
+        configForm.classList.add('hidden');
+        actionArea.classList.add('hidden');
+        return;
+      }
+
+      // 2. Error State -> Show Sad Mac with error code
       if (spotify.error || spotify.state === 'ERROR') {
         setMacIcon(true, spotify.errorCode || 'SPOTIFY_ERR');
         headline.textContent = 'Spotify Service Error';
@@ -396,48 +375,33 @@
         actionArea.classList.remove('hidden');
         loginBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
         retryBtn.classList.remove('hidden');
-        manualToggle.classList.add('hidden');
         if (!editingConfig) configForm.classList.add('hidden');
         return;
       }
 
-      // 2. Operational & Logged In -> Simply display Happy Mac & retro bitmap font stating Spotify service is running OK
-      if (spotify.ok && spotify.state === 'READY') {
-        setMacIcon(false);
-        headline.textContent = 'Spotify service is running OK';
-        statusBox.classList.add('hidden');
-        actionArea.classList.add('hidden');
-        configForm.classList.add('hidden');
-        manualToggle.classList.add('hidden');
-        document.getElementById('manual-callback-form').classList.add('hidden');
-        return;
-      }
-
-      // 3. Awaiting Client ID Configuration -> Happy Mac + Config Form
+      // 3. Awaiting Client ID Configuration -> Show Sad Mac + Setup Instructions + Client ID input
       if (spotify.state === 'AWAITING_CONFIG') {
-        setMacIcon(false);
+        setMacIcon(true, 'NO_CONFIG');
         headline.textContent = 'Retro68k Spotify Setup';
         statusBox.classList.remove('hidden');
-        statusBox.textContent = spotify.message;
+        statusBox.textContent = 'Spotify Client ID not configured.';
         actionArea.classList.add('hidden');
-        manualToggle.classList.add('hidden');
         if (!editingConfig) {
           toggleConfigEditor(true);
         }
         return;
       }
 
-      // 4. Awaiting PKCE Login -> Happy Mac + Connect Button
-      setMacIcon(false);
-      headline.textContent = 'Retro68k Middleware';
+      // 4. Awaiting PKCE Login -> Show Sad Mac + One-Click Connect Spotify button
+      setMacIcon(true, 'AUTH_REQ');
+      headline.textContent = 'Retro68k Spotify Login';
       statusBox.classList.remove('hidden');
-      statusBox.textContent = `${spotify.message}`;
-      actionArea.classList.remove('hidden');
-      loginBtn.classList.remove('hidden');
+      statusBox.textContent = spotify.message;
       retryBtn.classList.add('hidden');
-      manualToggle.classList.remove('hidden');
+      loginBtn.classList.remove('hidden');
       if (!editingConfig) {
         configForm.classList.add('hidden');
+        actionArea.classList.remove('hidden');
       }
     }
 
@@ -448,7 +412,6 @@
         const data = await res.json();
         renderUI(data);
       } catch (err) {
-        // Middleware unreachable / network offline -> Show Sad Mac
         setMacIcon(true, 'NET_OFFLINE');
         document.getElementById('headline').textContent = 'Middleware Unreachable';
         const statusBox = document.getElementById('status-box');

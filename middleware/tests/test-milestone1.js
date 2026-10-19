@@ -59,7 +59,7 @@ async function runTests() {
     // 1. Test Status Web UI (Happy Mac HTML)
     const homeRes = await httpGet('/');
     assert.strictEqual(homeRes.statusCode, 200, 'Root UI should return 200');
-    assert.ok(homeRes.body.includes('/img/happymac.png'), 'Root UI should include Happy Mac image');
+    assert.ok(homeRes.body.includes('/img/sadmac.png') && homeRes.body.includes('/img/happymac.png'), 'Root UI should include Sad Mac and Happy Mac images');
     console.log('[PASS] Status Web UI (Happy Mac) served on /');
 
     // 2. Test Global & Modular Status JSON

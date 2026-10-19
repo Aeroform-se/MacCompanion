@@ -69,15 +69,15 @@ async function runTests() {
     assert.strictEqual(initialStatus.state, 'AWAITING_CONFIG');
     console.log('[PASS] Initial state without Client ID -> AWAITING_CONFIG');
 
-    // 3. Save Client ID and Redirect URI via Web UI endpoint (POST /api/spotify/config)
+    // 3. Save Client ID via Web UI endpoint (POST /api/spotify/config)
     const configRes = await httpRequest('POST', '/api/spotify/config', {
       clientId: 'web_ui_client_id_123',
-      redirectUri: 'http://127.0.0.1:6800/api/spotify/callback',
     });
     assert.strictEqual(configRes.statusCode, 200);
     const configData = JSON.parse(configRes.body);
     assert.strictEqual(configData.status.state, 'AWAITING_LOGIN');
     assert.strictEqual(configData.status.config.clientId, 'web_ui_client_id_123');
+    assert.strictEqual(configData.status.config.redirectUri, 'https://aeroform-se.github.io/spotify68k/callback.html');
     assert.strictEqual(configData.status.config.source, 'store');
     console.log('[PASS] Web UI configuration saved to persistent store -> AWAITING_LOGIN');
 
@@ -89,18 +89,21 @@ async function runTests() {
     delete process.env.SPOTIFY_CLIENT_ID;
     console.log('[PASS] Environment variable SPOTIFY_CLIENT_ID overrides store when present');
 
-    // 5. Initiate PKCE OAuth Login (GET /api/spotify/login)
-    const loginRes = await httpRequest('GET', '/api/spotify/login');
+    // 5. Initiate PKCE OAuth Login (GET /api/spotify/login?origin=http://192.168.1.50:6800)
+    const loginRes = await httpRequest('GET', '/api/spotify/login?origin=' + encodeURIComponent('http://192.168.1.50:6800'));
     assert.strictEqual(loginRes.statusCode, 302, 'Login should redirect to Spotify authorize URL');
     const redirectLocation = loginRes.headers.location;
     assert.ok(redirectLocation.startsWith('https://accounts.spotify.com/authorize?'));
+    assert.ok(redirectLocation.includes(encodeURIComponent('https://aeroform-se.github.io/spotify68k/callback.html')));
 
     const storedAfterLoginInit = spotifyModule.store.load();
     assert.ok(storedAfterLoginInit.codeVerifier, 'codeVerifier should be persisted');
     assert.ok(storedAfterLoginInit.oauthState, 'oauthState should be persisted');
+    const stateParts = storedAfterLoginInit.oauthState.split('.');
+    assert.strictEqual(Buffer.from(stateParts[1], 'base64url').toString('utf8'), 'http://192.168.1.50:6800');
     const expectedChallenge = generateCodeChallenge(storedAfterLoginInit.codeVerifier);
     assert.ok(redirectLocation.includes(`code_challenge=${expectedChallenge}`), 'URL should contain matching S256 challenge');
-    console.log('[PASS] PKCE login redirect & SHA-256 code_challenge verified');
+    console.log('[PASS] PKCE login redirect, GitHub Pages callback URI, & origin-encoded state verified');
 
     // 6. Mock Spotify Token Exchange & User Profile for Callback
     spotifyModule.setFetchImpl(async (url, options) => {

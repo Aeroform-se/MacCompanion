@@ -12,7 +12,7 @@ const {
 
 const router = express.Router();
 
-const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:6800/api/spotify/callback';
+const DEFAULT_REDIRECT_URI = 'https://aeroform-se.github.io/spotify68k/callback.html';
 const TOKEN_EXPIRY_BUFFER_MS = 2 * 60 * 1000; // Refresh 2 minutes before expiry
 
 // Persistent store mounted in ./data/spotify.json
@@ -178,7 +178,7 @@ function getStatus() {
         redirectUri: config.redirectUri,
         source: config.source,
       },
-       updatedAt: data.updatedAt || null,
+      updatedAt: data.updatedAt || null,
     };
   }
 
@@ -205,7 +205,7 @@ function getStatus() {
     ok: false,
     error: false,
     state: 'AWAITING_LOGIN',
-    message: 'Ready to connect your Spotify account via OAuth PKCE',
+    message: 'Ready to connect your Spotify account',
     config: {
       clientId: config.clientId,
       redirectUri: config.redirectUri,
@@ -215,7 +215,7 @@ function getStatus() {
   };
 }
 
-// 1. JSON status endpoint for Web UI polling (optional ?verify=1 to actively ping Spotify API)
+// 1. JSON status endpoint for Web UI polling
 router.get('/status', async (req, res) => {
   const data = store.load();
   if (req.query.verify === '1' && data.accessToken && data.refreshToken) {
@@ -263,6 +263,8 @@ router.post('/clear-error', (req, res) => {
 });
 
 // 5. Initiate PKCE OAuth 2.0 Login Flow
+// Encodes the requesting browser's middleware origin into `state` so the static GitHub Pages
+// callback.html automatically redirects straight back to `http://<middleware-ip>:6800/api/spotify/callback`
 router.get('/login', (req, res) => {
   const { clientId, redirectUri } = getEffectiveConfig();
 
@@ -276,7 +278,12 @@ router.get('/login', (req, res) => {
 
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = generateCodeChallenge(codeVerifier);
-  const state = generateState();
+  const csrfToken = generateState();
+
+  // Determine the origin the user used to access the middleware UI (e.g., http://192.168.1.50:6800)
+  const origin = req.query.origin || `${req.protocol}://${req.get('host')}`;
+  const encodedOrigin = Buffer.from(origin, 'utf8').toString('base64url');
+  const state = `${csrfToken}.${encodedOrigin}`;
 
   store.save({
     codeVerifier,
@@ -300,8 +307,7 @@ router.get('/login', (req, res) => {
 });
 
 /**
- * Shared handler for completing the PKCE callback (used by both GET /callback redirect
- * and POST /callback manual URL/code paste for LAN setups).
+ * Shared handler for completing the PKCE callback.
  */
 async function handleCallbackCode({ code, state, error }) {
   if (error) {
@@ -404,7 +410,7 @@ router.get('/callback', async (req, res) => {
   }
 });
 
-// 7. Manual Callback URL / Code submission (useful if user opens UI from a different LAN device)
+// 7. Manual Callback URL / Code submission fallback
 router.post('/callback-manual', async (req, res) => {
   try {
     const { callbackInput } = req.body || {};
@@ -445,7 +451,7 @@ router.post('/refresh', async (req, res) => {
   }
 });
 
-// 9. Logout / Disconnect Spotify session (preserves stored clientId unless clearConfig=true)
+// 9. Logout / Disconnect Spotify session
 router.post('/logout', (req, res) => {
   const data = store.load();
   const clearConfig = Boolean(req.body && req.body.clearConfig);
@@ -464,7 +470,6 @@ router.post('/logout', (req, res) => {
   res.json({ ok: true, status: getStatus() });
 });
 
-// Start a background token & connectivity health check every 10 minutes when running in production
 let healthTimer = null;
 function startBackgroundHealthCheck(intervalMs = 10 * 60 * 1000) {
   if (healthTimer) clearInterval(healthTimer);
@@ -483,6 +488,7 @@ module.exports = {
   id: 'spotify',
   name: 'Spotify Connect',
   basePath: '/api/spotify',
+  DEFAULT_REDIRECT_URI,
   router,
   store,
   getStatus,
