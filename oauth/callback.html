@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Retro68k Spotify OAuth Relay</title>
+  <title>MacCompanion Spotify OAuth Relay</title>
   <style>
     * {
       box-sizing: border-box;
@@ -86,11 +86,11 @@
 <body>
   <div class="mac-dialog">
     <div class="mac-dialog-inner">
-      <h1 id="title">Returning to Retro68k Middleware...</h1>
-      <p id="message">Redirecting your browser back to your local middleware server.</p>
-      <a id="manual-return-btn" href="#" class="mac-btn hidden">Return to Middleware Server</a>
+      <h1 id="title">Returning to MacCompanion...</h1>
+      <p id="message">Redirecting your browser back to your local MacCompanion server.</p>
+      <a id="manual-return-btn" href="#" class="mac-btn hidden">Return to MacCompanion</a>
       <div id="fallback-box" class="hidden" style="width:100%; display:flex; flex-direction:column; gap:8px;">
-        <p>Or copy this authorization code into your middleware server:</p>
+        <p>Or copy this authorization code into your MacCompanion server:</p>
         <div id="code-display" class="code-box"></div>
       </div>
     </div>
@@ -103,7 +103,6 @@
       const state = params.get('state') || '';
       const error = params.get('error') || '';
 
-      // Decode state parameter: format is base64url(JSON { csrf, origin }) or "<csrf>|<origin_b64>"
       let targetOrigin = '';
       if (state.includes('.')) {
         try {
@@ -131,7 +130,7 @@
         document.getElementById('message').textContent = `Error: ${error}`;
       } else {
         document.getElementById('title').textContent = 'Spotify Authorization Code';
-        document.getElementById('message').textContent = 'Copy the code below into your Retro68k Middleware UI:';
+        document.getElementById('message').textContent = 'Copy the code below into your MacCompanion UI:';
       }
     })();
   </script>

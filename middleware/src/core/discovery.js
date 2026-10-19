@@ -2,7 +2,7 @@ const dgram = require('dgram');
 const os = require('os');
 
 const DEFAULT_UDP_PORT = parseInt(process.env.UDP_DISCOVERY_PORT || '6801', 10);
-const DISCOVERY_MAGIC = 'RETRO68_DISCOVER';
+const DISCOVERY_MAGIC = 'MACCOMPANION_DISCOVER';
 
 /**
  * Determines the primary LAN IPv4 address of the host/container.
@@ -27,7 +27,7 @@ function getLocalIpAddress() {
 /**
  * Starts a UDP broadcast listener that responds to 68k Mac discovery pings
  * with a pipe-delimited string:
- *   RETRO68_SERVER|<ip>|<httpPort>|<comma_separated_modules>
+ *   MACCOMPANION_SERVER|<ip>|<httpPort>|<comma_separated_modules>
  */
 function startDiscoveryServer({ httpPort, registry, udpPort = DEFAULT_UDP_PORT }) {
   const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
@@ -41,7 +41,7 @@ function startDiscoveryServer({ httpPort, registry, udpPort = DEFAULT_UDP_PORT }
     if (text.startsWith(DISCOVERY_MAGIC) || text === 'PING') {
       const ip = getLocalIpAddress();
       const modules = registry.getModuleIdList() || 'none';
-      const payload = `RETRO68_SERVER|${ip}|${httpPort}|${modules}\n`;
+      const payload = `MACCOMPANION_SERVER|${ip}|${httpPort}|${modules}\n`;
       const responseBuffer = Buffer.from(payload, 'ascii');
 
       socket.send(responseBuffer, 0, responseBuffer.length, rinfo.port, rinfo.address, (err) => {

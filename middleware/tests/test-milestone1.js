@@ -69,10 +69,10 @@ async function runTests() {
     assert.ok(statusData.modules.spotify, 'Spotify module should be registered in /api/status');
     console.log('[PASS] Modular /api/status returns registered modules:', Object.keys(statusData.modules));
 
-    // 3. Test 68k Pipe-Delimited Ping Endpoints
+    // 3. Test Pipe-Delimited Ping Endpoints
     const pingRes = await httpGet('/api/ping');
     assert.strictEqual(pingRes.statusCode, 200);
-    assert.ok(pingRes.body.startsWith('RETRO68_SERVER|'), 'Ping response should start with RETRO68_SERVER|');
+    assert.ok(pingRes.body.startsWith('MACCOMPANION_SERVER|'), 'Ping response should start with MACCOMPANION_SERVER|');
     console.log('[PASS] Pipe-delimited HTTP /api/ping ->', pingRes.body.trim());
 
     const spotifyPing = await httpGet('/api/spotify/ping');
@@ -83,7 +83,7 @@ async function runTests() {
     // 4. Test UDP Broadcast Discovery
     const udpReply = await udpPing(DISCOVERY_MAGIC);
     const parts = udpReply.trim().split('|');
-    assert.strictEqual(parts[0], 'RETRO68_SERVER');
+    assert.strictEqual(parts[0], 'MACCOMPANION_SERVER');
     assert.strictEqual(parts[2], String(TEST_HTTP_PORT));
     assert.ok(parts[3].includes('spotify'));
     console.log('[PASS] UDP broadcast discovery reply ->', udpReply.trim());

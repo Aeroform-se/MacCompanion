@@ -1,9 +1,9 @@
 services:
-  middleware:
+  maccompanion:
     build:
       context: ./middleware
       dockerfile: Dockerfile
-    container_name: retro68k-middleware
+    container_name: maccompanion
     restart: unless-stopped
     ports:
       - "6800:6800/tcp"

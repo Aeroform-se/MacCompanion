@@ -1,5 +1,6 @@
 const express = require('express');
 const { createModuleStore } = require('../../core/storage');
+const { formatPipeRow, formatPipeTable, sendPipeResponse } = require('../../core/format68k');
 const {
   generateCodeVerifier,
   generateCodeChallenge,
@@ -9,6 +10,7 @@ const {
   refreshAccessToken,
   fetchUserProfile,
 } = require('./pkce');
+const { spotifyFetch, formatTimeMmSs, normalizeNowPlaying, nowPlayingToPipeRow } = require('./api');
 
 const router = express.Router();
 
@@ -25,6 +27,7 @@ const store = createModuleStore('spotify', {
   codeVerifier: null,
   oauthState: null,
   userProfile: null,
+  smartShuffleActive: false,
   lastError: null,
   lastErrorCode: null,
 });
@@ -40,7 +43,6 @@ function getFetchImpl() {
 
 /**
  * Resolves the active Spotify Client ID and Redirect URI.
- * Environment variables take priority if non-empty, with fallback to persistent web UI config.
  */
 function getEffectiveConfig() {
   const data = store.load();
@@ -59,7 +61,6 @@ function getEffectiveConfig() {
 
 /**
  * Ensures a valid, non-expired access token is available.
- * Automatically refreshes if expired or expiring soon.
  */
 async function getValidAccessToken() {
   const data = store.load();
@@ -103,6 +104,68 @@ async function getValidAccessToken() {
       lastErrorCode: err.code || (err.status ? `HTTP_${err.status}` : 'REFRESH_ERR'),
     });
     throw err;
+  }
+}
+
+/**
+ * Helper to call Spotify Web API with automatic token retrieval.
+ */
+async function callSpotify(endpoint, options = {}) {
+  const accessToken = await getValidAccessToken();
+  return spotifyFetch(endpoint, {
+    ...options,
+    accessToken,
+    fetchImpl: getFetchImpl(),
+  });
+}
+
+/**
+ * Normalizes a Spotify resource identifier into both a clean ID and a full URI.
+ * Example: normalizeSpotifyUri('2A7GGXmTlXuH9LOvBXgOX4', 'track')
+ *   -> { id: '2A7GGXmTlXuH9LOvBXgOX4', uri: 'spotify:track:2A7GGXmTlXuH9LOvBXgOX4' }
+ */
+function normalizeSpotifyUri(input, defaultType = 'track') {
+  if (!input) return { id: '', uri: '', type: defaultType };
+  const trimmed = String(input).trim();
+  if (trimmed.startsWith('spotify:')) {
+    const parts = trimmed.split(':');
+    return {
+      type: parts[1] || defaultType,
+      id: parts[parts.length - 1],
+      uri: trimmed,
+    };
+  }
+  if (trimmed.includes('/')) {
+    const clean = trimmed.split('?')[0].replace(/\/$/, '');
+    const segs = clean.split('/');
+    const id = segs.pop();
+    const maybeType = segs.pop() || defaultType;
+    return {
+      type: maybeType,
+      id,
+      uri: `spotify:${maybeType}:${id}`,
+    };
+  }
+  return {
+    type: defaultType,
+    id: trimmed,
+    uri: `spotify:${defaultType}:${trimmed}`,
+  };
+}
+
+/**
+ * Checks if a track URI is saved in the user's "Liked Songs" library using Spotify's `/me/library/contains`.
+ */
+async function checkIsTrackLiked(trackIdOrUri) {
+  if (!trackIdOrUri) return false;
+  try {
+    const { uri } = normalizeSpotifyUri(trackIdOrUri, 'track');
+    const res = await callSpotify('/me/library/contains', {
+      query: { uris: uri },
+    });
+    return Array.isArray(res) && Boolean(res[0]);
+  } catch {
+    return false;
   }
 }
 
@@ -215,7 +278,33 @@ function getStatus() {
   };
 }
 
-// 1. JSON status endpoint for Web UI polling
+function handleRouteError(req, res, err) {
+  const status = err.status || 500;
+  const pipeMsg = `${formatPipeRow(['ERR', status, err.message])}\n`;
+  if (req.query.format === 'json') {
+    return res.status(status).json({ ok: false, error: err.message, pipe: pipeMsg.trim() });
+  }
+  res.status(status);
+  return sendPipeResponse(req, res, pipeMsg);
+}
+
+function formatTrackRow(prefix, t) {
+  return [
+    prefix,
+    t.id || '',
+    t.name || 'Unknown',
+    Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : '',
+    t.album ? t.album.name : '',
+    t.duration_ms || 0,
+    formatTimeMmSs(t.duration_ms || 0),
+    t.uri || (t.id ? `spotify:track:${t.id}` : ''),
+  ];
+}
+
+// ============================================================================
+// STATUS & AUTHENTICATION ROUTES (Milestones 1 & 2)
+// ============================================================================
+
 router.get('/status', async (req, res) => {
   const data = store.load();
   if (req.query.verify === '1' && data.accessToken && data.refreshToken) {
@@ -224,13 +313,12 @@ router.get('/status', async (req, res) => {
   res.json(getStatus());
 });
 
-// 2. Pipe-delimited status endpoint for 68k Macintosh client
 router.get('/ping', (req, res) => {
   const status = getStatus();
-  res.type('text/plain').send(`SPOTIFY|${status.ok ? '1' : '0'}|${status.state}|${status.message}\n`);
+  const pipe = `${formatPipeRow(['SPOTIFY', status.ok ? '1' : '0', status.state, status.message])}\n`;
+  sendPipeResponse(req, res, pipe);
 });
 
-// 3. Save Client ID and Redirect URI from the Web UI
 router.post('/config', (req, res) => {
   const { clientId, redirectUri } = req.body || {};
   const trimmedId = (clientId || '').trim();
@@ -247,24 +335,14 @@ router.post('/config', (req, res) => {
     lastErrorCode: null,
   });
 
-  res.json({
-    ok: true,
-    status: getStatus(),
-  });
-});
-
-// 4. Clear error state from Web UI so user can retry cleanly
-router.post('/clear-error', (req, res) => {
-  store.save({
-    lastError: null,
-    lastErrorCode: null,
-  });
   res.json({ ok: true, status: getStatus() });
 });
 
-// 5. Initiate PKCE OAuth 2.0 Login Flow
-// Encodes the requesting browser's middleware origin into `state` so the static GitHub Pages
-// callback.html automatically redirects straight back to `http://<middleware-ip>:6800/api/spotify/callback`
+router.post('/clear-error', (req, res) => {
+  store.save({ lastError: null, lastErrorCode: null });
+  res.json({ ok: true, status: getStatus() });
+});
+
 router.get('/login', (req, res) => {
   const { clientId, redirectUri } = getEffectiveConfig();
 
@@ -280,7 +358,6 @@ router.get('/login', (req, res) => {
   const codeChallenge = generateCodeChallenge(codeVerifier);
   const csrfToken = generateState();
 
-  // Determine the origin the user used to access the middleware UI (e.g., http://192.168.1.50:6800)
   const origin = req.query.origin || `${req.protocol}://${req.get('host')}`;
   const encodedOrigin = Buffer.from(origin, 'utf8').toString('base64url');
   const state = `${csrfToken}.${encodedOrigin}`;
@@ -306,9 +383,6 @@ router.get('/login', (req, res) => {
   res.redirect(authUrl);
 });
 
-/**
- * Shared handler for completing the PKCE callback.
- */
 async function handleCallbackCode({ code, state, error }) {
   if (error) {
     store.save({
@@ -396,7 +470,6 @@ async function handleCallbackCode({ code, state, error }) {
   }
 }
 
-// 6. OAuth PKCE Redirect Callback (GET /api/spotify/callback)
 router.get('/callback', async (req, res) => {
   try {
     await handleCallbackCode({
@@ -410,7 +483,6 @@ router.get('/callback', async (req, res) => {
   }
 });
 
-// 7. Manual Callback URL / Code submission fallback
 router.post('/callback-manual', async (req, res) => {
   try {
     const { callbackInput } = req.body || {};
@@ -440,7 +512,6 @@ router.post('/callback-manual', async (req, res) => {
   }
 });
 
-// 8. Force Token Refresh / Connection Validation endpoint
 router.post('/refresh', async (req, res) => {
   try {
     await getValidAccessToken();
@@ -451,7 +522,6 @@ router.post('/refresh', async (req, res) => {
   }
 });
 
-// 9. Logout / Disconnect Spotify session
 router.post('/logout', (req, res) => {
   const data = store.load();
   const clearConfig = Boolean(req.body && req.body.clearConfig);
@@ -468,6 +538,1002 @@ router.post('/logout', (req, res) => {
     lastErrorCode: null,
   });
   res.json({ ok: true, status: getStatus() });
+});
+
+// ============================================================================
+// 1. NOW PLAYING & TIMELINE STATUS / SEEKING
+// ============================================================================
+
+/**
+ * GET /api/spotify/now-playing
+ * Returns full playback status, timeline progress/duration (both ms & M:SS),
+ * shuffle mode (off/on/smart), repeat mode (off/context/track), and liked status (1/0).
+ *
+ * Pipe format:
+ *   PLAYING|is_playing(1/0)|track_id|track_name|artist_name|album_name|progress_ms|duration_ms|progress_mmss|duration_mmss|volume_pct|shuffle_mode(off/on/smart)|repeat_state(off/context/track)|is_liked(1/0)|device_name|artwork_url|artist_id|album_id|context_uri
+ */
+router.get('/now-playing', async (req, res) => {
+  try {
+    const raw = await callSpotify('/me/player');
+    const data = store.load();
+    let isLiked = false;
+    if (raw && raw.item && raw.item.id) {
+      isLiked = await checkIsTrackLiked(raw.item.id);
+    }
+    const np = normalizeNowPlaying(raw, {
+      isLiked,
+      smartShuffleOverride: Boolean(data.smartShuffleActive && raw && raw.shuffle_state),
+    });
+    const pipe = `${formatPipeRow(nowPlayingToPipeRow(np))}\n`;
+    if (req.query.format === 'json') {
+      return res.json({ ok: true, data: np, pipe: pipe.trim() });
+    }
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/timeline
+ * Ultra-lightweight endpoint specifically for frequent 68k timeline polling:
+ *   TIMELINE|is_playing(1/0)|progress_ms|duration_ms|progress_mmss|duration_mmss|percent(0-100)|track_id
+ */
+router.get('/timeline', async (req, res) => {
+  try {
+    const raw = await callSpotify('/me/player');
+    const np = normalizeNowPlaying(raw);
+    const pct = np.durationMs > 0 ? Math.min(100, Math.round((np.progressMs / np.durationMs) * 100)) : 0;
+    const pipe = `${formatPipeRow([
+      'TIMELINE',
+      np.isPlaying ? '1' : '0',
+      np.progressMs,
+      np.durationMs,
+      np.progressFormatted,
+      np.durationFormatted,
+      pct,
+      np.trackId,
+    ])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * POST/GET /api/spotify/seek
+ * Supports seeking by:
+ *   - ?position_ms=60000 (exact milliseconds)
+ *   - ?percent=50 (0-100% along the current track's timeline bar!)
+ *   - ?delta_ms=15000 or ?delta_ms=-15000 (relative fast-forward / rewind)
+ */
+router.all('/seek', async (req, res) => {
+  try {
+    let positionMs = req.query.position_ms ?? (req.body && req.body.position_ms);
+    const percent = req.query.percent ?? (req.body && req.body.percent);
+    const deltaMs = req.query.delta_ms ?? (req.body && req.body.delta_ms);
+
+    if (positionMs === undefined && (percent !== undefined || deltaMs !== undefined)) {
+      const raw = await callSpotify('/me/player');
+      const np = normalizeNowPlaying(raw);
+      if (percent !== undefined) {
+        const clampedPct = Math.max(0, Math.min(100, parseFloat(percent)));
+        positionMs = Math.round((clampedPct / 100) * np.durationMs);
+      } else if (deltaMs !== undefined) {
+        positionMs = Math.max(0, Math.min(np.durationMs || Number.MAX_SAFE_INTEGER, np.progressMs + parseInt(deltaMs, 10)));
+      }
+    }
+
+    const targetMs = Math.max(0, parseInt(positionMs || '0', 10));
+    await callSpotify('/me/player/seek', {
+      method: 'PUT',
+      query: { position_ms: targetMs },
+    });
+    const pipe = `${formatPipeRow(['OK', 'SEEK', targetMs, formatTimeMmSs(targetMs)])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, positionMs: targetMs, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+// ============================================================================
+// 2. TRANSPORT, REPEAT MODES & SHUFFLE (INCLUDING AI / SMART SHUFFLE)
+// ============================================================================
+
+/**
+ * POST/GET /api/spotify/play
+ * Supports:
+ *   - Resume playback (no params)
+ *   - Play specific track URI/ID: ?uri=spotify:track:... (or ?track_id=...)
+ *   - Play context (album/playlist/artist): ?context_uri=spotify:playlist:...
+ *   - Play track inside a context at offset: ?context_uri=...&offset_uri=spotify:track:...
+ */
+router.all('/play', async (req, res) => {
+  try {
+    const uri = req.query.uri || req.query.track_id || (req.body && (req.body.uri || req.body.track_id));
+    const contextUri = req.query.context_uri || (req.body && req.body.context_uri);
+    const offsetUri = req.query.offset_uri || (req.body && req.body.offset_uri);
+    const positionMs = req.query.position_ms || (req.body && req.body.position_ms);
+    const deviceId = req.query.device_id || (req.body && req.body.device_id);
+
+    let body;
+    if (contextUri) {
+      const normCtx = normalizeSpotifyUri(contextUri, 'playlist');
+      body = { context_uri: normCtx.uri };
+      if (offsetUri) {
+        const normOff = normalizeSpotifyUri(offsetUri, 'track');
+        body.offset = { uri: normOff.uri };
+      }
+    } else if (uri) {
+      const normTrack = normalizeSpotifyUri(uri, 'track');
+      body = { uris: [normTrack.uri] };
+    }
+    if (positionMs !== undefined && body) {
+      body.position_ms = parseInt(positionMs, 10);
+    }
+
+    await callSpotify('/me/player/play', {
+      method: 'PUT',
+      query: deviceId ? { device_id: deviceId } : undefined,
+      body,
+    });
+    const pipe = 'OK|PLAY\n';
+    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.all('/pause', async (req, res) => {
+  try {
+    await callSpotify('/me/player/pause', { method: 'PUT' });
+    const pipe = 'OK|PAUSE\n';
+    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.all('/toggle-play', async (req, res) => {
+  try {
+    const raw = await callSpotify('/me/player');
+    const isPlaying = Boolean(raw && raw.is_playing);
+    if (isPlaying) {
+      await callSpotify('/me/player/pause', { method: 'PUT' });
+      return sendPipeResponse(req, res, 'OK|PAUSE\n');
+    } else {
+      await callSpotify('/me/player/play', { method: 'PUT' });
+      return sendPipeResponse(req, res, 'OK|PLAY\n');
+    }
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.all('/next', async (req, res) => {
+  try {
+    await callSpotify('/me/player/next', { method: 'POST' });
+    const pipe = 'OK|NEXT\n';
+    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.all('/previous', async (req, res) => {
+  try {
+    await callSpotify('/me/player/previous', { method: 'POST' });
+    const pipe = 'OK|PREVIOUS\n';
+    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.all('/volume', async (req, res) => {
+  try {
+    const delta = req.query.delta ?? (req.body && req.body.delta);
+    let vol;
+    if (delta !== undefined) {
+      const raw = await callSpotify('/me/player');
+      const cur = (raw && raw.device && typeof raw.device.volume_percent === 'number') ? raw.device.volume_percent : 50;
+      vol = Math.max(0, Math.min(100, cur + parseInt(delta, 10)));
+    } else {
+      vol = Math.max(0, Math.min(100, parseInt(req.query.volume_percent ?? (req.body && req.body.volume_percent) ?? '50', 10)));
+    }
+    await callSpotify('/me/player/volume', {
+      method: 'PUT',
+      query: { volume_percent: vol },
+    });
+    const pipe = `OK|VOLUME|${vol}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, volume: vol, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * POST/GET /api/spotify/repeat
+ * Supports all 3 Spotify repeat modes + automatic cycling when `?state=cycle` (or no state) is passed:
+ *   - `off`     (Repeat Off)
+ *   - `context` (Repeat All / Album / Playlist)
+ *   - `track`   (Repeat 1 / Current Track)
+ *   - `cycle`   (Cycles off -> context -> track -> off)
+ */
+router.all('/repeat', async (req, res) => {
+  try {
+    let state = (req.query.state || (req.body && req.body.state) || 'cycle').toLowerCase().trim();
+    if (state === 'one' || state === '1') state = 'track';
+    if (state === 'all') state = 'context';
+
+    if (state === 'cycle') {
+      const raw = await callSpotify('/me/player');
+      const current = (raw && raw.repeat_state) || 'off';
+      const order = ['off', 'context', 'track'];
+      state = order[(order.indexOf(current) + 1) % order.length];
+    }
+
+    await callSpotify('/me/player/repeat', {
+      method: 'PUT',
+      query: { state },
+    });
+    const pipe = `OK|REPEAT|${state}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, state, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * Helper that injects AI / Smart Shuffle recommended tracks into the user's playback queue
+ * based on the currently playing artist/track.
+ */
+async function injectSmartShuffleRecommendations() {
+  try {
+    const raw = await callSpotify('/me/player');
+    if (!raw || !raw.item) return 0;
+    const artistName = (Array.isArray(raw.item.artists) && raw.item.artists[0] && raw.item.artists[0].name) || '';
+    const trackName = raw.item.name || '';
+    const q = artistName || trackName;
+    if (!q) return 0;
+
+    // Search related tracks & radio mix tracks for the artist
+    const searchData = await callSpotify('/search', {
+      query: { q: `${q}`, type: 'track', limit: 15 },
+    });
+    const candidates = (searchData && searchData.tracks && Array.isArray(searchData.tracks.items))
+      ? searchData.tracks.items.filter((t) => t.id !== raw.item.id)
+      : [];
+
+    // Pick up to 2 fresh tracks and add to queue
+    const shuffled = candidates.sort(() => Math.random() - 0.5).slice(0, 2);
+    let added = 0;
+    for (const track of shuffled) {
+      if (track.uri) {
+        await callSpotify('/me/player/queue', {
+          method: 'POST',
+          query: { uri: track.uri },
+        });
+        added++;
+      }
+    }
+    return added;
+  } catch (err) {
+    console.warn('[Spotify] Smart Shuffle queue injection note:', err.message);
+    return 0;
+  }
+}
+
+/**
+ * POST/GET /api/spotify/shuffle
+ * Supports all shuffle modes + automatic cycling (`off` -> `on` -> `smart` -> `off`):
+ *   - `off` or `0` or `false`  -> Shuffle Off
+ *   - `on` or `1` or `true`    -> Standard Shuffle On
+ *   - `smart` or `ai`          -> Smart Shuffle (Shuffle On + AI/Smart Queue Enrichment)
+ *   - `cycle` (default)        -> Cycles off -> on -> smart -> off
+ */
+router.all('/shuffle', async (req, res) => {
+  try {
+    let rawMode = req.query.mode ?? req.query.state ?? (req.body && (req.body.mode ?? req.body.state)) ?? 'cycle';
+    rawMode = String(rawMode).toLowerCase().trim();
+
+    const data = store.load();
+    let targetMode;
+
+    if (rawMode === 'cycle') {
+      const rawPlayer = await callSpotify('/me/player');
+      const curShuffle = Boolean(rawPlayer && rawPlayer.shuffle_state);
+      const curSmart = Boolean((rawPlayer && rawPlayer.smart_shuffle) || (curShuffle && data.smartShuffleActive));
+      if (!curShuffle) targetMode = 'on';
+      else if (!curSmart) targetMode = 'smart';
+      else targetMode = 'off';
+    } else if (rawMode === 'smart' || rawMode === 'ai' || rawMode === '2') {
+      targetMode = 'smart';
+    } else if (rawMode === 'on' || rawMode === '1' || rawMode === 'true') {
+      targetMode = 'on';
+    } else {
+      targetMode = 'off';
+    }
+
+    const boolShuffle = targetMode === 'on' || targetMode === 'smart';
+    await callSpotify('/me/player/shuffle', {
+      method: 'PUT',
+      query: { state: boolShuffle },
+    });
+
+    store.save({ smartShuffleActive: targetMode === 'smart' });
+
+    let injected = 0;
+    if (targetMode === 'smart') {
+      injected = await injectSmartShuffleRecommendations();
+    }
+
+    const pipe = `OK|SHUFFLE|${targetMode}|${injected}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, mode: targetMode, injected, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+// ============================================================================
+// 3. SPOTIFY RADIO (SEED BY CURRENT TRACK, ARTIST, OR QUERY)
+// ============================================================================
+
+/**
+ * POST/GET /api/spotify/radio
+ * Starts Spotify Radio based on:
+ *   - `?seed=...` (track name, artist name, track ID/URI, or artist ID/URI)
+ *   - Or if omitted, automatically uses the currently playing track & artist!
+ *
+ * Strategy:
+ *   1. Resolves the seed artist/track name.
+ *   2. Searches Spotify for an official `<Seed> Radio` or `<Artist> Mix` playlist; if found and
+ *      playable, starts playback or queues its tracks.
+ *   3. Builds a rich radio queue of matching tracks and starts playback immediately.
+ *
+ * Pipe response:
+ *   OK|RADIO|<radio_title>|<context_or_seed_uri>
+ */
+router.all('/radio', async (req, res) => {
+  try {
+    let seedInput = (req.query.seed || req.query.q || (req.body && (req.body.seed || req.body.q)) || '').trim();
+    const deviceId = req.query.device_id || (req.body && req.body.device_id);
+    let seedTitle = seedInput;
+    let artistQuery = seedInput;
+
+    if (!seedInput) {
+      // Automatically seed from currently playing track/artist
+      const rawPlayer = await callSpotify('/me/player');
+      if (rawPlayer && rawPlayer.item) {
+        const artist = (Array.isArray(rawPlayer.item.artists) && rawPlayer.item.artists[0] && rawPlayer.item.artists[0].name) || '';
+        const track = rawPlayer.item.name || '';
+        seedTitle = artist ? `${artist} - ${track}` : track;
+        artistQuery = artist || track;
+      }
+    } else if (seedInput.startsWith('spotify:track:') || /^[A-Za-z0-9]{22}$/.test(seedInput)) {
+      const { id } = normalizeSpotifyUri(seedInput, 'track');
+      try {
+        const trackObj = await callSpotify(`/tracks/${encodeURIComponent(id)}`);
+        if (trackObj) {
+          const artist = (Array.isArray(trackObj.artists) && trackObj.artists[0] && trackObj.artists[0].name) || '';
+          seedTitle = artist ? `${artist} - ${trackObj.name}` : trackObj.name;
+          artistQuery = artist || trackObj.name;
+        }
+      } catch {
+        // Might be an artist ID
+        try {
+          const artistObj = await callSpotify(`/artists/${encodeURIComponent(id)}`);
+          if (artistObj && artistObj.name) {
+            seedTitle = artistObj.name;
+            artistQuery = artistObj.name;
+          }
+        } catch {}
+      }
+    } else if (seedInput.startsWith('spotify:artist:')) {
+      const { id } = normalizeSpotifyUri(seedInput, 'artist');
+      const artistObj = await callSpotify(`/artists/${encodeURIComponent(id)}`);
+      if (artistObj && artistObj.name) {
+        seedTitle = artistObj.name;
+        artistQuery = artistObj.name;
+      }
+    }
+
+    if (!artistQuery) {
+      const err = new Error('Nothing is currently playing to seed Radio. Provide ?seed=Artist+or+Track');
+      err.status = 400;
+      throw err;
+    }
+
+    // 1. Try searching for a dedicated "<Artist> Radio" playlist first
+    const plSearch = await callSpotify('/search', {
+      query: { q: `${artistQuery} Radio`, type: 'playlist', limit: 5 },
+    });
+    const playlists = (plSearch && plSearch.playlists && Array.isArray(plSearch.playlists.items))
+      ? plSearch.playlists.items.filter(Boolean)
+      : [];
+
+    if (playlists.length > 0 && playlists[0].uri && req.query.mode !== 'tracks') {
+      const chosen = playlists[0];
+      await callSpotify('/me/player/play', {
+        method: 'PUT',
+        query: deviceId ? { device_id: deviceId } : undefined,
+        body: { context_uri: chosen.uri },
+      });
+      const pipe = `${formatPipeRow(['OK', 'RADIO', chosen.name, chosen.uri])}\n`;
+      if (req.query.format === 'json') return res.json({ ok: true, title: chosen.name, uri: chosen.uri, pipe: pipe.trim() });
+      return sendPipeResponse(req, res, pipe);
+    }
+
+    // 2. Fallback: Build a dynamic radio track list from search and start playing them
+    const trackSearch = await callSpotify('/search', {
+      query: { q: artistQuery, type: 'track', limit: 20 },
+    });
+    const tracks = (trackSearch && trackSearch.tracks && Array.isArray(trackSearch.tracks.items))
+      ? trackSearch.tracks.items.filter((t) => t && t.uri)
+      : [];
+
+    if (tracks.length === 0) {
+      const err = new Error(`No radio tracks found for "${artistQuery}"`);
+      err.status = 404;
+      throw err;
+    }
+
+    // Shuffle the radio tracks so every radio session feels fresh
+    const radioUris = tracks.map((t) => t.uri).sort(() => Math.random() - 0.5);
+    await callSpotify('/me/player/play', {
+      method: 'PUT',
+      query: deviceId ? { device_id: deviceId } : undefined,
+      body: { uris: radioUris },
+    });
+
+    const radioLabel = `${seedTitle} Radio`;
+    const pipe = `${formatPipeRow(['OK', 'RADIO', radioLabel, radioUris[0]])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, title: radioLabel, count: radioUris.length, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+// ============================================================================
+// 4. LIKED / LOVED SONGS (LIST, SAVE/LIKE, REMOVE/UNLIKE, TOGGLE)
+// ============================================================================
+
+/**
+ * GET /api/spotify/liked?limit=25&offset=0
+ * Lists the user's "Liked Songs" (Saved Tracks).
+ * Pipe format per line:
+ *   TRACK|id|name|artist|album|duration_ms|duration_mmss|uri
+ */
+router.get('/liked', async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit || '25', 10));
+    const offset = parseInt(req.query.offset || '0', 10);
+    const data = await callSpotify('/me/tracks', { query: { limit, offset } });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = items
+      .map((entry) => entry && (entry.track || entry.item))
+      .filter(Boolean)
+      .map((t) => formatTrackRow('TRACK', t));
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, total: data ? data.total : rows.length, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * POST/PUT/GET /api/spotify/like
+ * Saves a track to the user's "Liked Songs" library.
+ * If `?id=...` or `?uri=...` is omitted, automatically likes the currently playing track!
+ * Pipe format:
+ *   OK|LIKE|<track_id>|<track_name>
+ */
+router.all('/like', async (req, res) => {
+  try {
+    let target = req.query.uri || req.query.id || (req.body && (req.body.uri || req.body.id));
+    let trackName = '';
+
+    if (!target) {
+      const raw = await callSpotify('/me/player');
+      if (!raw || !raw.item || !raw.item.id) {
+        const err = new Error('No track currently playing to like');
+        err.status = 400;
+        throw err;
+      }
+      target = raw.item.uri || raw.item.id;
+      trackName = raw.item.name || '';
+    }
+
+    const { id, uri } = normalizeSpotifyUri(target, 'track');
+    await callSpotify('/me/library', {
+      method: 'PUT',
+      query: { uris: uri },
+    });
+
+    const pipe = `${formatPipeRow(['OK', 'LIKE', id, trackName || uri])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, id, uri, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * POST/DELETE/GET /api/spotify/unlike
+ * Removes a track from the user's "Liked Songs" library.
+ * If `?id=...` or `?uri=...` is omitted, automatically unlikes the currently playing track!
+ */
+router.all('/unlike', async (req, res) => {
+  try {
+    let target = req.query.uri || req.query.id || (req.body && (req.body.uri || req.body.id));
+    let trackName = '';
+
+    if (!target) {
+      const raw = await callSpotify('/me/player');
+      if (!raw || !raw.item || !raw.item.id) {
+        const err = new Error('No track currently playing to unlike');
+        err.status = 400;
+        throw err;
+      }
+      target = raw.item.uri || raw.item.id;
+      trackName = raw.item.name || '';
+    }
+
+    const { id, uri } = normalizeSpotifyUri(target, 'track');
+    await callSpotify('/me/library', {
+      method: 'DELETE',
+      query: { uris: uri },
+    });
+
+    const pipe = `${formatPipeRow(['OK', 'UNLIKE', id, trackName || uri])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, id, uri, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * POST/GET /api/spotify/toggle-like
+ * Toggles Liked/Loved state for a track (or currently playing track if omitted).
+ * Returns:
+ *   OK|LIKED|1|<track_id>  or  OK|LIKED|0|<track_id>
+ */
+router.all('/toggle-like', async (req, res) => {
+  try {
+    let target = req.query.uri || req.query.id || (req.body && (req.body.uri || req.body.id));
+    if (!target) {
+      const raw = await callSpotify('/me/player');
+      if (!raw || !raw.item || !raw.item.id) {
+        const err = new Error('No track currently playing');
+        err.status = 400;
+        throw err;
+      }
+      target = raw.item.uri || raw.item.id;
+    }
+
+    const { id, uri } = normalizeSpotifyUri(target, 'track');
+    const currentlyLiked = await checkIsTrackLiked(uri);
+
+    await callSpotify('/me/library', {
+      method: currentlyLiked ? 'DELETE' : 'PUT',
+      query: { uris: uri },
+    });
+
+    const nextLiked = !currentlyLiked;
+    const pipe = `${formatPipeRow(['OK', 'LIKED', nextLiked ? '1' : '0', id])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, liked: nextLiked, id, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+// ============================================================================
+// 5. DEVICES, QUEUE, PLAYLISTS, ALBUMS, ARTISTS, RECENTLY PLAYED, TOP & SEARCH
+// ============================================================================
+
+router.get('/devices', async (req, res) => {
+  try {
+    const data = await callSpotify('/me/player/devices');
+    const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
+    const rows = devices.map((d) => [
+      'DEVICE',
+      d.id || '',
+      d.name || 'Unknown Device',
+      d.type || 'Speaker',
+      d.is_active ? '1' : '0',
+      typeof d.volume_percent === 'number' ? d.volume_percent : 100,
+    ]);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, devices, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.all('/transfer', async (req, res) => {
+  try {
+    const deviceId = req.query.device_id || (req.body && req.body.device_id);
+    if (!deviceId) {
+      const err = new Error('Missing device_id');
+      err.status = 400;
+      throw err;
+    }
+    await callSpotify('/me/player', {
+      method: 'PUT',
+      body: { device_ids: [deviceId], play: true },
+    });
+    const pipe = `OK|TRANSFER|${deviceId}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.get('/playlists', async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
+    const offset = parseInt(req.query.offset || '0', 10);
+    const data = await callSpotify('/me/playlists', { query: { limit, offset } });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = items.filter(Boolean).map((p) => {
+      const total = (p.items && typeof p.items.total === 'number')
+        ? p.items.total
+        : (p.tracks && typeof p.tracks.total === 'number' ? p.tracks.total : 0);
+      return [
+        'PLAYLIST',
+        p.id || '',
+        p.name || 'Untitled',
+        total,
+        p.owner ? (p.owner.display_name || p.owner.id) : '',
+        p.uri || '',
+      ];
+    });
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.get('/playlist/:id/tracks', async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit || '25', 10));
+    const offset = parseInt(req.query.offset || '0', 10);
+    const { id: playlistId } = normalizeSpotifyUri(req.params.id, 'playlist');
+
+    let items = [];
+    try {
+      const data = await callSpotify(`/playlists/${encodeURIComponent(playlistId)}/items`, {
+        query: { limit, offset },
+      });
+      items = (data && Array.isArray(data.items)) ? data.items : [];
+    } catch {
+      const playlistObj = await callSpotify(`/playlists/${encodeURIComponent(playlistId)}`);
+      const container = playlistObj && (playlistObj.items || playlistObj.tracks);
+      items = (container && Array.isArray(container.items)) ? container.items.slice(offset, offset + limit) : [];
+    }
+
+    const rows = items
+      .map((entry) => entry && (entry.item || entry.track))
+      .filter(Boolean)
+      .map((t) => formatTrackRow('TRACK', t));
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * POST /api/spotify/playlist/:id/add?uri=spotify:track:...
+ * Adds a track to a user playlist (using Spotify's `/playlists/:id/items`).
+ */
+router.all('/playlist/:id/add', async (req, res) => {
+  try {
+    const { id: playlistId } = normalizeSpotifyUri(req.params.id, 'playlist');
+    const rawTrack = req.query.uri || req.query.track_id || (req.body && (req.body.uri || req.body.track_id));
+    if (!rawTrack) {
+      const err = new Error('Missing track uri');
+      err.status = 400;
+      throw err;
+    }
+    const { uri: trackUri } = normalizeSpotifyUri(rawTrack, 'track');
+    await callSpotify(`/playlists/${encodeURIComponent(playlistId)}/items`, {
+      method: 'POST',
+      body: { uris: [trackUri] },
+    });
+    const pipe = `OK|PLAYLIST_ADD|${playlistId}|${trackUri}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+router.get('/queue', async (req, res) => {
+  try {
+    const data = await callSpotify('/me/player/queue');
+    const queue = (data && Array.isArray(data.queue)) ? data.queue.slice(0, 20) : [];
+    const rows = queue.map((t) => formatTrackRow('QUEUE', t));
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, queue, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * POST/GET /api/spotify/queue/add?uri=spotify:track:...
+ * Adds a track to the user's playback queue.
+ */
+router.all('/queue/add', async (req, res) => {
+  try {
+    const rawUri = req.query.uri || req.query.id || (req.body && (req.body.uri || req.body.id));
+    if (!rawUri) {
+      const err = new Error('Missing track uri or id to add to queue');
+      err.status = 400;
+      throw err;
+    }
+    const { uri } = normalizeSpotifyUri(rawUri, 'track');
+    await callSpotify('/me/player/queue', {
+      method: 'POST',
+      query: { uri },
+    });
+    const pipe = `OK|QUEUE_ADD|${uri}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, uri, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/recently-played?limit=20
+ * Lists recently played tracks.
+ */
+router.get('/recently-played', async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
+    const data = await callSpotify('/me/player/recently-played', { query: { limit } });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = items
+      .map((entry) => entry && entry.track)
+      .filter(Boolean)
+      .map((t) => formatTrackRow('RECENT', t));
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/top?type=tracks|artists&time_range=short_term|medium_term|long_term&limit=20
+ * Lists user's top tracks or top artists.
+ */
+router.get('/top', async (req, res) => {
+  try {
+    const type = req.query.type === 'artists' ? 'artists' : 'tracks';
+    const timeRange = req.query.time_range || 'medium_term';
+    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
+    const data = await callSpotify(`/me/top/${type}`, {
+      query: { time_range: timeRange, limit },
+    });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = type === 'artists'
+      ? items.map((a) => [
+          'ARTIST',
+          a.id || '',
+          a.name || 'Unknown',
+          Array.isArray(a.genres) ? a.genres.slice(0, 3).join(', ') : '',
+          a.uri || '',
+        ])
+      : items.map((t) => formatTrackRow('TOP_TRACK', t));
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/albums?limit=20&offset=0
+ * Lists user's saved albums.
+ * Pipe format:
+ *   ALBUM|id|name|artist|total_tracks|release_date|uri
+ */
+router.get('/albums', async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
+    const offset = parseInt(req.query.offset || '0', 10);
+    const data = await callSpotify('/me/albums', { query: { limit, offset } });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = items
+      .map((entry) => entry && entry.album)
+      .filter(Boolean)
+      .map((a) => [
+        'ALBUM',
+        a.id || '',
+        a.name || 'Untitled',
+        Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '',
+        a.total_tracks || 0,
+        a.release_date || '',
+        a.uri || '',
+      ]);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/album/:id/tracks?limit=50&offset=0
+ * Lists tracks inside an album.
+ */
+router.get('/album/:id/tracks', async (req, res) => {
+  try {
+    const { id: albumId } = normalizeSpotifyUri(req.params.id, 'album');
+    const limit = Math.min(50, parseInt(req.query.limit || '50', 10));
+    const offset = parseInt(req.query.offset || '0', 10);
+    const albumObj = await callSpotify(`/albums/${encodeURIComponent(albumId)}`);
+    const data = await callSpotify(`/albums/${encodeURIComponent(albumId)}/tracks`, {
+      query: { limit, offset },
+    });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const albumName = (albumObj && albumObj.name) || '';
+    const rows = items.map((t) => [
+      'TRACK',
+      t.id || '',
+      t.name || 'Unknown',
+      Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : '',
+      albumName,
+      t.duration_ms || 0,
+      formatTimeMmSs(t.duration_ms || 0),
+      t.uri || '',
+    ]);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, album: albumObj, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/artist/:id/albums?limit=20
+ * Lists an artist's albums & singles.
+ */
+router.get('/artist/:id/albums', async (req, res) => {
+  try {
+    const { id: artistId } = normalizeSpotifyUri(req.params.id, 'artist');
+    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
+    const data = await callSpotify(`/artists/${encodeURIComponent(artistId)}/albums`, {
+      query: { limit, include_groups: 'album,single' },
+    });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = items.map((a) => [
+      'ALBUM',
+      a.id || '',
+      a.name || 'Untitled',
+      Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '',
+      a.total_tracks || 0,
+      a.release_date || '',
+      a.uri || '',
+    ]);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/shows?limit=20 (Saved Podcasts / Shows)
+ */
+router.get('/shows', async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
+    const data = await callSpotify('/me/shows', { query: { limit } });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = items
+      .map((entry) => entry && entry.show)
+      .filter(Boolean)
+      .map((s) => [
+        'SHOW',
+        s.id || '',
+        s.name || 'Untitled',
+        s.publisher || '',
+        s.total_episodes || 0,
+        s.uri || '',
+      ]);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/search?q=oasis&type=track|album|artist|playlist&limit=15
+ * Multi-type search across tracks, albums, artists, or playlists.
+ */
+router.get('/search', async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (!q) {
+      const err = new Error('Missing search query parameter q');
+      err.status = 400;
+      throw err;
+    }
+    const type = (req.query.type || 'track').toLowerCase().trim();
+    const limit = Math.min(25, parseInt(req.query.limit || '15', 10));
+    const data = await callSpotify('/search', {
+      query: { q, type, limit },
+    });
+
+    let rows = [];
+    if (type === 'album' && data && data.albums) {
+      rows = (data.albums.items || []).filter(Boolean).map((a) => [
+        'ALBUM',
+        a.id || '',
+        a.name || 'Untitled',
+        Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '',
+        a.total_tracks || 0,
+        a.release_date || '',
+        a.uri || '',
+      ]);
+    } else if (type === 'artist' && data && data.artists) {
+      rows = (data.artists.items || []).filter(Boolean).map((a) => [
+        'ARTIST',
+        a.id || '',
+        a.name || 'Unknown',
+        Array.isArray(a.genres) ? a.genres.slice(0, 3).join(', ') : '',
+        a.uri || '',
+      ]);
+    } else if (type === 'playlist' && data && data.playlists) {
+      rows = (data.playlists.items || []).filter(Boolean).map((p) => [
+        'PLAYLIST',
+        p.id || '',
+        p.name || 'Untitled',
+        (p.items && p.items.total) || (p.tracks && p.tracks.total) || 0,
+        p.owner ? (p.owner.display_name || p.owner.id) : '',
+        p.uri || '',
+      ]);
+    } else {
+      const tracks = (data && data.tracks && Array.isArray(data.tracks.items)) ? data.tracks.items : [];
+      rows = tracks.filter(Boolean).map((t) => formatTrackRow('TRACK', t));
+    }
+
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, data, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
 });
 
 let healthTimer = null;

@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const registry = require('./core/registry');
 const { ensureDataDir, DATA_DIR } = require('./core/storage');
-const { startDiscoveryServer, getLocalIpAddress, DEFAULT_UDP_PORT } = require('./core/discovery');
+const { startDiscoveryServer, getLocalIpAddress, DEFAULT_UDP_PORT, DISCOVERY_MAGIC } = require('./core/discovery');
 
 // Service Modules
 const spotifyModule = require('./modules/spotify');
@@ -27,6 +27,7 @@ function createApp() {
   app.get('/api/status', (req, res) => {
     res.json({
       server: {
+        name: 'MacCompanion',
         ip: getLocalIpAddress(),
         httpPort: HTTP_PORT,
         udpPort: UDP_PORT,
@@ -41,10 +42,35 @@ function createApp() {
   app.get('/api/ping', (req, res) => {
     const ip = getLocalIpAddress();
     const modules = registry.getModuleIdList() || 'none';
-    res.type('text/plain').send(`RETRO68_SERVER|${ip}|${HTTP_PORT}|${modules}\n`);
+    res.type('text/plain').send(`MACCOMPANION_SERVER|${ip}|${HTTP_PORT}|${modules}\n`);
   });
 
-  // Serve Status Web UI (Happy Mac page) on root
+  // Live UDP Discovery Test endpoint (sends a real UDP packet to the UDP discovery port and returns the reply)
+  app.post('/api/test-udp', (req, res) => {
+    const dgram = require('dgram');
+    const client = dgram.createSocket('udp4');
+    const timeout = setTimeout(() => {
+      client.close();
+      res.status(504).type('text/plain').send('ERR|504|UDP discovery timed out\n');
+    }, 2500);
+
+    client.on('message', (msg, rinfo) => {
+      clearTimeout(timeout);
+      client.close();
+      res.type('text/plain').send(`UDP_FROM|${rinfo.address}:${rinfo.port}\n${msg.toString('utf8')}`);
+    });
+
+    const buf = Buffer.from(DISCOVERY_MAGIC, 'ascii');
+    client.send(buf, 0, buf.length, UDP_PORT, '127.0.0.1', (err) => {
+      if (err) {
+        clearTimeout(timeout);
+        client.close();
+        res.status(500).type('text/plain').send(`ERR|500|${err.message}\n`);
+      }
+    });
+  });
+
+  // Serve Status Web UI on root (and any static files in public/)
   app.use(express.static(path.join(__dirname, 'public')));
 
   return app;
@@ -55,8 +81,8 @@ if (require.main === module) {
 
   const server = app.listen(HTTP_PORT, '0.0.0.0', () => {
     const ip = getLocalIpAddress();
-    console.log(`[Middleware] HTTP Server listening on http://0.0.0.0:${HTTP_PORT} (LAN: http://${ip}:${HTTP_PORT})`);
-    console.log(`[Middleware] Persistent data directory: ${DATA_DIR}`);
+    console.log(`[MacCompanion] HTTP Server listening on http://0.0.0.0:${HTTP_PORT} (LAN: http://${ip}:${HTTP_PORT})`);
+    console.log(`[MacCompanion] Persistent data directory: ${DATA_DIR}`);
   });
 
   const udpSocket = startDiscoveryServer({
@@ -66,7 +92,7 @@ if (require.main === module) {
   });
 
   const shutdown = () => {
-    console.log('[Middleware] Shutting down...');
+    console.log('[MacCompanion] Shutting down...');
     udpSocket.close();
     server.close(() => process.exit(0));
   };

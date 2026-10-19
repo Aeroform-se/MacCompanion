@@ -19,10 +19,12 @@ Thumbs.db
 *.swo
 *~
 
-# Local Project Planning & Source Design Files
+# Local Project Planning, Design & Private Testing Tools
 plan/
 ui/
 *.psd
+middleware/src/public/test.html
+middleware/scripts/
 
 # Logs & Temporary Files
 logs/
