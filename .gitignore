@@ -1,7 +1,30 @@
+# Dependencies & Build Artifacts
 node_modules/
-data/*.json
-data/*.tmp
-.env
-.DS_Store
 build/
+dist/
+
+# Persistent Runtime Data & Secrets
+data/
+.env
+.env.*
+!.env.example
+
+# Local IDE, Editor & OS Files
+*.code-workspace
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Local Project Planning & Source Design Files
 plan/
+ui/
+*.psd
+
+# Logs & Temporary Files
+logs/
+*.log
+npm-debug.log*

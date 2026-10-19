@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Retro68k Middleware Status</title>
+  <title>MacCompanion — Retro68k Service Hub</title>
   <style>
     * {
       box-sizing: border-box;
@@ -16,8 +16,8 @@
       margin: 0;
       min-height: 100vh;
       display: flex;
+      flex-direction: column;
       align-items: center;
-      justify-content: center;
       background-color: #888;
       background-image:
         linear-gradient(45deg, #000 25%, transparent 25%),
@@ -28,26 +28,17 @@
       background-position: 0 0, 0 2px, 2px -2px, -2px 0;
       font-family: "Chicago", "Geneva", "Monaco", "Courier New", monospace;
       color: #000;
-      padding: 20px;
+      padding: 40px 20px;
     }
 
-    .mac-dialog {
-      background: #fff;
-      border: 2px solid #000;
-      box-shadow: 4px 4px 0px #000;
-      padding: 4px;
-      width: 100%;
-      max-width: 500px;
-    }
-
-    .mac-dialog-inner {
-      border: 3px solid #000;
-      padding: 28px 24px;
+    /* Platform Hero Header (Outside the service cards) */
+    .platform-header {
       display: flex;
       flex-direction: column;
       align-items: center;
       text-align: center;
-      gap: 16px;
+      margin-bottom: 32px;
+      gap: 10px;
     }
 
     .mac-icon {
@@ -55,19 +46,38 @@
       height: 128px;
       display: block;
       image-rendering: pixelated;
+      filter: drop-shadow(3px 3px 0px #000);
     }
 
-    .retro-title {
-      font-size: 18px;
+    .platform-title-pill {
+      background: #fff;
+      border: 2px solid #000;
+      box-shadow: 3px 3px 0px #000;
+      padding: 6px 18px;
+      margin-top: 4px;
+    }
+
+    .platform-title {
+      font-size: 22px;
       font-weight: bold;
       letter-spacing: 0.5px;
-      line-height: 1.4;
       margin: 0;
+    }
+
+    .platform-meta {
+      background: #fff;
+      border: 1px solid #000;
+      box-shadow: 2px 2px 0px #000;
+      font-size: 11px;
+      padding: 4px 12px;
+      display: flex;
+      gap: 14px;
+      align-items: center;
     }
 
     .error-code {
       font-family: "Monaco", "Courier New", monospace;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: bold;
       letter-spacing: 1.5px;
       background: #000;
@@ -75,14 +85,89 @@
       padding: 3px 10px;
     }
 
-    .retro-status {
+    /* Dashboard Grid for Service Cards */
+    .services-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 480px));
+      gap: 24px;
+      width: 100%;
+      max-width: 1000px;
+      justify-content: center;
+    }
+
+    /* System 7 Window / Card Style for Each Integration */
+    .service-card {
+      background: #fff;
+      border: 2px solid #000;
+      box-shadow: 4px 4px 0px #000;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Classic Macintosh Pinstripe Title Bar */
+    .card-titlebar {
+      height: 26px;
+      border-bottom: 2px solid #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      padding: 0 10px;
+      background: repeating-linear-gradient(
+        to bottom,
+        #fff 0px,
+        #fff 2px,
+        #000 2px,
+        #000 3px
+      );
+    }
+
+    .card-titlebar-label {
+      background: #fff;
+      padding: 0 10px;
       font-size: 13px;
+      font-weight: bold;
+      line-height: 1;
+    }
+
+    .status-badge {
+      position: absolute;
+      right: 8px;
+      background: #fff;
+      border: 1px solid #000;
+      font-size: 10px;
+      font-weight: bold;
+      padding: 2px 6px;
+      text-transform: uppercase;
+    }
+
+    .status-badge.ok {
+      background: #000;
+      color: #fff;
+    }
+
+    .card-body {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .service-status-line {
+      font-size: 14px;
       line-height: 1.5;
-      padding: 10px 14px;
+      padding: 10px 12px;
       border: 1px solid #000;
       background: #fff;
-      width: 100%;
+      text-align: center;
       word-break: break-word;
+    }
+
+    .service-status-line.running-ok {
+      border: 2px solid #000;
+      font-weight: bold;
+      font-size: 15px;
+      padding: 16px 12px;
     }
 
     .config-panel {
@@ -151,19 +236,19 @@
       flex-wrap: wrap;
       gap: 12px;
       justify-content: center;
-      margin-top: 4px;
+      margin-top: 2px;
     }
 
     .mac-btn {
       display: inline-block;
       font-family: inherit;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: bold;
       color: #000;
       background: #fff;
       border: 2px solid #000;
       border-radius: 6px;
-      padding: 6px 16px;
+      padding: 6px 14px;
       text-decoration: none;
       cursor: pointer;
     }
@@ -177,14 +262,23 @@
       color: #fff;
     }
 
-    .meta-footer {
+    .card-footer {
       font-size: 11px;
       border-top: 1px dotted #000;
-      padding-top: 12px;
-      width: 100%;
+      padding-top: 10px;
       display: flex;
       justify-content: space-between;
       align-items: center;
+    }
+
+    .subtle-btn {
+      font-family: inherit;
+      font-size: 11px;
+      background: none;
+      border: none;
+      text-decoration: underline;
+      cursor: pointer;
+      padding: 0;
       color: #000;
     }
 
@@ -194,69 +288,90 @@
   </style>
 </head>
 <body>
-  <div class="mac-dialog">
-    <div class="mac-dialog-inner">
-      <!-- Defaults to Sad Mac until Spotify is configured & logged in -->
-      <img
-        id="mac-icon"
-        class="mac-icon"
-        src="/img/sadmac.png"
-        width="100"
-        height="128"
-        alt="Macintosh Status Icon"
-      />
-
-      <div id="error-code-badge" class="error-code hidden">0000000F</div>
-
-      <h1 class="retro-title" id="headline">Retro68k Spotify Setup</h1>
-
-      <div class="retro-status" id="status-box">
-        Checking middleware services...
-      </div>
-
-      <!-- STEP A: Client ID Configuration Form -->
-      <form id="config-form" class="config-panel hidden" onsubmit="saveConfig(event)">
-        <div class="instructions-box">
-          <strong>Spotify App Setup Instructions:</strong>
-          <ol>
-            <li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> and click <strong>Create app</strong>.</li>
-            <li>
-              Set <strong>Redirect URI</strong> to:<br/>
-              <code class="code-pill" id="redirect-uri-pill">https://aeroform-se.github.io/spotify68k/callback.html</code>
-            </li>
-            <li>Check <strong>Web API</strong> under APIs used, save, and paste your <strong>Client ID</strong> below:</li>
-          </ol>
-        </div>
-
-        <div class="field-group">
-          <label for="client-id-input">Spotify Client ID:</label>
-          <input
-            type="text"
-            id="client-id-input"
-            placeholder="e.g. 4b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e"
-            required
-          />
-        </div>
-
-        <div class="btn-row">
-          <button type="submit" class="mac-btn primary">Save Client ID</button>
-          <button type="button" id="cancel-config-btn" class="mac-btn hidden" onclick="toggleConfigEditor(false)">Cancel</button>
-        </div>
-      </form>
-
-      <!-- STEP B: One-Click Login Action Row -->
-      <div id="action-area" class="btn-row hidden">
-        <a href="/api/spotify/login" class="mac-btn primary" id="login-btn">Connect Spotify</a>
-        <button type="button" class="mac-btn" id="edit-config-btn" onclick="toggleConfigEditor(true)">Change Client ID</button>
-        <button type="button" class="mac-btn hidden" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
-      </div>
-
-      <div class="meta-footer" id="footer-info">
-        <span id="lan-ip">IP: ...</span>
-        <span id="footer-right">UDP: 6801</span>
-      </div>
+  <!-- MacCompanion Platform Header (Outside Service Cards) -->
+  <header class="platform-header">
+    <img
+      id="mac-icon"
+      class="mac-icon"
+      src="/img/happymac.png"
+      width="100"
+      height="128"
+      alt="MacCompanion Server Status"
+    />
+    <div id="error-code-badge" class="error-code hidden">NET_OFFLINE</div>
+    <div class="platform-title-pill">
+      <h1 class="platform-title">MacCompanion</h1>
     </div>
-  </div>
+    <div class="platform-meta">
+      <span id="server-status-text">Server Online</span>
+      <span>•</span>
+      <span id="lan-ip">IP: ...</span>
+      <span>•</span>
+      <span id="udp-port">UDP: 6801</span>
+    </div>
+  </header>
+
+  <!-- Modular Service Integrations Dashboard Grid -->
+  <main class="services-grid">
+    <!-- Service Card 1: Spotify -->
+    <section class="service-card" id="spotify-card">
+      <div class="card-titlebar">
+        <span class="card-titlebar-label">Spotify Connect</span>
+        <span class="status-badge" id="spotify-badge">Checking</span>
+      </div>
+
+      <div class="card-body">
+        <div class="service-status-line" id="spotify-status-box">
+          Checking Spotify integration status...
+        </div>
+
+        <!-- Client ID Setup Form -->
+        <form id="config-form" class="config-panel hidden" onsubmit="saveConfig(event)">
+          <div class="instructions-box">
+            <strong>Spotify App Setup Instructions:</strong>
+            <ol>
+              <li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> and click <strong>Create app</strong>.</li>
+              <li>
+                Set <strong>Redirect URI</strong> to:<br/>
+                <code class="code-pill" id="redirect-uri-pill">https://aeroform-se.github.io/spotify68k/callback.html</code>
+              </li>
+              <li>Check <strong>Web API</strong> under APIs used, save, and paste your <strong>Client ID</strong> below:</li>
+            </ol>
+          </div>
+
+          <div class="field-group">
+            <label for="client-id-input">Spotify Client ID:</label>
+            <input
+              type="text"
+              id="client-id-input"
+              placeholder="e.g. 4b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e"
+              required
+            />
+          </div>
+
+          <div class="btn-row">
+            <button type="submit" class="mac-btn primary">Save Client ID</button>
+            <button type="button" id="cancel-config-btn" class="mac-btn hidden" onclick="toggleConfigEditor(false)">Cancel</button>
+          </div>
+        </form>
+
+        <!-- Action Buttons for Login / Reconfigure / Retry -->
+        <div id="action-area" class="btn-row hidden">
+          <a href="/api/spotify/login" class="mac-btn primary" id="login-btn">Connect Spotify</a>
+          <button type="button" class="mac-btn" id="edit-config-btn" onclick="toggleConfigEditor(true)">Change Client ID</button>
+          <button type="button" class="mac-btn hidden" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
+        </div>
+
+        <!-- Connected Account Footer (only shown when READY) -->
+        <div id="connected-footer" class="card-footer hidden">
+          <span id="spotify-user-label">Connected</span>
+          <div>
+            <button type="button" class="subtle-btn" onclick="disconnectSpotify()">Disconnect</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
 
   <script>
     let editingConfig = false;
@@ -266,7 +381,7 @@
       source: 'none',
     };
 
-    function setMacIcon(isSad, errorCodeText) {
+    function setPlatformMacIcon(isSad, errorCodeText) {
       const icon = document.getElementById('mac-icon');
       const badge = document.getElementById('error-code-badge');
       const targetSrc = isSad ? '/img/sadmac.png' : '/img/happymac.png';
@@ -316,9 +431,8 @@
         editingConfig = false;
         await pollStatus();
       } catch (err) {
-        setMacIcon(true, 'CFG_ERR');
-        document.getElementById('status-box').classList.remove('hidden');
-        document.getElementById('status-box').textContent = err.message;
+        setPlatformMacIcon(true, 'CFG_ERR');
+        document.getElementById('spotify-status-box').textContent = err.message;
       }
     }
 
@@ -331,17 +445,29 @@
       }
     }
 
+    async function disconnectSpotify() {
+      try {
+        await fetch('/api/spotify/logout', { method: 'POST' });
+        await pollStatus();
+      } catch (err) {
+        await pollStatus();
+      }
+    }
+
     function renderUI(data) {
       const spotify = data.modules && data.modules.spotify;
-      const statusBox = document.getElementById('status-box');
-      const headline = document.getElementById('headline');
+      const statusBox = document.getElementById('spotify-status-box');
+      const badge = document.getElementById('spotify-badge');
       const configForm = document.getElementById('config-form');
       const actionArea = document.getElementById('action-area');
       const loginBtn = document.getElementById('login-btn');
       const retryBtn = document.getElementById('retry-btn');
+      const connectedFooter = document.getElementById('connected-footer');
+      const userLabel = document.getElementById('spotify-user-label');
 
+      document.getElementById('server-status-text').textContent = 'Server Online';
       document.getElementById('lan-ip').textContent = `IP: ${data.server.ip}:${data.server.httpPort}`;
-      document.getElementById('footer-right').textContent = `UDP: ${data.server.udpPort}`;
+      document.getElementById('udp-port').textContent = `UDP: ${data.server.udpPort}`;
 
       if (!spotify) return;
 
@@ -352,38 +478,46 @@
         }
       }
 
-      // Pass current browser origin to /api/spotify/login so the GitHub Pages static callback
-      // automatically redirects back to this exact server IP & port
       loginBtn.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
 
-      // 1. Operational & Logged In -> Display Happy Mac & retro bitmap font stating Spotify service is running OK
-      if (spotify.ok && spotify.state === 'READY' && !spotify.error) {
-        setMacIcon(false);
-        headline.textContent = 'Spotify service is running OK';
-        statusBox.classList.add('hidden');
-        configForm.classList.add('hidden');
-        actionArea.classList.add('hidden');
-        return;
-      }
-
-      // 2. Error State -> Show Sad Mac with error code
+      // 1. Service Error State -> Show Sad Mac on platform header + Error details in Spotify Card
       if (spotify.error || spotify.state === 'ERROR') {
-        setMacIcon(true, spotify.errorCode || 'SPOTIFY_ERR');
-        headline.textContent = 'Spotify Service Error';
-        statusBox.classList.remove('hidden');
+        setPlatformMacIcon(true, spotify.errorCode || 'SPOTIFY_ERR');
+        badge.textContent = 'Error';
+        badge.classList.remove('ok');
+        statusBox.classList.remove('running-ok');
         statusBox.textContent = spotify.message || 'An unexpected Spotify error occurred.';
         actionArea.classList.remove('hidden');
         loginBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
         retryBtn.classList.remove('hidden');
+        connectedFooter.classList.add('hidden');
         if (!editingConfig) configForm.classList.add('hidden');
         return;
       }
 
-      // 3. Awaiting Client ID Configuration -> Show Sad Mac + Setup Instructions + Client ID input
+      // Server is healthy -> Show Happy Mac!
+      setPlatformMacIcon(false);
+
+      // 2. Spotify Operational & Logged In -> "Spotify service is running OK"
+      if (spotify.ok && spotify.state === 'READY') {
+        badge.textContent = 'Running OK';
+        badge.classList.add('ok');
+        statusBox.classList.add('running-ok');
+        statusBox.textContent = 'Spotify service is running OK';
+        configForm.classList.add('hidden');
+        actionArea.classList.add('hidden');
+        connectedFooter.classList.remove('hidden');
+        userLabel.textContent = spotify.user ? `Account: ${spotify.user}` : 'Account connected';
+        return;
+      }
+
+      statusBox.classList.remove('running-ok');
+      connectedFooter.classList.add('hidden');
+
+      // 3. Awaiting Client ID Setup
       if (spotify.state === 'AWAITING_CONFIG') {
-        setMacIcon(true, 'NO_CONFIG');
-        headline.textContent = 'Retro68k Spotify Setup';
-        statusBox.classList.remove('hidden');
+        badge.textContent = 'Setup Required';
+        badge.classList.remove('ok');
         statusBox.textContent = 'Spotify Client ID not configured.';
         actionArea.classList.add('hidden');
         if (!editingConfig) {
@@ -392,10 +526,9 @@
         return;
       }
 
-      // 4. Awaiting PKCE Login -> Show Sad Mac + One-Click Connect Spotify button
-      setMacIcon(true, 'AUTH_REQ');
-      headline.textContent = 'Retro68k Spotify Login';
-      statusBox.classList.remove('hidden');
+      // 4. Awaiting OAuth Login
+      badge.textContent = 'Login Required';
+      badge.classList.remove('ok');
       statusBox.textContent = spotify.message;
       retryBtn.classList.add('hidden');
       loginBtn.classList.remove('hidden');
@@ -412,11 +545,12 @@
         const data = await res.json();
         renderUI(data);
       } catch (err) {
-        setMacIcon(true, 'NET_OFFLINE');
-        document.getElementById('headline').textContent = 'Middleware Unreachable';
-        const statusBox = document.getElementById('status-box');
-        statusBox.classList.remove('hidden');
-        statusBox.textContent = 'Cannot reach middleware server or network connection lost.';
+        setPlatformMacIcon(true, 'NET_OFFLINE');
+        document.getElementById('server-status-text').textContent = 'Server Offline';
+        document.getElementById('spotify-badge').textContent = 'Offline';
+        document.getElementById('spotify-badge').classList.remove('ok');
+        document.getElementById('spotify-status-box').textContent =
+          'Cannot reach MacCompanion server or network connection lost.';
       }
     }
 
