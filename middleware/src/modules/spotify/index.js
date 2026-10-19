@@ -11,6 +11,11 @@ const {
   fetchUserProfile,
 } = require('./pkce');
 const { spotifyFetch, formatTimeMmSs, normalizeNowPlaying, nowPlayingToPipeRow } = require('./api');
+const {
+  DEFAULT_ART_SIZE,
+  processArtworkBuffer,
+  generatePlaceholderArtwork,
+} = require('../../core/dither');
 
 const router = express.Router();
 
@@ -1531,6 +1536,84 @@ router.get('/search', async (req, res) => {
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, data, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+// ============================================================================
+// 6. MILESTONE 4: 1-BIT MONOCHROME ALBUM ARTWORK ENGINE (200x200 DEFAULT)
+// ============================================================================
+
+/**
+ * GET /api/spotify/artwork
+ * Retrieves album artwork, scales to target dimensions (default 200x200),
+ * and dithers to 1-bit monochrome using Bill Atkinson or Floyd-Steinberg dithering.
+ *
+ * Query Parameters:
+ *   - `size`   : Target width & height in pixels (default: `200`)
+ *   - `dither` : `atkinson` (default) or `floyd`
+ *   - `format` :
+ *       - `raw` (default): 8-byte header (width, height, rowBytes, 0) + packed QuickDraw BitMap bytes (5,208 bytes for 200x200)
+ *       - `bits`: Pure packed QuickDraw 1-bit scanlines (5,200 bytes for 200x200)
+ *       - `png` : 1-bit monochrome PNG image (for browser previewing)
+ *       - `hex` : Pipe-delimited string `BITMAP|width|height|rowBytes|byteLen|<hex>`
+ *   - `id` / `track_id` / `album_id` / `url`: Optional specific track/album/image URL.
+ *     If omitted, automatically uses the currently playing track's album cover (or a 1-bit retro musical note placeholder if idle).
+ */
+router.get('/artwork', async (req, res) => {
+  try {
+    const size = parseInt(req.query.size || String(DEFAULT_ART_SIZE), 10);
+    const dither = req.query.dither || 'atkinson';
+    const format = req.query.format || 'raw';
+    let imageUrl = (req.query.url || '').trim();
+
+    const targetId = (req.query.id || req.query.track_id || req.query.album_id || '').trim();
+    if (!imageUrl && targetId) {
+      const { type, id } = normalizeSpotifyUri(targetId, req.query.album_id ? 'album' : 'track');
+      if (type === 'album') {
+        const albumObj = await callSpotify(`/albums/${encodeURIComponent(id)}`);
+        const images = (albumObj && Array.isArray(albumObj.images)) ? albumObj.images : [];
+        const chosen = images.find((img) => img.width && img.width <= 300) || images[0];
+        if (chosen) imageUrl = chosen.url;
+      } else {
+        const trackObj = await callSpotify(`/tracks/${encodeURIComponent(id)}`);
+        const images = (trackObj && trackObj.album && Array.isArray(trackObj.album.images)) ? trackObj.album.images : [];
+        const chosen = images.find((img) => img.width && img.width <= 300) || images[0];
+        if (chosen) imageUrl = chosen.url;
+      }
+    }
+
+    if (!imageUrl) {
+      const rawPlayer = await callSpotify('/me/player');
+      const np = normalizeNowPlaying(rawPlayer);
+      imageUrl = np.artworkUrl;
+    }
+
+    let result;
+    if (imageUrl) {
+      const fetchFn = getFetchImpl();
+      const imgRes = await fetchFn(imageUrl);
+      if (!imgRes.ok) {
+        throw new Error(`Failed to fetch album art JPEG: HTTP ${imgRes.status}`);
+      }
+      const arrayBuf = await imgRes.arrayBuffer();
+      result = await processArtworkBuffer(Buffer.from(arrayBuf), {
+        size,
+        dither,
+        format,
+      });
+    } else {
+      result = await generatePlaceholderArtwork({ size, dither, format });
+    }
+
+    res.setHeader('Content-Type', result.contentType);
+    res.setHeader('Content-Length', result.buffer.length);
+    res.setHeader('X-Art-Width', String(result.width));
+    res.setHeader('X-Art-Height', String(result.height));
+    res.setHeader('X-Art-RowBytes', String(result.rowBytes));
+    res.setHeader('Cache-Control', 'no-store');
+    return res.end(result.buffer);
   } catch (err) {
     return handleRouteError(req, res, err);
   }
