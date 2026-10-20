@@ -8,9 +8,11 @@ services:
     ports:
       - "6800:6800/tcp"
       - "6801:6801/udp"
+      - "6802:6802/tcp"
     environment:
       - PORT=6800
       - UDP_DISCOVERY_PORT=6801
+      - AUDIO_TCP_PORT=6802
       - DATA_DIR=/app/data
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-https://aeroform-se.github.io/spotify68k/callback.html}

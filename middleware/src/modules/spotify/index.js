@@ -16,6 +16,7 @@ const {
   processArtworkBuffer,
   generatePlaceholderArtwork,
 } = require('../../core/dither');
+const { AudioStreamEngine } = require('./audio');
 
 const router = express.Router();
 
@@ -33,8 +34,15 @@ const store = createModuleStore('spotify', {
   oauthState: null,
   userProfile: null,
   smartShuffleActive: false,
+  audioSampleRate: '22k',
   lastError: null,
   lastErrorCode: null,
+});
+
+const audioEngine = new AudioStreamEngine({
+  store,
+  getValidAccessToken: () => getValidAccessToken(),
+  getFetchImpl: () => getFetchImpl(),
 });
 
 // Allow injecting custom fetch for unit tests
@@ -212,6 +220,7 @@ function getStatus() {
   const config = getEffectiveConfig();
   const hasClientId = Boolean(config.clientId);
   const isAuthenticated = Boolean(data.accessToken && data.refreshToken);
+  const audioStatus = audioEngine.getStatus();
 
   if (data.lastError) {
     return {
@@ -222,6 +231,7 @@ function getStatus() {
       errorCode: data.lastErrorCode || 'SPOTIFY_ERR',
       state: 'ERROR',
       message: data.lastError,
+      audio: audioStatus,
       config: {
         clientId: config.clientId,
         redirectUri: config.redirectUri,
@@ -241,6 +251,7 @@ function getStatus() {
       message: 'Spotify service is running OK',
       user: data.userProfile ? data.userProfile.displayName || data.userProfile.id : null,
       expiresAt: data.expiresAt,
+      audio: audioStatus,
       config: {
         clientId: config.clientId,
         redirectUri: config.redirectUri,
@@ -258,6 +269,7 @@ function getStatus() {
       error: false,
       state: 'AWAITING_CONFIG',
       message: 'Enter your Spotify Client ID below or via SPOTIFY_CLIENT_ID env var',
+      audio: audioStatus,
       config: {
         clientId: '',
         redirectUri: config.redirectUri,
@@ -274,6 +286,7 @@ function getStatus() {
     error: false,
     state: 'AWAITING_LOGIN',
     message: 'Ready to connect your Spotify account',
+    audio: audioStatus,
     config: {
       clientId: config.clientId,
       redirectUri: config.redirectUri,
@@ -462,6 +475,9 @@ async function handleCallbackCode({ code, state, error }) {
       lastErrorCode: null,
     });
 
+    audioEngine.tokenRejected = false;
+    audioEngine.ensureStarted({ forceRestart: true }).catch(() => {});
+
     return { ok: true, userProfile };
   } catch (err) {
     const isNetworkError = err.cause?.code === 'ENOTFOUND' ||
@@ -482,6 +498,9 @@ router.get('/callback', async (req, res) => {
       state: req.query.state,
       error: req.query.error,
     });
+    if (audioEngine.hasBinaries && !audioEngine.isPaired()) {
+      return res.redirect('/api/spotify/audio-login');
+    }
     res.redirect('/');
   } catch (err) {
     res.redirect(`/?error=${encodeURIComponent(err.message)}`);
@@ -530,6 +549,8 @@ router.post('/refresh', async (req, res) => {
 router.post('/logout', (req, res) => {
   const data = store.load();
   const clearConfig = Boolean(req.body && req.body.clearConfig);
+  audioEngine.stopProcesses();
+  audioEngine.clearCachedCredentials();
   store.save({
     clientId: clearConfig ? null : data.clientId,
     redirectUri: clearConfig ? null : data.redirectUri,
@@ -539,10 +560,33 @@ router.post('/logout', (req, res) => {
     codeVerifier: null,
     oauthState: null,
     userProfile: null,
+    librespotAccessToken: null,
+    librespotRefreshToken: null,
+    librespotExpiresAt: null,
+    librespotCodeVerifier: null,
+    librespotOauthState: null,
     lastError: null,
     lastErrorCode: null,
   });
   res.json({ ok: true, status: getStatus() });
+});
+
+router.get('/audio-login', (req, res) => {
+  const authUrl = audioEngine.buildSpeakerAuthorizeUrl();
+  res.redirect(authUrl);
+});
+
+router.get('/audio-callback', async (req, res) => {
+  try {
+    await audioEngine.handleSpeakerCallback({
+      code: req.query.code,
+      state: req.query.state,
+      error: req.query.error,
+    });
+    res.redirect('/');
+  } catch (err) {
+    res.redirect(`/?error=${encodeURIComponent(err.message)}`);
+  }
 });
 
 // ============================================================================
@@ -1619,6 +1663,68 @@ router.get('/artwork', async (req, res) => {
   }
 });
 
+// ============================================================================
+// 7. LOCAL 68K AUDIO STREAMING ENGINE (LIBRESPOT -> FFMPEG -> 8-BIT PCM)
+// ============================================================================
+
+/**
+ * GET /api/spotify/audio-config
+ * Returns current local 68k audio streaming configuration & receiver status.
+ * Pipe format:
+ *   AUDIO|<state>|<sampleRateMode(22k/11k)>|<sampleRateHz(22255/11127)>|<tcpPort(6802)>|<deviceName>
+ */
+router.get('/audio-config', (req, res) => {
+  const st = audioEngine.getStatus();
+  const pipe = `${formatPipeRow(['AUDIO', st.state, st.sampleRateMode, st.sampleRateHz, st.tcpPort, st.deviceName])}\n`;
+  if (req.query.format === 'json') {
+    return res.json({ ok: true, audio: st, pipe: pipe.trim() });
+  }
+  return sendPipeResponse(req, res, pipe);
+});
+
+/**
+ * POST/GET /api/spotify/audio-config?rate=22k|11k
+ * Sets the local 68k audio sample rate (22,255 Hz or 11,127 Hz) and hot-restarts the transcoder.
+ */
+router.all('/audio-config', async (req, res) => {
+  try {
+    const rate = req.query.rate || (req.body && req.body.rate) || '22k';
+    const st = await audioEngine.setSampleRate(rate);
+    const pipe = `${formatPipeRow(['OK', 'AUDIO_RATE', st.sampleRateMode, st.sampleRateHz, st.tcpPort])}\n`;
+    if (req.query.format === 'json') {
+      return res.json({ ok: true, audio: st, pipe: pipe.trim() });
+    }
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/stream.wav
+ * Streams live 8-bit unsigned mono audio (at 22,255 Hz or 11,127 Hz) wrapped in a WAV header
+ * so modern browsers can listen to the exact 68k audio stream.
+ */
+router.get('/stream.wav', async (req, res) => {
+  try {
+    await audioEngine.attachHttpClient(req, res, { format: 'wav' });
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/stream.pcm
+ * Streams pure headerless unsigned 8-bit mono PCM bytes over HTTP/1.0 (alternative to raw TCP :6802).
+ */
+router.get('/stream.pcm', async (req, res) => {
+  try {
+    await audioEngine.attachHttpClient(req, res, { format: 'raw' });
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
 let healthTimer = null;
 function startBackgroundHealthCheck(intervalMs = 10 * 60 * 1000) {
   if (healthTimer) clearInterval(healthTimer);
@@ -1626,6 +1732,7 @@ function startBackgroundHealthCheck(intervalMs = 10 * 60 * 1000) {
     const data = store.load();
     if (data.refreshToken) {
       await validateConnection();
+      await audioEngine.ensureStarted();
     }
   }, intervalMs);
   if (healthTimer.unref) healthTimer.unref();
@@ -1640,6 +1747,7 @@ module.exports = {
   DEFAULT_REDIRECT_URI,
   router,
   store,
+  audioEngine,
   getStatus,
   getEffectiveConfig,
   getValidAccessToken,

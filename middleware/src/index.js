@@ -70,6 +70,20 @@ function createApp() {
     });
   });
 
+  // Handle librespot speaker OAuth callback on http://127.0.0.1:6800/login
+  app.get('/login', async (req, res) => {
+    try {
+      await spotifyModule.audioEngine.handleSpeakerCallback({
+        code: req.query.code,
+        state: req.query.state,
+        error: req.query.error,
+      });
+      res.redirect('http://localhost:6800/');
+    } catch (err) {
+      res.redirect(`http://localhost:6800/?error=${encodeURIComponent(err.message)}`);
+    }
+  });
+
   // Serve Status Web UI on root (and any static files in public/)
   app.use(express.static(path.join(__dirname, 'public')));
 
@@ -91,8 +105,13 @@ if (require.main === module) {
     registry,
   });
 
+  // Start local 68k raw 8-bit PCM TCP audio server (port 6802) and librespot receiver if authenticated
+  spotifyModule.audioEngine.startTcpServer();
+  spotifyModule.audioEngine.ensureStarted().catch(() => {});
+
   const shutdown = () => {
     console.log('[MacCompanion] Shutting down...');
+    spotifyModule.audioEngine.close();
     udpSocket.close();
     server.close(() => process.exit(0));
   };

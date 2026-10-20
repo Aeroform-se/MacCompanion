@@ -181,6 +181,52 @@
       background: #fafafa;
     }
 
+    .audio-settings-box {
+      width: 100%;
+      border: 1px solid #000;
+      padding: 12px 14px;
+      background: #fafafa;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .audio-settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      font-weight: bold;
+    }
+
+    .rate-toggle-group {
+      display: flex;
+      gap: 8px;
+    }
+
+    .rate-btn {
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: bold;
+      padding: 4px 10px;
+      border: 2px solid #000;
+      background: #fff;
+      color: #000;
+      cursor: pointer;
+    }
+
+    .rate-btn.active {
+      background: #000;
+      color: #fff;
+    }
+
+    .audio-helper-text {
+      font-size: 11px;
+      line-height: 1.4;
+      color: #222;
+      margin: 0;
+    }
+
     .instructions-box {
       font-size: 12px;
       line-height: 1.5;
@@ -362,6 +408,24 @@
           <button type="button" class="mac-btn hidden" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
         </div>
 
+        <!-- 68k Native Audio Streaming Sample Rate Toggle (shown when READY) -->
+        <div id="audio-settings-panel" class="audio-settings-box hidden">
+          <div class="audio-settings-header">
+            <span>68k Local Audio Stream:</span>
+            <div class="rate-toggle-group">
+              <button type="button" id="rate-22k-btn" class="rate-btn active" onclick="setAudioSampleRate('22k')">22 kHz</button>
+              <button type="button" id="rate-11k-btn" class="rate-btn" onclick="setAudioSampleRate('11k')">11 kHz</button>
+            </div>
+          </div>
+          <p class="audio-helper-text">
+            <strong>11 kHz</strong> suits Macintosh Plus / SE (68000) systems and slower network bridges better. <strong>22 kHz</strong> is recommended for SE/30 and 68030+ Macs.
+          </p>
+          <div id="speaker-pair-row" style="margin-top:4px; padding-top:6px; border-top:1px dotted #000; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+            <span id="speaker-status-label" style="font-size:11px;">Speaker: Checking...</span>
+            <a href="/api/spotify/audio-login" id="speaker-pair-btn" class="mac-btn primary" style="font-size:11px; padding:4px 10px;">Activate "Macintosh 68k" Speaker</a>
+          </div>
+        </div>
+
         <!-- Connected Account Footer (only shown when READY) -->
         <div id="connected-footer" class="card-footer hidden">
           <span id="spotify-user-label">Connected</span>
@@ -436,6 +500,19 @@
       }
     }
 
+    async function setAudioSampleRate(rate) {
+      try {
+        await fetch('/api/spotify/audio-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rate }),
+        });
+        await pollStatus();
+      } catch (err) {
+        await pollStatus();
+      }
+    }
+
     async function retryConnection() {
       try {
         await fetch('/api/spotify/clear-error', { method: 'POST' });
@@ -462,6 +539,7 @@
       const actionArea = document.getElementById('action-area');
       const loginBtn = document.getElementById('login-btn');
       const retryBtn = document.getElementById('retry-btn');
+      const audioPanel = document.getElementById('audio-settings-panel');
       const connectedFooter = document.getElementById('connected-footer');
       const userLabel = document.getElementById('spotify-user-label');
 
@@ -478,6 +556,24 @@
         }
       }
 
+      if (spotify.audio) {
+        const is11k = spotify.audio.sampleRateMode === '11k';
+        document.getElementById('rate-22k-btn').classList.toggle('active', !is11k);
+        document.getElementById('rate-11k-btn').classList.toggle('active', is11k);
+
+        const speakerLabel = document.getElementById('speaker-status-label');
+        const speakerBtn = document.getElementById('speaker-pair-btn');
+        if (spotify.audio.paired && spotify.audio.running) {
+          speakerLabel.textContent = `● Speaker Active: "${spotify.audio.deviceName}"`;
+          speakerBtn.textContent = 'Re-Pair Speaker';
+          speakerBtn.classList.remove('primary');
+        } else {
+          speakerLabel.textContent = '○ Speaker not paired with Spotify Connect yet';
+          speakerBtn.textContent = 'Activate "Macintosh 68k" Speaker';
+          speakerBtn.classList.add('primary');
+        }
+      }
+
       loginBtn.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
 
       // 1. Service Error State -> Show Sad Mac on platform header + Error details in Spotify Card
@@ -490,6 +586,7 @@
         actionArea.classList.remove('hidden');
         loginBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
         retryBtn.classList.remove('hidden');
+        audioPanel.classList.add('hidden');
         connectedFooter.classList.add('hidden');
         if (!editingConfig) configForm.classList.add('hidden');
         return;
@@ -506,12 +603,14 @@
         statusBox.textContent = 'Spotify service is running OK';
         configForm.classList.add('hidden');
         actionArea.classList.add('hidden');
+        audioPanel.classList.remove('hidden');
         connectedFooter.classList.remove('hidden');
         userLabel.textContent = spotify.user ? `Account: ${spotify.user}` : 'Account connected';
         return;
       }
 
       statusBox.classList.remove('running-ok');
+      audioPanel.classList.add('hidden');
       connectedFooter.classList.add('hidden');
 
       // 3. Awaiting Client ID Setup

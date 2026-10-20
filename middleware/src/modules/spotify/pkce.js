@@ -4,8 +4,9 @@ const SPOTIFY_AUTH_URL = 'https://accounts.spotify.com/authorize';
 const SPOTIFY_TOKEN_URL = 'https://accounts.spotify.com/api/token';
 const SPOTIFY_API_BASE = 'https://api.spotify.com/v1';
 
-// Scopes required for full Spotify Connect remote control, library, playlists, and playback state
+// Scopes required for full Spotify Connect remote control, library, playlists, playback state, and streaming
 const SPOTIFY_SCOPES = [
+  'streaming',
   'user-read-playback-state',
   'user-modify-playback-state',
   'user-read-currently-playing',

@@ -172,7 +172,21 @@ async function runTests() {
     assert.strictEqual(afterRefreshStore.refreshToken, 'mock_refresh_token_rotated');
     console.log('[PASS] Automatic token refresh & rotation verified');
 
-    // 8. Test Error State / Sad Mac trigger on network or OAuth error
+    // 8. Test Audio Stream Config (22k / 11k toggle)
+    const audioDefault = await httpRequest('GET', '/api/spotify/audio-config');
+    assert.strictEqual(audioDefault.statusCode, 200);
+    assert.ok(audioDefault.body.includes('|22k|22255|6802|Macintosh 68k'));
+
+    const audio11k = await httpRequest('POST', '/api/spotify/audio-config?rate=11k');
+    assert.strictEqual(audio11k.statusCode, 200);
+    assert.ok(audio11k.body.startsWith('OK|AUDIO_RATE|11k|11127|6802'));
+
+    const audio22k = await httpRequest('POST', '/api/spotify/audio-config', { rate: '22k' });
+    assert.strictEqual(audio22k.statusCode, 200);
+    assert.ok(audio22k.body.startsWith('OK|AUDIO_RATE|22k|22255|6802'));
+    console.log('[PASS] 68k Audio Stream 22 kHz / 11 kHz configuration toggle verified');
+
+    // 9. Test Error State / Sad Mac trigger on network or OAuth error
     spotifyModule.setFetchImpl(async () => {
       const err = new Error('fetch failed');
       err.cause = { code: 'ENOTFOUND' };
