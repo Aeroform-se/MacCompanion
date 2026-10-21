@@ -19,10 +19,19 @@ Thumbs.db
 *.swo
 *~
 
-# Local Project Planning, Design & Private Testing Tools
+# Local Project Planning, Design, SDKs & Private Testing Tools
 plan/
 ui/
+rescources/
+resources/
+emulator/
+toolchain/
 *.psd
+*.rom
+*.ROM
+*.hfv
+*.dsk
+*.img
 middleware/src/public/test.html
 middleware/scripts/
 
