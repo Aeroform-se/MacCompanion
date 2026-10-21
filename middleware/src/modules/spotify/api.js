@@ -26,11 +26,16 @@ async function spotifyFetch(endpoint, { method = 'GET', accessToken, body, query
     payload = JSON.stringify(body);
   }
 
-  const res = await fetchImpl(url, {
+  const fetchOpts = {
     method,
     headers,
     body: payload,
-  });
+  };
+  if (fetchImpl === fetch && typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+    fetchOpts.signal = AbortSignal.timeout(8000);
+  }
+
+  const res = await fetchImpl(url, fetchOpts);
 
   if (res.status === 204) {
     return null;

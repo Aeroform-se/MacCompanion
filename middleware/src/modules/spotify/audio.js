@@ -90,44 +90,60 @@ function createWavHeader(sampleRate = 22255) {
 }
 
 /**
- * Hardware-clock emulator for `librespot --backend pipe`.
- * Because `librespot`'s pipe backend writes decoded S16LE 44.1kHz stereo PCM
- * (`176,400 bytes/sec`) to stdout as fast as the pipe accepts bytes with no sleep,
- * an unthrottled pipe causes `librespot` to decode an entire 3-minute song in ~2 seconds
- * and spam Spotify's `audio_key` server until rate-limited.
+ * 1.000x hardware-clock emulator for `librespot --backend pipe` with strict 4-byte
+ * stereo frame alignment.
  *
- * `RealTimePacer` enforces strict 1.000x wall-clock backpressure on `librespot.stdout`.
+ * Ensures `librespot` decodes at exact real-time speed (`176,400 bytes/sec`) while
+ * guaranteeing that every slice fed into `ffmpeg` is an exact multiple of 4 bytes
+ * (`[L_lo, L_hi, R_lo, R_hi]`), preventing byte-misalignment static bursts.
  */
-const LIBRESPOT_BYTES_PER_SEC = 44100 * 2 * 2; // 176,400 bytes/sec
-const FRAME_BYTES = 4410; // 25ms frame of S16LE 44.1kHz stereo
+const INPUT_SAMPLE_RATE = 44100;
+const LIBRESPOT_BYTES_PER_SEC = INPUT_SAMPLE_RATE * 2 * 2; // 176,400 bytes/sec
+const FRAME_BYTES = 3528; // Exact 20ms frame (882 stereo samples * 4 bytes)
 
 class RealTimePacer extends Transform {
   constructor() {
-    super({ highWaterMark: 16384 });
+    super({ highWaterMark: 7056 });
     this.nextFrameTimeMs = 0;
     this.timer = null;
     this.stopped = false;
+    this.alignRemainder = Buffer.alloc(0);
   }
 
   _transform(chunk, encoding, callback) {
     if (this.stopped) return callback();
 
+    const combined = this.alignRemainder.length > 0
+      ? Buffer.concat([this.alignRemainder, chunk])
+      : chunk;
+
+    const alignedLen = combined.length - (combined.length % 4);
+    if (alignedLen < combined.length) {
+      this.alignRemainder = combined.subarray(alignedLen);
+    } else {
+      this.alignRemainder = Buffer.alloc(0);
+    }
+
+    if (alignedLen === 0) {
+      return callback();
+    }
+
     let offset = 0;
     const pumpNextFrame = () => {
-      if (this.stopped || offset >= chunk.length) {
+      if (this.stopped || offset >= alignedLen) {
         this.timer = null;
         return callback();
       }
 
-      const end = Math.min(offset + FRAME_BYTES, chunk.length);
-      const slice = chunk.subarray(offset, end);
+      const end = Math.min(offset + FRAME_BYTES, alignedLen);
+      const slice = combined.subarray(offset, end);
       offset = end;
 
       const durationMs = (slice.length / LIBRESPOT_BYTES_PER_SEC) * 1000;
       const now = performance.now();
 
-      // If starting fresh or resuming after a pause (> 250ms gap), reset clock
-      if (now - this.nextFrameTimeMs > 250) {
+      // If starting fresh or resuming after a pause (> 200ms gap), reset clock
+      if (now - this.nextFrameTimeMs > 200) {
         this.nextFrameTimeMs = now;
       }
 
@@ -168,6 +184,7 @@ class AudioStreamEngine extends EventEmitter {
     this.getFetchImpl = getFetchImpl || (() => global.fetch);
     this.librespotProc = null;
     this.ffmpegProc = null;
+    this.pacer = null;
     this.tcpServer = null;
     this.tcpClients = new Set();
     this.httpClients = new Set();
@@ -251,7 +268,6 @@ class AudioStreamEngine extends EventEmitter {
       fetchImpl: this.getFetchImpl(),
     });
 
-    // Clear any stale/poisoned credentials.json before starting with the new token
     this.clearCachedCredentials();
 
     this.store.save({
@@ -307,7 +323,87 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   /**
-   * Starts or restarts the `librespot` -> `ffmpeg` audio pipeline if binaries are available.
+   * Spawns (or hot-restarts) the low-latency FFmpeg resampler with triangular dithering
+   * without restarting `librespot`.
+   */
+  spawnFfmpegTranscoder(hz) {
+    if (this.ffmpegProc) {
+      if (this.pacer && this.ffmpegProc.stdin) {
+        try {
+          this.pacer.unpipe(this.ffmpegProc.stdin);
+        } catch {}
+      }
+      try {
+        this.ffmpegProc.kill('SIGTERM');
+      } catch {}
+      this.ffmpegProc = null;
+    }
+
+    this.currentRateHz = hz;
+
+    const ffmpegArgs = [
+      '-hide_banner',
+      '-loglevel', 'error',
+      '-probesize', '32',
+      '-analyzeduration', '0',
+      '-fflags', 'nobuffer',
+      '-flags', 'low_delay',
+      '-f', 's16le',
+      '-ar', '44100',
+      '-ac', '2',
+      '-i', 'pipe:0',
+      '-af', `aresample=osr=${hz}:dither_method=triangular`,
+      '-f', 'u8',
+      '-acodec', 'pcm_u8',
+      '-ac', '1',
+      '-ar', String(hz),
+      '-avioflags', 'direct',
+      '-flush_packets', '1',
+      'pipe:1',
+    ];
+
+    const proc = spawn('ffmpeg', ffmpegArgs, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.ffmpegProc = proc;
+
+    proc.stdin.on('error', () => {});
+
+    proc.stdout.on('data', (u8Chunk) => {
+      this.bytesBroadcast += u8Chunk.length;
+      if (this.state !== 'PLAYING') {
+        this.state = 'PLAYING';
+      }
+      for (const sock of this.tcpClients) {
+        if (!sock.destroyed && sock.writable) {
+          sock.write(u8Chunk);
+        }
+      }
+      for (const res of this.httpClients) {
+        if (!res.writableEnded) {
+          res.write(u8Chunk);
+        }
+      }
+    });
+
+    proc.stderr.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (msg) console.warn('[AudioEngine:ffmpeg]', msg);
+    });
+
+    proc.on('exit', () => {
+      if (this.ffmpegProc === proc) {
+        this.ffmpegProc = null;
+      }
+    });
+
+    if (this.pacer) {
+      this.pacer.pipe(proc.stdin);
+    }
+  }
+
+  /**
+   * Starts or restarts the `librespot` -> `RealTimePacer` -> `ffmpeg` pipeline.
    */
   async ensureStarted({ forceRestart = false } = {}) {
     if (!this.hasBinaries) {
@@ -317,7 +413,6 @@ class AudioStreamEngine extends EventEmitter {
 
     const { hz } = this.getSampleRateConfig();
 
-    // Check if we have a valid librespot speaker token
     let speakerToken = null;
     try {
       speakerToken = await this.getValidLibrespotToken();
@@ -326,19 +421,21 @@ class AudioStreamEngine extends EventEmitter {
     }
 
     if (!speakerToken) {
-      // Remove any poisoned credentials.json created from non-librespot client IDs
       this.clearCachedCredentials();
       this.stopProcesses();
       this.state = 'AWAITING_SPEAKER_AUTH';
       return false;
     }
 
-    if (!forceRestart && this.librespotProc && this.ffmpegProc && this.currentRateHz === hz) {
+    if (!forceRestart && this.librespotProc && this.pacer) {
+      if (!this.ffmpegProc || this.currentRateHz !== hz) {
+        console.log(`[AudioEngine] Switching FFmpeg transcoder to ${hz} Hz`);
+        this.spawnFfmpegTranscoder(hz);
+      }
       return true;
     }
 
     this.stopProcesses();
-    this.currentRateHz = hz;
     this.state = 'STARTING';
 
     const cacheDir = path.join(DATA_DIR, 'librespot');
@@ -346,54 +443,6 @@ class AudioStreamEngine extends EventEmitter {
       fs.mkdirSync(cacheDir, { recursive: true });
     }
 
-    // 1. Spawn FFmpeg reading s16le 44.1kHz stereo from stdin and outputting u8 mono at 22255 or 11127 Hz
-    const ffmpegArgs = [
-      '-hide_banner',
-      '-loglevel', 'error',
-      '-fflags', 'nobuffer',
-      '-flags', 'low_delay',
-      '-f', 's16le',
-      '-ar', '44100',
-      '-ac', '2',
-      '-i', 'pipe:0',
-      '-f', 'u8',
-      '-acodec', 'pcm_u8',
-      '-ac', '1',
-      '-ar', String(hz),
-      'pipe:1',
-    ];
-
-    this.ffmpegProc = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    this.ffmpegProc.stdout.on('data', (chunk) => {
-      this.bytesBroadcast += chunk.length;
-      if (this.state !== 'PLAYING') {
-        this.state = 'PLAYING';
-      }
-      for (const sock of this.tcpClients) {
-        if (!sock.destroyed && sock.writable) {
-          sock.write(chunk);
-        }
-      }
-      for (const res of this.httpClients) {
-        if (!res.writableEnded) {
-          res.write(chunk);
-        }
-      }
-    });
-
-    this.ffmpegProc.stderr.on('data', (data) => {
-      const msg = data.toString().trim();
-      if (msg) console.warn('[AudioEngine:ffmpeg]', msg);
-    });
-
-    this.ffmpegProc.on('exit', () => {
-      this.ffmpegProc = null;
-    });
-
-    // 2. Spawn librespot with the official librespot OAuth token
     const librespotArgs = [
       '--name', DEVICE_NAME,
       '--device-type', 'computer',
@@ -402,22 +451,23 @@ class AudioStreamEngine extends EventEmitter {
       '--format', 'S16',
       '--system-cache', cacheDir,
       '--disable-audio-cache',
-      '--initial-volume', '80',
+      '--initial-volume', '85',
       '--access-token', speakerToken,
     ];
 
-    console.log(`[AudioEngine] Starting librespot ("${DEVICE_NAME}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
-    this.librespotProc = spawn('librespot', librespotArgs, {
+    console.log(`[AudioEngine] Starting librespot ("${DEVICE_NAME}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz, triangular dither, direct flush)`);
+    const lsProc = spawn('librespot', librespotArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    this.librespotProc = lsProc;
 
-    // Pipe librespot stdout through RealTimePacer (176,400 B/s backpressure) into FFmpeg stdin
     this.pacer = new RealTimePacer();
     this.pacer.on('error', () => {});
-    this.ffmpegProc.stdin.on('error', () => {});
-    this.librespotProc.stdout.pipe(this.pacer).pipe(this.ffmpegProc.stdin);
+    lsProc.stdout.pipe(this.pacer);
 
-    this.librespotProc.stderr.on('data', (data) => {
+    this.spawnFfmpegTranscoder(hz);
+
+    lsProc.stderr.on('data', (data) => {
       const line = data.toString().trim();
       if (line.includes('Authenticated as') || line.includes('Country:')) {
         this.state = 'READY';
@@ -432,13 +482,20 @@ class AudioStreamEngine extends EventEmitter {
       }
     });
 
-    this.librespotProc.on('exit', (code) => {
+    lsProc.on('exit', (code) => {
       console.log(`[AudioEngine] librespot exited with code ${code}`);
-      this.librespotProc = null;
-      if (code !== 0 && this.lastError) {
-        this.state = 'AWAITING_SPEAKER_AUTH';
-      } else if (this.state !== 'STOPPED') {
-        this.state = 'READY';
+      if (this.librespotProc === lsProc) {
+        this.librespotProc = null;
+        if (code !== 0 && this.lastError) {
+          this.state = 'AWAITING_SPEAKER_AUTH';
+        } else if (this.state !== 'STOPPED') {
+          // Auto-restart librespot if it exited unexpectedly
+          setTimeout(() => {
+            if (this.state !== 'STOPPED') {
+              this.ensureStarted({ forceRestart: true }).catch(() => {});
+            }
+          }, 1500);
+        }
       }
     });
 
@@ -447,12 +504,17 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   /**
-   * Changes the active sample rate ('22k' or '11k') and hot-restarts the transcoder.
+   * Changes the active sample rate ('22k' or '11k') and hot-swaps FFmpeg without restarting librespot.
    */
   async setSampleRate(rateMode) {
     const normalized = String(rateMode).toLowerCase().startsWith('11') ? '11k' : '22k';
     this.store.save({ audioSampleRate: normalized });
-    await this.ensureStarted({ forceRestart: true });
+    const hz = resolveSampleRateHz(normalized);
+    if (this.librespotProc && this.pacer) {
+      this.spawnFfmpegTranscoder(hz);
+    } else {
+      await this.ensureStarted();
+    }
     return this.getStatus();
   }
 
@@ -501,6 +563,10 @@ class AudioStreamEngine extends EventEmitter {
     res.setHeader('X-Audio-Bits', '8');
     res.setHeader('X-Audio-Channels', '1');
 
+    if (res.socket && res.socket.setNoDelay) {
+      res.socket.setNoDelay(true);
+    }
+
     if (format === 'wav') {
       res.setHeader('Content-Type', 'audio/wav');
       res.write(createWavHeader(hz));
@@ -521,17 +587,17 @@ class AudioStreamEngine extends EventEmitter {
       } catch {}
       this.pacer = null;
     }
-    if (this.librespotProc) {
-      try {
-        this.librespotProc.kill('SIGTERM');
-      } catch {}
-      this.librespotProc = null;
-    }
     if (this.ffmpegProc) {
       try {
         this.ffmpegProc.kill('SIGTERM');
       } catch {}
       this.ffmpegProc = null;
+    }
+    if (this.librespotProc) {
+      try {
+        this.librespotProc.kill('SIGTERM');
+      } catch {}
+      this.librespotProc = null;
     }
   }
 

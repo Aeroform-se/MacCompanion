@@ -133,6 +133,43 @@ async function callSpotify(endpoint, options = {}) {
 }
 
 /**
+ * Resilient wrapper for `/me/player/*` transport commands.
+ * When switching between the Spotify Desktop app and the "Macintosh 68k" speaker,
+ * Spotify's Web API can briefly report no active device (HTTP 404).
+ * This helper automatically resolves an available target device and retries once.
+ */
+async function callPlayerCommand(endpoint, options = {}) {
+  try {
+    return await callSpotify(endpoint, options);
+  } catch (err) {
+    if ((err.status === 404 || err.status === 502 || err.status === 504) && !(options.query && options.query.device_id)) {
+      try {
+        const devData = await callSpotify('/me/player/devices');
+        const devices = (devData && Array.isArray(devData.devices)) ? devData.devices : [];
+        const target =
+          devices.find((d) => d.is_active && d.id) ||
+          devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k') && d.id) ||
+          devices.find((d) => d.id);
+        if (target && target.id) {
+          // If no device was active and this isn't `/me/player/play`, wake the device first
+          if (!target.is_active && endpoint !== '/me/player/play') {
+            await callSpotify('/me/player', {
+              method: 'PUT',
+              body: { device_ids: [target.id] },
+            }).catch(() => {});
+          }
+          return await callSpotify(endpoint, {
+            ...options,
+            query: { ...(options.query || {}), device_id: target.id },
+          });
+        }
+      } catch {}
+    }
+    throw err;
+  }
+}
+
+/**
  * Normalizes a Spotify resource identifier into both a clean ID and a full URI.
  * Example: normalizeSpotifyUri('2A7GGXmTlXuH9LOvBXgOX4', 'track')
  *   -> { id: '2A7GGXmTlXuH9LOvBXgOX4', uri: 'spotify:track:2A7GGXmTlXuH9LOvBXgOX4' }
@@ -723,7 +760,7 @@ router.all('/play', async (req, res) => {
       body.position_ms = parseInt(positionMs, 10);
     }
 
-    await callSpotify('/me/player/play', {
+    await callPlayerCommand('/me/player/play', {
       method: 'PUT',
       query: deviceId ? { device_id: deviceId } : undefined,
       body,
@@ -738,7 +775,7 @@ router.all('/play', async (req, res) => {
 
 router.all('/pause', async (req, res) => {
   try {
-    await callSpotify('/me/player/pause', { method: 'PUT' });
+    await callPlayerCommand('/me/player/pause', { method: 'PUT' });
     const pipe = 'OK|PAUSE\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -752,10 +789,10 @@ router.all('/toggle-play', async (req, res) => {
     const raw = await callSpotify('/me/player');
     const isPlaying = Boolean(raw && raw.is_playing);
     if (isPlaying) {
-      await callSpotify('/me/player/pause', { method: 'PUT' });
+      await callPlayerCommand('/me/player/pause', { method: 'PUT' });
       return sendPipeResponse(req, res, 'OK|PAUSE\n');
     } else {
-      await callSpotify('/me/player/play', { method: 'PUT' });
+      await callPlayerCommand('/me/player/play', { method: 'PUT' });
       return sendPipeResponse(req, res, 'OK|PLAY\n');
     }
   } catch (err) {
@@ -765,7 +802,7 @@ router.all('/toggle-play', async (req, res) => {
 
 router.all('/next', async (req, res) => {
   try {
-    await callSpotify('/me/player/next', { method: 'POST' });
+    await callPlayerCommand('/me/player/next', { method: 'POST' });
     const pipe = 'OK|NEXT\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -776,7 +813,7 @@ router.all('/next', async (req, res) => {
 
 router.all('/previous', async (req, res) => {
   try {
-    await callSpotify('/me/player/previous', { method: 'POST' });
+    await callPlayerCommand('/me/player/previous', { method: 'POST' });
     const pipe = 'OK|PREVIOUS\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -796,7 +833,7 @@ router.all('/volume', async (req, res) => {
     } else {
       vol = Math.max(0, Math.min(100, parseInt(req.query.volume_percent ?? (req.body && req.body.volume_percent) ?? '50', 10)));
     }
-    await callSpotify('/me/player/volume', {
+    await callPlayerCommand('/me/player/volume', {
       method: 'PUT',
       query: { volume_percent: vol },
     });
@@ -1215,18 +1252,47 @@ router.get('/devices', async (req, res) => {
 
 router.all('/transfer', async (req, res) => {
   try {
-    const deviceId = req.query.device_id || (req.body && req.body.device_id);
+    let deviceId = req.query.device_id || (req.body && req.body.device_id);
+    const target = (req.query.target || (req.body && req.body.target) || '').toLowerCase();
+    let deviceName = '';
+
+    if (target === '68k' || target === 'macintosh' || deviceId === '68k') {
+      await audioEngine.ensureStarted();
+      const data = await callSpotify('/me/player/devices');
+      const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
+      const found = devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k'));
+      if (!found) {
+        const err = new Error('"Macintosh 68k" speaker not visible in Spotify yet. Wait 2 seconds and try again.');
+        err.status = 404;
+        throw err;
+      }
+      deviceId = found.id;
+      deviceName = found.name;
+    } else if (target === 'desktop' || target === 'other' || deviceId === 'desktop') {
+      const data = await callSpotify('/me/player/devices');
+      const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
+      const found = devices.find((d) => d.name && !d.name.toLowerCase().includes('macintosh 68k'));
+      if (!found) {
+        const err = new Error('No other Spotify device (Desktop/Phone) is currently open.');
+        err.status = 404;
+        throw err;
+      }
+      deviceId = found.id;
+      deviceName = found.name;
+    }
+
     if (!deviceId) {
       const err = new Error('Missing device_id');
       err.status = 400;
       throw err;
     }
+
     await callSpotify('/me/player', {
       method: 'PUT',
       body: { device_ids: [deviceId], play: true },
     });
-    const pipe = `OK|TRANSFER|${deviceId}\n`;
-    if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
+    const pipe = formatPipeRow(['OK', 'TRANSFER', deviceId, deviceName || deviceId]) + '\n';
+    if (req.query.format === 'json') return res.json({ ok: true, deviceId, deviceName, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
   } catch (err) {
     return handleRouteError(req, res, err);
