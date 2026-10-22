@@ -169,8 +169,8 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
         if (pumpAudioWhileWaiting && gAudioRunning) {
             AudioStreamPump();
         }
-        /* Safety timeout (10 seconds) */
-        if ((TickCount() - startTicks) > 600) {
+        /* Safety timeout (8 seconds) */
+        if ((TickCount() - startTicks) > 480) {
             break;
         }
     }
@@ -255,7 +255,6 @@ Boolean NetDiscoverServer(void)
         PBControlSync((ParmBlkPtr)&pb);
 
         if (strncmp(reply, "MACCOMPANION_SERVER|", 20) == 0) {
-            /* Parse port from MACCOMPANION_SERVER|<ip>|<port>|... */
             char *p1 = strchr(reply + 20, '|');
             unsigned short port = DEFAULT_HTTP_PORT;
             if (p1) {
@@ -264,8 +263,6 @@ Boolean NetDiscoverServer(void)
                     port = (unsigned short)parsedPort;
                 }
             }
-            /* Use the actual IP source address from the UDP header (`responderIP`),
-             * which is always routable from the Mac (both on LAN and inside Basilisk II slirp!). */
             if (responderIP != 0) {
                 NetSetServer(responderIP, port);
                 found = true;
@@ -283,6 +280,26 @@ Boolean NetDiscoverServer(void)
     return found;
 }
 
+/*
+ * Case-insensitive search for "Content-Length:" inside HTTP headers
+ */
+static long ParseContentLength(const char *headers, long headerLen)
+{
+    long i;
+    for (i = 0; i <= headerLen - 15; i++) {
+        if ((headers[i] == 'C' || headers[i] == 'c') &&
+            (headers[i+1] == 'o' || headers[i+1] == 'O') &&
+            (headers[i+7] == '-') &&
+            (headers[i+8] == 'L' || headers[i+8] == 'l') &&
+            (headers[i+14] == ':')) {
+            const char *p = headers + i + 15;
+            while (*p == ' ') p++;
+            return atol(p);
+        }
+    }
+    return -1;
+}
+
 long NetHttpGet(const char *path, char *outBody, long maxLen)
 {
     TCPiopb pb;
@@ -292,6 +309,7 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     char reqBuf[512];
     long totalRead = 0;
     long bodyLen = -1;
+    long expectedBodyLen = -1;
     Boolean headerStripped = false;
     OSErr err;
 
@@ -318,10 +336,10 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     memset(&pb, 0, sizeof(pb));
     pb.csCode                           = TCPActiveOpen;
     pb.tcpStream                        = stream;
-    pb.csParam.open.ulpTimeoutValue     = 6;
+    pb.csParam.open.ulpTimeoutValue     = 4;
     pb.csParam.open.ulpTimeoutAction    = 1;
     pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
-    pb.csParam.open.commandTimeoutValue = 6;
+    pb.csParam.open.commandTimeoutValue = 4;
     pb.csParam.open.remoteHost          = gServerIP;
     pb.csParam.open.remotePort          = gServerHttpPort;
     pb.csParam.open.localPort           = 0;
@@ -350,15 +368,19 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
         goto close_conn;
     }
 
-    /* Read response until EOF / connection closing */
+    /* Read response until Content-Length is satisfied or EOF */
     while (totalRead < (maxLen - 1)) {
         long spaceLeft = (maxLen - 1) - totalRead;
         unsigned short chunkAsk = (spaceLeft > 4096) ? 4096 : (unsigned short)spaceLeft;
 
+        if (headerStripped && expectedBodyLen >= 0 && totalRead >= expectedBodyLen) {
+            break;
+        }
+
         memset(&pb, 0, sizeof(pb));
         pb.csCode                              = TCPRcv;
         pb.tcpStream                           = stream;
-        pb.csParam.receive.commandTimeoutValue = 6;
+        pb.csParam.receive.commandTimeoutValue = 4;
         pb.csParam.receive.rcvBuff             = outBody + totalRead;
         pb.csParam.receive.rcvBuffLen          = chunkAsk;
 
@@ -373,7 +395,9 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
                     if (outBody[k] == '\r' && outBody[k+1] == '\n' &&
                         outBody[k+2] == '\r' && outBody[k+3] == '\n') {
                         long headerBytes = k + 4;
-                        long rem = totalRead - headerBytes;
+                        long rem;
+                        expectedBodyLen = ParseContentLength(outBody, headerBytes);
+                        rem = totalRead - headerBytes;
                         if (rem > 0) {
                             memmove(outBody, outBody + headerBytes, rem);
                         }
@@ -382,6 +406,10 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
                         break;
                     }
                 }
+            }
+
+            if (headerStripped && expectedBodyLen >= 0 && totalRead >= expectedBodyLen) {
+                break;
             }
         } else {
             break;
@@ -392,8 +420,9 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     bodyLen = totalRead;
 
 close_conn:
+    /* Immediate TCPAbort + TCPRelease avoids waiting several seconds on FIN timeout */
     memset(&pb, 0, sizeof(pb));
-    pb.csCode    = TCPClose;
+    pb.csCode    = TCPAbort;
     pb.tcpStream = stream;
     RunTCPControl(&pb, true);
 
@@ -496,7 +525,6 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     if (!NetInit() || gServerIP == 0) return false;
     if (sampleRateHz > 0) gAudioSampleRateHz = sampleRateHz;
 
-    /* Allocate Sound Channel */
     gSndChan = NULL;
     if (SndNewChannel(&gSndChan, sampledSynth, initMono, gSndCallBackUPP) != noErr || !gSndChan) {
         gSndChan = NULL;
@@ -613,7 +641,6 @@ void AudioStreamPump(void)
             break;
         }
 
-        /* Query unread bytes on the TCP audio stream so we never block */
         memset(&pb, 0, sizeof(pb));
         pb.ioCRefNum = gMacTCPRef;
         pb.csCode    = TCPStatus;
@@ -645,7 +672,6 @@ void AudioStreamPump(void)
             break;
         }
 
-        /* Once we have at least 4096 bytes (or full chunk), queue to Sound Manager */
         if (gPcmFilled[idx] >= 4096) {
             QueueSoundBuffer(idx);
             gNextFillBuf = (idx + 1) % NUM_AUDIO_BUFFERS;

@@ -1,5 +1,6 @@
 /*
- * MacCompanion Spotify — Native 68k Macintosh Client
+ * MaciSpot — Native 68k Macintosh Spotify Client
+ * Version 0.2 Beta ("Cocktail Hour")
  * Compiled with Retro68 + Apple Universal Interfaces 3.4.2
  *
  * UI Design: 512 x 322 flush canvas below the 20px Mac OS menu bar
@@ -54,11 +55,33 @@
 
 #define MAX_LEFT_ITEMS      48
 #define MAX_RIGHT_ITEMS     64
-#define MAX_DEVICES         12
+#define MAX_SEARCH_ITEMS    48
+#define MAX_DEVICES         10
 #define VISIBLE_ROWS        16
 #define ROW_HEIGHT          13
 #define LIST_TOP_Y          35
 #define LIST_BOTTOM_Y       243
+
+#define SEARCH_VISIBLE_ROWS 6
+#define SEARCH_ROW_H        40
+#define SEARCH_TOP_Y        34
+
+/* Pre-connection Server Screen states (Server1.png, Server2.png, Server3.png) */
+#define CONN_SEARCHING      1
+#define CONN_FAILED         2
+#define CONN_FOUND          3
+#define CONN_READY          4
+
+/* Hover / Pressed button identifiers (button-states.png) */
+#define BTN_NONE            0
+#define BTN_SHUFFLE         1
+#define BTN_PREV            2
+#define BTN_PLAY            3
+#define BTN_NEXT            4
+#define BTN_REPEAT          5
+#define BTN_SPEAKER         6
+#define BTN_TIMELINE        7
+#define BTN_VOLUME          8
 
 /* ============================================================================
  * Data Structures
@@ -72,13 +95,21 @@ typedef struct {
 } LeftItem;
 
 typedef struct {
-    char kind[16]; /* "TRACK" or "ALBUM" */
+    char kind[16]; /* "TRACK", "ALBUM", "PLAYLIST" */
     char id[64];
     char name[64];
     char artist[64];
     char durationMmSs[12];
     char uri[96];
 } RightItem;
+
+typedef struct {
+    char kind[16];     /* "TRACK", "ALBUM", "PLAYLIST" */
+    char id[64];
+    char title[64];
+    char subtitle[64]; /* Artist or Owner */
+    char uri[96];
+} SearchItem;
 
 typedef struct {
     char    id[64];
@@ -115,24 +146,36 @@ static Ptr             gOffscreenBits     = NULL;
 static Boolean         gOffscreenReady    = false;
 
 static Boolean         gRunning           = true;
+static short           gConnState         = CONN_SEARCHING;
+static unsigned long   gFoundStartTicks   = 0;
+static short           gFoundCountdownSec = 3;
+static Boolean         gInitialDataLoaded = false;
+
 static Boolean         gHomeMode          = false; /* false = Playlists (note icon), true = Home (home icon) */
 
 /* Search state */
 static Boolean         gSearchFocused     = false;
+static Boolean         gSearchViewOpen    = false;
 static char            gSearchQuery[48]   = "";
+static SearchItem      gSearchItems[MAX_SEARCH_ITEMS];
+static short           gSearchCount       = 0;
+static short           gSearchScroll      = 0;
+static short           gSearchHoverRow    = -1;
 
 /* Speaker Chooser Popover state */
 static Boolean         gSpeakerPopupOpen  = false;
 static DeviceItem      gDevices[MAX_DEVICES];
 static short           gDeviceCount       = 0;
 
-/* Manual Server IP Modal state */
-static Boolean         gIpModalOpen       = false;
+/* Server IP Input state */
 static char            gIpInput[32]       = "10.0.2.2";
-static char            gIpModalStatus[64] = "UDP discovery timed out. Enter Server IP:";
 
 /* About Box Modal state */
 static Boolean         gAboutModalOpen    = false;
+
+/* Button Hover & Pressed states */
+static short           gHoverBtn          = BTN_NONE;
+static short           gPressedBtn        = BTN_NONE;
 
 /* Left & Right List state */
 static LeftItem        gLeftItems[MAX_LEFT_ITEMS];
@@ -148,11 +191,14 @@ static char            gActiveContextUri[96] = "";
 static char            gRightHeaderLabel[24] = "Tracks";
 
 /* Double-click detection */
-static unsigned long   gLastClickTicks    = 0;
-static short           gLastClickedRow    = -1;
+static unsigned long   gLastClickTicks     = 0;
+static short           gLastClickedRow     = -1;
+static unsigned long   gLastLeftClickTicks = 0;
+static short           gLastLeftClickedRow = -1;
 
 /* Now Playing & Artwork state */
 static NowPlayingState gNowPlaying;
+static Boolean         gTimelineFrozen    = false;
 static char            gLoadedArtTrackId[64] = "";
 static unsigned char   gCurrentArtworkBits[5200];
 static unsigned short  gAudioSampleRateHz = 22255;
@@ -164,6 +210,10 @@ static unsigned long   gLastSecondTicks   = 0;
 /* Shared scratch buffer for HTTP responses */
 #define HTTP_BUF_SIZE  16384
 static char           *gHttpBuf           = NULL;
+
+/* Forward declarations */
+static void RenderCanvas(void);
+static void ConnectAndLoadAll(void);
 
 /* ============================================================================
  * String & Pipe Parsing Utilities
@@ -178,7 +228,6 @@ static void SafeCopy(char *dst, const char *src, short maxLen)
         return;
     }
     while (src[i] != '\0' && i < (maxLen - 1)) {
-        /* Sanitize UTF-8 smart quotes/dashes to ASCII for Monaco 9 */
         unsigned char c = (unsigned char)src[i];
         if (c >= 0x80) {
             dst[i] = '-';
@@ -212,12 +261,11 @@ static void GetPipeField(const char *line, short fieldIndex, char *outBuf, short
         }
         if (curField == fieldIndex && outIdx < (maxOut - 1)) {
             unsigned char c = (unsigned char)*p;
-            /* Skip continuation bytes of multi-byte UTF-8 and map common Latin-1 */
             if (c < 0x80) {
                 outBuf[outIdx++] = (char)c;
             } else if ((c & 0xE0) == 0xC0 && ((unsigned char)p[1] & 0xC0) == 0x80) {
                 unsigned int cp = ((c & 0x1F) << 6) | (p[1] & 0x3F);
-                /* Map Swedish åäöÅÄÖé to MacRoman for authentic display! */
+                /* Map Swedish åäöÅÄÖé to MacRoman for authentic display */
                 if (cp == 0xE5) outBuf[outIdx++] = (char)0x8C;      /* å */
                 else if (cp == 0xE4) outBuf[outIdx++] = (char)0x8A; /* ä */
                 else if (cp == 0xF6) outBuf[outIdx++] = (char)0x9A; /* ö */
@@ -225,7 +273,7 @@ static void GetPipeField(const char *line, short fieldIndex, char *outBuf, short
                 else if (cp == 0xC4) outBuf[outIdx++] = (char)0x80; /* Ä */
                 else if (cp == 0xD6) outBuf[outIdx++] = (char)0x85; /* Ö */
                 else if (cp == 0xE9) outBuf[outIdx++] = (char)0x8E; /* é */
-                else outBuf[outIdx++] = '?';
+                else outBuf[outIdx++] = '-';
                 p++;
             }
         }
@@ -234,6 +282,7 @@ static void GetPipeField(const char *line, short fieldIndex, char *outBuf, short
     outBuf[outIdx] = '\0';
 }
 
+/* Always includes leading zero on both minutes and seconds (e.g. 02:00, never 2:00) */
 static void FormatMmSs(long ms, char *outBuf)
 {
     long totalSec;
@@ -304,7 +353,7 @@ static void DrawCStringTruncated(const char *str, short maxChars)
     }
 }
 
-/* Draws a 1px vertical dotted line (matching the PSD's 50% alternating pixel lines) */
+/* Draws a 1px vertical dotted line */
 static void DrawVerticalDottedLine(short x, short yTop, short yBottom, Boolean whiteDots)
 {
     short y;
@@ -317,20 +366,208 @@ static void DrawVerticalDottedLine(short x, short yTop, short yBottom, Boolean w
     PenNormal();
 }
 
-/* Draws the 9x9 circular slider thumb dot centered at (cx, cy) */
-static void DrawSliderDot(short cx, short cy)
+/* Draws a 1px horizontal dotted line */
+static void DrawHorizontalDottedLine(short xLeft, short xRight, short y, Boolean whiteDots)
+{
+    short x;
+    PenNormal();
+    PenMode(whiteDots ? patBic : patCopy);
+    for (x = xLeft; x <= xRight; x += 2) {
+        MoveTo(x, y);
+        LineTo(x, y);
+    }
+    PenNormal();
+}
+
+/*
+ * Draws the 9x9 circular slider thumb dot centered at (cx, cy).
+ * Matches `button-states.png`:
+ * - Normal (`hollow == false`): Solid black 9x9 circle.
+ * - Hover/Active (`hollow == true`): 2px black ring with white center.
+ */
+static void DrawSliderDot(short cx, short cy, Boolean hollow)
 {
     Rect r;
     SetRect(&r, cx - 4, cy - 4, cx + 5, cy + 5);
-    EraseOval(&r);
-    FrameOval(&r);
-    InsetRect(&r, 1, 1);
-    FrameOval(&r);
+    if (hollow) {
+        EraseOval(&r);
+        FrameOval(&r);
+        InsetRect(&r, 1, 1);
+        FrameOval(&r);
+    } else {
+        PaintOval(&r);
+    }
+}
+
+/*
+ * Draws the hover or pressed border box around a transport button as shown in `button-states.png`:
+ * - Hover (`pressed == false`): Rounded box at `y = 281..298` + 2px gray shadow at `y = 298..300`.
+ * - Pressed (`pressed == true`): Shifted down 1px (`y = 282..299`) + 1px gray shadow at `y = 299..300`.
+ */
+static void DrawTransportBtnBox(short xLeft, short xRight, Boolean isHover, Boolean isPressed)
+{
+    Rect box, shadow;
+    if (!isHover && !isPressed) return;
+
+    if (isPressed) {
+        SetRect(&shadow, xLeft + 2, 298, xRight - 2, 300);
+        FillRect(&shadow, &qd.gray);
+        SetRect(&box, xLeft, 282, xRight, 299);
+        EraseRoundRect(&box, 6, 6);
+        FrameRoundRect(&box, 6, 6);
+    } else {
+        SetRect(&shadow, xLeft + 2, 297, xRight - 2, 300);
+        FillRect(&shadow, &qd.gray);
+        SetRect(&box, xLeft, 281, xRight, 298);
+        EraseRoundRect(&box, 6, 6);
+        FrameRoundRect(&box, 6, 6);
+    }
+}
+
+/* Helper to compute Speaker button right edge based on active speaker label width */
+static short GetSpeakerButtonRightX(void)
+{
+    const char *label = (gNowPlaying.deviceName[0] != '\0') ? gNowPlaying.deviceName : "Choose Speaker";
+    short len = (short)strlen(label);
+    short w;
+    if (len > 18) len = 18;
+    w = len * 6; /* Monaco 9 is 6px per char */
+    return 364 + w + 8;
 }
 
 /* ============================================================================
  * Main UI Rendering (Exact 512 x 322 PSD Layout)
  * ============================================================================ */
+
+static void RenderPreConnectionScreen(void)
+{
+    Rect fullRect, ipBox, countBox;
+    char ipField[40];
+    char secStr[16];
+
+    SetRect(&fullRect, 0, 0, CANVAS_W, CANVAS_H);
+    FillRect(&fullRect, &qd.gray);
+
+    if (gConnState == CONN_SEARCHING) {
+        BlitIcon1Bit(gServerCard1Bits, 236, 199, 140, 63, srcCopy);
+        /* Erase placeholder 192.168.000.000 inside input box and draw gIpInput */
+        SetRect(&ipBox, 170, 219, 275, 239);
+        EraseRect(&ipBox);
+        TextMode(srcOr);
+        MoveTo(176, 232);
+        DrawCStringTruncated(gIpInput, 16);
+    } else if (gConnState == CONN_FAILED) {
+        BlitIcon1Bit(gServerCard2Bits, 236, 199, 140, 63, srcCopy);
+        SetRect(&ipBox, 170, 219, 275, 239);
+        EraseRect(&ipBox);
+        sprintf(ipField, "%s_", gIpInput);
+        TextMode(srcOr);
+        MoveTo(176, 232);
+        DrawCStringTruncated(ipField, 16);
+    } else if (gConnState == CONN_FOUND) {
+        BlitIcon1Bit(gServerCard3Bits, 236, 199, 140, 63, srcCopy);
+        /* Update countdown digit in "automatically in 3 seconds." at (248, 227)-(256, 238) */
+        SetRect(&countBox, 247, 226, 256, 238);
+        EraseRect(&countBox);
+        sprintf(secStr, "%d", (int)gFoundCountdownSec);
+        TextMode(srcOr);
+        MoveTo(248, 236);
+        DrawText(secStr, 0, 1);
+    }
+}
+
+static void RenderSearchCenterPanel(void)
+{
+    short row;
+    Rect r, badgeRect, thumbRect;
+
+    /* Top-right circular (X) close button (485, 34) 15x15 */
+    BlitIcon1Bit(gSearchCloseCircleBits, 15, 15, 485, 34, srcCopy);
+
+    /* Search Scrollbar at x = 469, y = 35..266 */
+    DrawVerticalDottedLine(469, 35, 266, true);
+    {
+        short trackH = 231;
+        short thumbH = (gSearchCount > SEARCH_VISIBLE_ROWS)
+            ? (short)((long)trackH * SEARCH_VISIBLE_ROWS / gSearchCount)
+            : 57;
+        short maxScroll = (gSearchCount > SEARCH_VISIBLE_ROWS) ? (gSearchCount - SEARCH_VISIBLE_ROWS) : 1;
+        short thumbY = 35 + (short)((long)(trackH - thumbH) * gSearchScroll / maxScroll);
+        if (thumbH < 20) thumbH = 20;
+        if (gSearchCount <= SEARCH_VISIBLE_ROWS) thumbY = 48;
+        SetRect(&thumbRect, 468, thumbY, 471, thumbY + thumbH);
+        FillRect(&thumbRect, &qd.gray);
+    }
+
+    if (gSearchCount == 0) {
+        TextMode(srcBic);
+        MoveTo(78, 60);
+        DrawCStringTruncated("No results found.", 32);
+        TextMode(srcOr);
+        return;
+    }
+
+    for (row = 0; row < SEARCH_VISIBLE_ROWS; row++) {
+        short idx = gSearchScroll + row;
+        short yTop = SEARCH_TOP_Y + row * SEARCH_ROW_H;
+        Boolean isHovered = (idx == gSearchHoverRow);
+        SearchItem *it;
+        const char *badgeLabel = "Song";
+        short badgeW = 36;
+
+        if (idx >= gSearchCount) break;
+        it = &gSearchItems[idx];
+
+        if (strcmp(it->kind, "ALBUM") == 0) {
+            badgeLabel = "Album";
+            badgeW = 42;
+        } else if (strcmp(it->kind, "PLAYLIST") == 0) {
+            badgeLabel = "Playlist";
+            badgeW = 58;
+        }
+
+        if (isHovered) {
+            SetRect(&r, 61, yTop + 1, 452, yTop + SEARCH_ROW_H - 1);
+            EraseRect(&r); /* White highlight bar */
+
+            /* Play circle icon (355, yTop + 8) 12x12 */
+            BlitIcon1Bit(gSearchPlayIconBits, 12, 12, 355, yTop + 8, srcCopy);
+
+            /* Solid black badge pill with white text */
+            SetRect(&badgeRect, 371, yTop + 8, 371 + badgeW, yTop + 20);
+            PaintRoundRect(&badgeRect, 6, 6);
+            TextMode(srcBic);
+            MoveTo(377, yTop + 17);
+            DrawCStringTruncated(badgeLabel, 10);
+
+            /* Black title & subtitle */
+            TextMode(srcOr);
+            MoveTo(78, yTop + 17);
+            DrawCStringTruncated(it->title, 42);
+            MoveTo(78, yTop + 29);
+            DrawCStringTruncated(it->subtitle, 42);
+        } else {
+            /* White text on black background */
+            TextMode(srcBic);
+            MoveTo(78, yTop + 17);
+            DrawCStringTruncated(it->title, 42);
+            MoveTo(78, yTop + 29);
+            DrawCStringTruncated(it->subtitle, 42);
+
+            /* White-outlined badge pill on black background */
+            SetRect(&badgeRect, 371, yTop + 8, 371 + badgeW, yTop + 20);
+            PenMode(patBic);
+            FrameRoundRect(&badgeRect, 6, 6);
+            PenNormal();
+            MoveTo(377, yTop + 17);
+            DrawCStringTruncated(badgeLabel, 10);
+        }
+
+        /* Dotted horizontal separator line at bottom of row */
+        DrawHorizontalDottedLine(61, 452, yTop + SEARCH_ROW_H - 1, true);
+    }
+    TextMode(srcOr);
+}
 
 static void RenderCanvas(void)
 {
@@ -353,6 +590,21 @@ static void RenderCanvas(void)
     TextFace(normal);
 
     /* --------------------------------------------------------------------
+     * 0. Pre-Connection Server Screens (Server1.png, Server2.png, Server3.png)
+     * -------------------------------------------------------------------- */
+    if (gConnState != CONN_READY) {
+        RenderPreConnectionScreen();
+        if (gOffscreenReady) {
+            Rect fullRect;
+            SetRect(&fullRect, 0, 0, CANVAS_W, CANVAS_H);
+            SetPort(gMainWindow);
+            CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &fullRect, &fullRect, srcCopy, NULL);
+        }
+        SetPort(savePort);
+        return;
+    }
+
+    /* --------------------------------------------------------------------
      * 1. Top Header Bar (y = 0..22, White background)
      * -------------------------------------------------------------------- */
     SetRect(&r, 0, 0, CANVAS_W, 22);
@@ -373,8 +625,12 @@ static void RenderCanvas(void)
     DrawVerticalDottedLine(144, 4, 17, false);
     DrawVerticalDottedLine(366, 4, 17, false);
 
-    /* Search Pill (156, 5)-(356, 17) */
-    BlitIcon1Bit(gSearchPillBits, 200, 12, 156, 5, srcCopy);
+    /* Search Pill (156, 5)-(356, 17) — show clear (X) icon when search query or view active */
+    if (gSearchViewOpen || gSearchQuery[0] != '\0') {
+        BlitIcon1Bit(gSearchPillClearBits, 200, 12, 156, 5, srcCopy);
+    } else {
+        BlitIcon1Bit(gSearchPillBits, 200, 12, 156, 5, srcCopy);
+    }
     if (gSearchFocused || gSearchQuery[0] != '\0') {
         char searchDisplay[56];
         if (gSearchFocused) {
@@ -383,8 +639,8 @@ static void RenderCanvas(void)
             SafeCopy(searchDisplay, gSearchQuery, sizeof(searchDisplay));
         }
         TextMode(srcBic); /* White text on black search pill */
-        MoveTo(164, 14);
-        DrawCStringTruncated(searchDisplay, 28);
+        MoveTo(171, 14);
+        DrawCStringTruncated(searchDisplay, 26);
         TextMode(srcOr);
     }
 
@@ -398,105 +654,109 @@ static void RenderCanvas(void)
     SetRect(&r, 0, 22, CANVAS_W, 273);
     PaintRect(&r);
 
-    /* 2A. Left Column: Library / Home Items (x = 10..138, y = 35..243) */
-    for (i = 0; i < VISIBLE_ROWS; i++) {
-        short itemIdx = gLeftScroll + i;
-        short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
-        if (itemIdx >= gLeftCount) break;
-
-        if (itemIdx == gLeftSelected) {
-            SetRect(&r, 10, rowTop, 138, rowTop + 12);
-            EraseRect(&r); /* White highlight pill */
-            TextMode(srcOr); /* Black text */
-        } else {
-            TextMode(srcBic); /* White text on black background */
-        }
-        MoveTo(13, rowTop + 9);
-        DrawCStringTruncated(gLeftItems[itemIdx].name, 19);
-    }
-
-    /* Left Scrollbar (x = 144, y = 35..266) */
-    DrawVerticalDottedLine(144, 35, 266, true);
-    {
-        short trackH = 231;
-        short thumbH = (gLeftCount > VISIBLE_ROWS)
-            ? (short)((long)trackH * VISIBLE_ROWS / gLeftCount)
-            : 57;
-        short maxScroll = (gLeftCount > VISIBLE_ROWS) ? (gLeftCount - VISIBLE_ROWS) : 1;
-        short thumbY = 35 + (short)((long)(trackH - thumbH) * gLeftScroll / maxScroll);
-        if (thumbH < 20) thumbH = 20;
-        if (gLeftCount <= VISIBLE_ROWS) thumbY = 64;
-        SetRect(&thumbRect, 143, thumbY, 146, thumbY + thumbH);
-        FillRect(&thumbRect, &qd.gray);
-    }
-
-    /* 2B. Center Column: 200x200 1-Bit Album Artwork (156, 45)-(356, 245) */
-    BlitIcon1Bit(gCurrentArtworkBits, 200, 200, 156, 45, srcCopy);
-
-    /* Artist name - Song Title centered below artwork at y = 259 */
-    if (gNowPlaying.trackName[0] != '\0') {
-        if (gNowPlaying.artistName[0] != '\0') {
-            sprintf(titleLine, "%s - %s", gNowPlaying.artistName, gNowPlaying.trackName);
-        } else {
-            SafeCopy(titleLine, gNowPlaying.trackName, sizeof(titleLine));
-        }
-    } else if (!NetHasServer()) {
-        SafeCopy(titleLine, "Not connected to MacCompanion", sizeof(titleLine));
+    if (gSearchViewOpen) {
+        RenderSearchCenterPanel();
     } else {
-        SafeCopy(titleLine, "Spotify Ready - Select a Track", sizeof(titleLine));
-    }
-    {
-        char truncTitle[40];
-        short len = (short)strlen(titleLine);
-        short pixelW;
-        short startX;
-        if (len > 33) {
-            memcpy(truncTitle, titleLine, 30);
-            truncTitle[30] = '.';
-            truncTitle[31] = '.';
-            truncTitle[32] = '\0';
-            len = 32;
-        } else {
-            SafeCopy(truncTitle, titleLine, sizeof(truncTitle));
+        /* 2A. Left Column: Library / Home Items (x = 10..138, y = 35..243) */
+        for (i = 0; i < VISIBLE_ROWS; i++) {
+            short itemIdx = gLeftScroll + i;
+            short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
+            if (itemIdx >= gLeftCount) break;
+
+            if (itemIdx == gLeftSelected) {
+                SetRect(&r, 10, rowTop, 138, rowTop + 12);
+                EraseRect(&r); /* White highlight pill */
+                TextMode(srcOr); /* Black text */
+            } else {
+                TextMode(srcBic); /* White text on black background */
+            }
+            MoveTo(13, rowTop + 9);
+            DrawCStringTruncated(gLeftItems[itemIdx].name, 19);
         }
-        pixelW = TextWidth(truncTitle, 0, len);
-        startX = 256 - (pixelW / 2);
-        if (startX < 152) startX = 152;
-        TextMode(srcBic); /* White text on black background */
-        MoveTo(startX, 259);
-        DrawText(truncTitle, 0, len);
-    }
 
-    /* 2C. Right Column: Tracks List (x = 370..498, y = 35..243) */
-    for (i = 0; i < VISIBLE_ROWS; i++) {
-        short itemIdx = gRightScroll + i;
-        short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
-        if (itemIdx >= gRightCount) break;
+        /* Left Scrollbar (x = 144, y = 35..266) */
+        DrawVerticalDottedLine(144, 35, 266, true);
+        {
+            short trackH = 231;
+            short thumbH = (gLeftCount > VISIBLE_ROWS)
+                ? (short)((long)trackH * VISIBLE_ROWS / gLeftCount)
+                : 57;
+            short maxScroll = (gLeftCount > VISIBLE_ROWS) ? (gLeftCount - VISIBLE_ROWS) : 1;
+            short thumbY;
+            if (thumbH < 20) thumbH = 20;
+            thumbY = 35 + (short)((long)(trackH - thumbH) * gLeftScroll / maxScroll);
+            if (gLeftCount <= VISIBLE_ROWS) thumbY = 64;
+            SetRect(&thumbRect, 143, thumbY, 146, thumbY + thumbH);
+            FillRect(&thumbRect, &qd.gray);
+        }
 
-        if (itemIdx == gRightSelected) {
-            SetRect(&r, 370, rowTop, 498, rowTop + 12);
-            EraseRect(&r); /* White highlight pill */
-            TextMode(srcOr); /* Black text */
+        /* 2B. Center Column: 200x200 1-Bit Album Artwork or Initial Graphic (156, 45)-(356, 245) */
+        BlitIcon1Bit(gCurrentArtworkBits, 200, 200, 156, 45, srcCopy);
+
+        /* Artist name - Song Title (or "Party like it's 1984") centered below artwork at y = 259 */
+        if (gNowPlaying.trackName[0] != '\0') {
+            if (gNowPlaying.artistName[0] != '\0') {
+                sprintf(titleLine, "%s - %s", gNowPlaying.artistName, gNowPlaying.trackName);
+            } else {
+                SafeCopy(titleLine, gNowPlaying.trackName, sizeof(titleLine));
+            }
         } else {
+            SafeCopy(titleLine, "Party like it's 1984", sizeof(titleLine));
+        }
+        {
+            char truncTitle[40];
+            short len = (short)strlen(titleLine);
+            short pixelW;
+            short startX;
+            if (len > 33) {
+                memcpy(truncTitle, titleLine, 30);
+                truncTitle[30] = '.';
+                truncTitle[31] = '.';
+                truncTitle[32] = '\0';
+                len = 32;
+            } else {
+                SafeCopy(truncTitle, titleLine, sizeof(truncTitle));
+            }
+            pixelW = TextWidth(truncTitle, 0, len);
+            startX = 256 - (pixelW / 2);
+            if (startX < 152) startX = 152;
             TextMode(srcBic); /* White text on black background */
+            MoveTo(startX, 259);
+            DrawText(truncTitle, 0, len);
         }
-        MoveTo(373, rowTop + 9);
-        DrawCStringTruncated(gRightItems[itemIdx].name, 19);
-    }
 
-    /* Right Scrollbar (x = 504, y = 35..266) */
-    DrawVerticalDottedLine(504, 35, 266, true);
-    {
-        short trackH = 231;
-        short thumbH = (gRightCount > VISIBLE_ROWS)
-            ? (short)((long)trackH * VISIBLE_ROWS / gRightCount)
-            : 57;
-        short maxScroll = (gRightCount > VISIBLE_ROWS) ? (gRightCount - VISIBLE_ROWS) : 1;
-        short thumbY = 35 + (short)((long)(trackH - thumbH) * gRightScroll / maxScroll);
-        if (thumbH < 20) thumbH = 20;
-        if (gRightCount <= VISIBLE_ROWS) thumbY = 64;
-        SetRect(&thumbRect, 503, thumbY, 506, thumbY + thumbH);
-        FillRect(&thumbRect, &qd.gray);
+        /* 2C. Right Column: Tracks List (x = 370..498, y = 35..243) */
+        for (i = 0; i < VISIBLE_ROWS; i++) {
+            short itemIdx = gRightScroll + i;
+            short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
+            if (itemIdx >= gRightCount) break;
+
+            if (itemIdx == gRightSelected) {
+                SetRect(&r, 370, rowTop, 498, rowTop + 12);
+                EraseRect(&r); /* White highlight pill */
+                TextMode(srcOr); /* Black text */
+            } else {
+                TextMode(srcBic); /* White text on black background */
+            }
+            MoveTo(373, rowTop + 9);
+            DrawCStringTruncated(gRightItems[itemIdx].name, 19);
+        }
+
+        /* Right Scrollbar (x = 504, y = 35..266) */
+        DrawVerticalDottedLine(504, 35, 266, true);
+        {
+            short trackH = 231;
+            short thumbH = (gRightCount > VISIBLE_ROWS)
+                ? (short)((long)trackH * VISIBLE_ROWS / gRightCount)
+                : 57;
+            short maxScroll = (gRightCount > VISIBLE_ROWS) ? (gRightCount - VISIBLE_ROWS) : 1;
+            short thumbY;
+            if (thumbH < 20) thumbH = 20;
+            thumbY = 35 + (short)((long)(trackH - thumbH) * gRightScroll / maxScroll);
+            if (gRightCount <= VISIBLE_ROWS) thumbY = 64;
+            SetRect(&thumbRect, 503, thumbY, 506, thumbY + thumbH);
+            FillRect(&thumbRect, &qd.gray);
+        }
     }
 
     /* --------------------------------------------------------------------
@@ -507,47 +767,82 @@ static void RenderCanvas(void)
     TextMode(srcOr);
     PenNormal();
 
-    /* Shuffle button (195, 285) 14x11 */
-    if (strcmp(gNowPlaying.shuffleMode, "smart") == 0) {
-        BlitIcon1Bit(gIconShuffleSmart, 14, 11, 195, 285, srcCopy);
-    } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
-        BlitIcon1Bit(gIconShuffleOn, 14, 11, 195, 285, srcCopy);
-    } else {
-        BlitIcon1Bit(gIconShuffleOff, 14, 11, 195, 285, srcCopy);
+    /* Shuffle button (195, 285) 14x11, box (191, 281)-(213, 298) */
+    {
+        Boolean hov = (gHoverBtn == BTN_SHUFFLE);
+        Boolean prs = (gPressedBtn == BTN_SHUFFLE);
+        short dy = prs ? 1 : 0;
+        DrawTransportBtnBox(191, 213, hov, prs);
+        if (strcmp(gNowPlaying.shuffleMode, "smart") == 0) {
+            BlitIcon1Bit(gIconShuffleSmart, 14, 11, 195, 285 + dy, srcCopy);
+        } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
+            BlitIcon1Bit(gIconShuffleOn, 14, 11, 195, 285 + dy, srcCopy);
+        } else {
+            BlitIcon1Bit(gIconShuffleOff, 14, 11, 195, 285 + dy, srcCopy);
+        }
     }
 
-    /* Previous button (224, 286) 6x9 */
-    BlitIcon1Bit(gIconPrev, 6, 9, 224, 286, srcCopy);
-
-    /* Play / Pause circle (244, 278) 24x24 */
-    if (gNowPlaying.isPlaying) {
-        BlitIcon1Bit(gIconPauseCircle, 24, 24, 244, 278, srcCopy);
-    } else {
-        BlitIcon1Bit(gIconPlayCircle, 24, 24, 244, 278, srcCopy);
+    /* Previous button (224, 286) 6x9, box (216, 281)-(238, 298) */
+    {
+        Boolean hov = (gHoverBtn == BTN_PREV);
+        Boolean prs = (gPressedBtn == BTN_PREV);
+        short dy = prs ? 1 : 0;
+        DrawTransportBtnBox(216, 238, hov, prs);
+        BlitIcon1Bit(gIconPrev, 6, 9, 224, 286 + dy, srcCopy);
     }
 
-    /* Next button (281, 286) 6x9 */
-    BlitIcon1Bit(gIconNext, 6, 9, 281, 286, srcCopy);
+    /* Play / Pause circle (244, 278) 24x24 (shifts down 1px when pressed) */
+    {
+        Boolean prs = (gPressedBtn == BTN_PLAY);
+        short dy = prs ? 1 : 0;
+        if (gNowPlaying.isPlaying) {
+            BlitIcon1Bit(gIconPauseCircle, 24, 24, 244, 278 + dy, srcCopy);
+        } else {
+            BlitIcon1Bit(gIconPlayCircle, 24, 24, 244, 278 + dy, srcCopy);
+        }
+    }
 
-    /* Repeat button (302, 286) 12x11 */
-    if (strcmp(gNowPlaying.repeatState, "track") == 0) {
-        BlitIcon1Bit(gIconRepeatTrack, 12, 11, 302, 286, srcCopy);
-    } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
-        BlitIcon1Bit(gIconRepeatAll, 12, 11, 302, 286, srcCopy);
-    } else {
-        BlitIcon1Bit(gIconRepeatOff, 12, 11, 302, 286, srcCopy);
+    /* Next button (281, 286) 6x9, box (273, 281)-(295, 298) */
+    {
+        Boolean hov = (gHoverBtn == BTN_NEXT);
+        Boolean prs = (gPressedBtn == BTN_NEXT);
+        short dy = prs ? 1 : 0;
+        DrawTransportBtnBox(273, 295, hov, prs);
+        BlitIcon1Bit(gIconNext, 6, 9, 281, 286 + dy, srcCopy);
+    }
+
+    /* Repeat button (302, 286) 12x11, box (297, 281)-(319, 298) */
+    {
+        Boolean hov = (gHoverBtn == BTN_REPEAT);
+        Boolean prs = (gPressedBtn == BTN_REPEAT);
+        short dy = prs ? 1 : 0;
+        DrawTransportBtnBox(297, 319, hov, prs);
+        if (strcmp(gNowPlaying.repeatState, "track") == 0) {
+            BlitIcon1Bit(gIconRepeatTrack, 12, 11, 302, 286 + dy, srcCopy);
+        } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
+            BlitIcon1Bit(gIconRepeatAll, 12, 11, 302, 286 + dy, srcCopy);
+        } else {
+            BlitIcon1Bit(gIconRepeatOff, 12, 11, 302, 286 + dy, srcCopy);
+        }
     }
 
     /* Vertical dotted divider (331, 281..300) */
     DrawVerticalDottedLine(331, 281, 300, false);
 
     /* Speaker Icon (348, 285) 8x11 + Active Speaker Name (364, 294) */
-    BlitIcon1Bit(gIconSpeaker, 8, 11, 348, 285, srcCopy);
-    MoveTo(364, 294);
-    if (gNowPlaying.deviceName[0] != '\0') {
-        DrawCStringTruncated(gNowPlaying.deviceName, 18);
-    } else {
-        DrawCStringTruncated("Choose Speaker", 18);
+    {
+        Boolean hov = (gHoverBtn == BTN_SPEAKER) || gSpeakerPopupOpen;
+        Boolean prs = (gPressedBtn == BTN_SPEAKER);
+        short dy = prs ? 1 : 0;
+        short rightX = GetSpeakerButtonRightX();
+        DrawTransportBtnBox(342, rightX, hov, prs);
+        BlitIcon1Bit(gIconSpeaker, 8, 11, 348, 285 + dy, srcCopy);
+        MoveTo(364, 293 + dy);
+        if (gNowPlaying.deviceName[0] != '\0') {
+            DrawCStringTruncated(gNowPlaying.deviceName, 18);
+        } else {
+            DrawCStringTruncated("Choose Speaker", 18);
+        }
     }
 
     /* Timeline Bar: elapsed (109, 312), bar (143, 308)-(369, 311), total (374, 312) */
@@ -559,6 +854,7 @@ static void RenderCanvas(void)
     {
         short fillW = 0;
         short dotX  = 143;
+        Boolean hollowDot = (gHoverBtn == BTN_TIMELINE || gPressedBtn == BTN_TIMELINE);
         if (gNowPlaying.durationMs > 0) {
             long pct = (gNowPlaying.progressMs * 226L) / gNowPlaying.durationMs;
             if (pct < 0) pct = 0;
@@ -572,7 +868,7 @@ static void RenderCanvas(void)
         dotX = 143 + fillW;
         if (dotX < 147) dotX = 147;
         if (dotX > 365) dotX = 365;
-        DrawSliderDot(dotX, 309);
+        DrawSliderDot(dotX, 309, hollowDot);
     }
 
     MoveTo(374, 312);
@@ -586,6 +882,7 @@ static void RenderCanvas(void)
         short vol = gNowPlaying.volumePct;
         short fillW;
         short dotX;
+        Boolean hollowDot = (gHoverBtn == BTN_VOLUME || gPressedBtn == BTN_VOLUME);
         if (vol < 0) vol = 0;
         if (vol > 100) vol = 100;
         fillW = (short)((vol * 55L) / 100L);
@@ -596,21 +893,27 @@ static void RenderCanvas(void)
         dotX = 438 + fillW;
         if (dotX < 442) dotX = 442;
         if (dotX > 489) dotX = 489;
-        DrawSliderDot(dotX, 309);
+        DrawSliderDot(dotX, 309, hollowDot);
     }
 
     /* --------------------------------------------------------------------
-     * 4. Speaker Chooser Popover ((330, 152)-(466, 272) + pointer triangle)
+     * 4. Dynamic-Height Speaker Chooser Popover (anchored at yBottom = 272)
      * -------------------------------------------------------------------- */
     if (gSpeakerPopupOpen) {
         Rect popRect, shadowRect;
         short row;
+        short visibleDevs = (gDeviceCount > 0) ? gDeviceCount : 1;
+        short popH, popTop;
+
+        if (visibleDevs > 8) visibleDevs = 8;
+        popH   = visibleDevs * 18 + 12;
+        popTop = 272 - popH;
 
         /* Subtle dithered drop shadow under popover */
-        SetRect(&shadowRect, 333, 155, 468, 275);
+        SetRect(&shadowRect, 333, popTop + 3, 468, 275);
         FillRoundRect(&shadowRect, 12, 12, &qd.gray);
 
-        SetRect(&popRect, 330, 152, 466, 272);
+        SetRect(&popRect, 330, popTop, 466, 272);
         EraseRoundRect(&popRect, 12, 12);
         FrameRoundRect(&popRect, 12, 12);
 
@@ -626,9 +929,14 @@ static void RenderCanvas(void)
             LineTo(355 - row, 272 + row);
         }
 
-        /* Render up to 6 devices (18px row height starting at y = 158) */
-        for (row = 0; row < 6 && row < gDeviceCount; row++) {
-            short yTop = 158 + row * 18;
+        if (gDeviceCount == 0) {
+            TextMode(srcOr);
+            MoveTo(342, popTop + 18);
+            DrawCStringTruncated("No speakers found", 17);
+        }
+
+        for (row = 0; row < visibleDevs && row < gDeviceCount; row++) {
+            short yTop = popTop + 6 + row * 18;
             DeviceItem *dev = &gDevices[row];
             const unsigned char *devIcon = gIconSpeaker;
             short iconW = 8, iconH = 11, iconX = 339, iconY = yTop + 3;
@@ -661,79 +969,37 @@ static void RenderCanvas(void)
     }
 
     /* --------------------------------------------------------------------
-     * 5. Manual Server IP Modal Dialog (when UDP discovery fails or Cmd+R)
-     * -------------------------------------------------------------------- */
-    if (gIpModalOpen) {
-        Rect dlgRect, shadowRect, boxRect, btnConnect, btnUdp;
-        char ipField[40];
-
-        SetRect(&shadowRect, 124, 94, 394, 214);
-        FillRoundRect(&shadowRect, 10, 10, &qd.gray);
-
-        SetRect(&dlgRect, 120, 90, 390, 210);
-        EraseRoundRect(&dlgRect, 10, 10);
-        FrameRoundRect(&dlgRect, 10, 10);
-        InsetRect(&dlgRect, 2, 2);
-        FrameRoundRect(&dlgRect, 8, 8);
-
-        TextMode(srcOr);
-        MoveTo(136, 112);
-        DrawCStringTruncated("MacCompanion Server Connection", 36);
-
-        MoveTo(136, 128);
-        DrawCStringTruncated(gIpModalStatus, 38);
-
-        /* IP Input Field Box */
-        SetRect(&boxRect, 136, 138, 374, 158);
-        FrameRect(&boxRect);
-        sprintf(ipField, "%s_", gIpInput);
-        MoveTo(144, 152);
-        DrawCStringTruncated(ipField, 32);
-
-        /* Retry UDP Button */
-        SetRect(&btnUdp, 136, 172, 244, 196);
-        FrameRoundRect(&btnUdp, 6, 6);
-        MoveTo(156, 187);
-        DrawCStringTruncated("UDP Discover", 14);
-
-        /* Connect Button */
-        SetRect(&btnConnect, 260, 172, 374, 196);
-        PaintRoundRect(&btnConnect, 6, 6);
-        TextMode(srcBic);
-        MoveTo(286, 187);
-        DrawCStringTruncated("Connect (Ret)", 14);
-        TextMode(srcOr);
-    }
-
-    /* --------------------------------------------------------------------
-     * 6. About MacCompanion Spotify Modal Dialog
+     * 5. About MaciSpot Modal Dialog
      * -------------------------------------------------------------------- */
     if (gAboutModalOpen) {
         Rect dlgRect, shadowRect, btnOk;
 
-        SetRect(&shadowRect, 144, 94, 374, 210);
+        SetRect(&shadowRect, 144, 74, 374, 232);
         FillRoundRect(&shadowRect, 10, 10, &qd.gray);
 
-        SetRect(&dlgRect, 140, 90, 370, 206);
+        SetRect(&dlgRect, 140, 70, 370, 228);
         EraseRoundRect(&dlgRect, 10, 10);
         FrameRoundRect(&dlgRect, 10, 10);
         InsetRect(&dlgRect, 2, 2);
         FrameRoundRect(&dlgRect, 8, 8);
 
+        /* MaciSpot Logo (56x44) centered at top of About dialog */
+        BlitIcon1Bit(gMaciSpotLogoBits, 56, 44, 228, 82, srcCopy);
+
         TextMode(srcOr);
-        MoveTo(156, 114);
-        DrawCStringTruncated("MacCompanion Spotify", 32);
+        MoveTo(184, 142);
+        DrawCStringTruncated("MaciSpot " APP_VERSION_SHORT, 32);
 
-        MoveTo(156, 132);
-        DrawCStringTruncated("Version: " APP_VERSION_SHORT, 32);
+        MoveTo(188, 158);
+        DrawCStringTruncated("\"" APP_VERSION_CODENAME "\"", 32);
 
-        MoveTo(156, 148);
+        MoveTo(164, 174);
         DrawCStringTruncated("68k Native + Sound Manager", 32);
 
-        SetRect(&btnOk, 215, 168, 295, 192);
+        SetRect(&btnOk, 215, 190, 295, 214);
         PaintRoundRect(&btnOk, 6, 6);
         TextMode(srcBic);
-        MoveTo(246, 183);
+        MoveTo(248, 205);
         DrawCStringTruncated("OK", 4);
         TextMode(srcOr);
     }
@@ -763,7 +1029,6 @@ static void SyncLocalAudioWithSpeaker(void)
 
     if (is68kSpeaker && gNowPlaying.isPlaying) {
         if (!AudioStreamIsRunning()) {
-            /* Check configured sample rate from /api/spotify/audio-config */
             long n = NetHttpGet("/api/spotify/audio-config", gHttpBuf, HTTP_BUF_SIZE);
             if (n > 0 && strncmp(gHttpBuf, "AUDIO|", 6) == 0) {
                 char hzStr[16];
@@ -788,7 +1053,6 @@ static void FetchCurrentArtwork(void)
 
     n = NetHttpGet("/api/spotify/artwork?size=200&format=raw", gHttpBuf, HTTP_BUF_SIZE);
     if (n >= 5208) {
-        /* Skip 8-byte header (width, height, rowBytes, reserved) -> 5200 bytes of 1-bit scanlines */
         memcpy(gCurrentArtworkBits, gHttpBuf + 8, 5200);
         SafeCopy(gLoadedArtTrackId, gNowPlaying.trackId, sizeof(gLoadedArtTrackId));
     }
@@ -808,6 +1072,7 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
 
     GetPipeField(gHttpBuf, 1, field, sizeof(field));
     gNowPlaying.isPlaying = (field[0] == '1');
+    gTimelineFrozen       = false;
 
     GetPipeField(gHttpBuf, 2, gNowPlaying.trackId, sizeof(gNowPlaying.trackId));
     GetPipeField(gHttpBuf, 3, gNowPlaying.trackName, sizeof(gNowPlaying.trackName));
@@ -820,8 +1085,9 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     GetPipeField(gHttpBuf, 7, field, sizeof(field));
     gNowPlaying.durationMs = atol(field);
 
-    GetPipeField(gHttpBuf, 8, gNowPlaying.progressMmSs, sizeof(gNowPlaying.progressMmSs));
-    GetPipeField(gHttpBuf, 9, gNowPlaying.durationMmSs, sizeof(gNowPlaying.durationMmSs));
+    /* Always format timecodes with leading zeros (02:00, never 2:00) */
+    FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
+    FormatMmSs(gNowPlaying.durationMs, gNowPlaying.durationMmSs);
 
     GetPipeField(gHttpBuf, 10, field, sizeof(field));
     gNowPlaying.volumePct = (short)atoi(field);
@@ -834,9 +1100,11 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
 
     GetPipeField(gHttpBuf, 14, gNowPlaying.deviceName, sizeof(gNowPlaying.deviceName));
 
-    if (fetchArtIfChanged &&
-        gNowPlaying.trackId[0] != '\0' &&
-        strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
+    if (gNowPlaying.trackId[0] == '\0') {
+        /* Nothing playing -> show initial.png placeholder artwork */
+        memcpy(gCurrentArtworkBits, gInitialArtworkBits, 5200);
+        gLoadedArtTrackId[0] = '\0';
+    } else if (fetchArtIfChanged && strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
         FetchCurrentArtwork();
     }
 
@@ -905,6 +1173,16 @@ static void LoadSelectedLeftItemIntoRightList(void)
         sprintf(path, "/api/spotify/playlist/%s/tracks?limit=40", sel->id);
         n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
         if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
+        /* Fallback if playlist has 0 accessible track items: provide direct playable entry */
+        if (gRightCount == 0 && sel->uri[0] != '\0') {
+            RightItem *it = &gRightItems[0];
+            SafeCopy(it->kind, "PLAYLIST", sizeof(it->kind));
+            SafeCopy(it->id, sel->id, sizeof(it->id));
+            SafeCopy(it->name, sel->name, sizeof(it->name));
+            SafeCopy(it->uri, sel->uri, sizeof(it->uri));
+            gRightCount    = 1;
+            gRightSelected = 0;
+        }
     } else if (strcmp(sel->kind, "HOME_CAT") == 0) {
         if (strcmp(sel->id, "recent") == 0) {
             n = NetHttpGet("/api/spotify/recently-played?limit=35", gHttpBuf, HTTP_BUF_SIZE);
@@ -931,7 +1209,6 @@ static void LoadLeftColumn(void)
     gLeftScroll   = 0;
 
     if (gHomeMode) {
-        /* Home Mode Categories */
         SafeCopy(gLeftItems[0].kind, "HOME_CAT", 16);
         SafeCopy(gLeftItems[0].id,   "recent",   64);
         SafeCopy(gLeftItems[0].name, "Recently Played", 64);
@@ -950,7 +1227,6 @@ static void LoadLeftColumn(void)
 
         gLeftCount = 4;
     } else {
-        /* Playlists Mode: Row 0 = Liked Songs, Rows 1..N = User Playlists */
         long n;
         SafeCopy(gLeftItems[0].kind, "LIKED", 16);
         SafeCopy(gLeftItems[0].id,   "liked", 64);
@@ -993,7 +1269,6 @@ static void ActivateSelectedRightItem(void)
     it = &gRightItems[gRightSelected];
 
     if (strcmp(it->kind, "ALBUM") == 0) {
-        /* Double-clicking an album loads its tracks into the right column and sets context */
         SafeCopy(gActiveContextUri, it->uri, sizeof(gActiveContextUri));
         SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
         sprintf(path, "/api/spotify/album/%s/tracks?limit=50", it->id);
@@ -1004,19 +1279,74 @@ static void ActivateSelectedRightItem(void)
         return;
     }
 
-    /* Play selected track */
-    UrlEncode(it->uri[0] ? it->uri : it->id, encUri, sizeof(encUri));
-    if (gActiveContextUri[0] != '\0') {
-        char encCtx[128];
-        UrlEncode(gActiveContextUri, encCtx, sizeof(encCtx));
-        sprintf(path, "/api/spotify/play?context_uri=%s&offset_uri=%s", encCtx, encUri);
+    /* Optimistic UI update before network request */
+    gTimelineFrozen = true;
+    gNowPlaying.isPlaying = true;
+    gNowPlaying.progressMs = 0;
+    FormatMmSs(0, gNowPlaying.progressMmSs);
+    SafeCopy(gNowPlaying.trackName, it->name, sizeof(gNowPlaying.trackName));
+    if (it->artist[0] != '\0') {
+        SafeCopy(gNowPlaying.artistName, it->artist, sizeof(gNowPlaying.artistName));
+    }
+    RenderCanvas();
+
+    if (strcmp(it->kind, "PLAYLIST") == 0) {
+        UrlEncode(it->uri, encUri, sizeof(encUri));
+        sprintf(path, "/api/spotify/play?context_uri=%s", encUri);
     } else {
-        sprintf(path, "/api/spotify/play?uri=%s", encUri);
+        UrlEncode(it->uri[0] ? it->uri : it->id, encUri, sizeof(encUri));
+        if (gActiveContextUri[0] != '\0') {
+            char encCtx[128];
+            UrlEncode(gActiveContextUri, encCtx, sizeof(encCtx));
+            sprintf(path, "/api/spotify/play?context_uri=%s&offset_uri=%s", encCtx, encUri);
+        } else {
+            sprintf(path, "/api/spotify/play?uri=%s", encUri);
+        }
     }
 
     NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     RefreshNowPlaying(true);
     RenderCanvas();
+}
+
+static void ParseSearchResults(const char *buf)
+{
+    const char *line = buf;
+    gSearchCount    = 0;
+    gSearchScroll   = 0;
+    gSearchHoverRow = 0;
+
+    while (line && *line && gSearchCount < MAX_SEARCH_ITEMS) {
+        const char *nextLine = strchr(line, '\n');
+        char rowKind[16];
+        GetPipeField(line, 0, rowKind, sizeof(rowKind));
+
+        if (strcmp(rowKind, "TRACK") == 0) {
+            SearchItem *s = &gSearchItems[gSearchCount++];
+            SafeCopy(s->kind, "TRACK", sizeof(s->kind));
+            GetPipeField(line, 1, s->id, sizeof(s->id));
+            GetPipeField(line, 2, s->title, sizeof(s->title));
+            GetPipeField(line, 3, s->subtitle, sizeof(s->subtitle));
+            GetPipeField(line, 7, s->uri, sizeof(s->uri));
+        } else if (strcmp(rowKind, "ALBUM") == 0) {
+            SearchItem *s = &gSearchItems[gSearchCount++];
+            SafeCopy(s->kind, "ALBUM", sizeof(s->kind));
+            GetPipeField(line, 1, s->id, sizeof(s->id));
+            GetPipeField(line, 2, s->title, sizeof(s->title));
+            GetPipeField(line, 3, s->subtitle, sizeof(s->subtitle));
+            GetPipeField(line, 6, s->uri, sizeof(s->uri));
+        } else if (strcmp(rowKind, "PLAYLIST") == 0) {
+            SearchItem *s = &gSearchItems[gSearchCount++];
+            SafeCopy(s->kind, "PLAYLIST", sizeof(s->kind));
+            GetPipeField(line, 1, s->id, sizeof(s->id));
+            GetPipeField(line, 2, s->title, sizeof(s->title));
+            GetPipeField(line, 3, s->subtitle, sizeof(s->subtitle));
+            GetPipeField(line, 5, s->uri, sizeof(s->uri));
+        }
+
+        if (!nextLine) break;
+        line = nextLine + 1;
+    }
 }
 
 static void ExecuteSearchQuery(void)
@@ -1026,14 +1356,58 @@ static void ExecuteSearchQuery(void)
 
     if (!NetHasServer() || gSearchQuery[0] == '\0') return;
     UrlEncode(gSearchQuery, encQ, sizeof(encQ));
-    sprintf(path, "/api/spotify/search?q=%s&type=track&limit=35", encQ);
+    sprintf(path, "/api/spotify/search?q=%s&type=all&limit=10", encQ);
 
-    gActiveContextUri[0] = '\0';
-    SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
     if (NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE) > 0) {
-        ParseTracksResponseIntoRightList(gHttpBuf);
+        ParseSearchResults(gHttpBuf);
+    } else {
+        gSearchCount = 0;
     }
-    gSearchFocused = false;
+    gSearchFocused  = false;
+    gSearchViewOpen = true;
+    RenderCanvas();
+}
+
+static void ActivateSearchResultRow(short idx)
+{
+    SearchItem *s;
+    char encUri[128];
+    char path[256];
+
+    if (!NetHasServer() || idx < 0 || idx >= gSearchCount) return;
+    s = &gSearchItems[idx];
+
+    /* Single-click plays immediately and closes search view back to main UI */
+    gSearchViewOpen = false;
+    gSearchFocused  = false;
+    gTimelineFrozen = true;
+    gNowPlaying.isPlaying  = true;
+    gNowPlaying.progressMs = 0;
+    FormatMmSs(0, gNowPlaying.progressMmSs);
+    SafeCopy(gNowPlaying.trackName, s->title, sizeof(gNowPlaying.trackName));
+    SafeCopy(gNowPlaying.artistName, s->subtitle, sizeof(gNowPlaying.artistName));
+    RenderCanvas();
+
+    UrlEncode(s->uri[0] ? s->uri : s->id, encUri, sizeof(encUri));
+    if (strcmp(s->kind, "ALBUM") == 0 || strcmp(s->kind, "PLAYLIST") == 0) {
+        SafeCopy(gActiveContextUri, s->uri, sizeof(gActiveContextUri));
+        sprintf(path, "/api/spotify/play?context_uri=%s", encUri);
+        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        /* Also load the selected album/playlist tracks into the right panel */
+        if (strcmp(s->kind, "ALBUM") == 0) {
+            sprintf(path, "/api/spotify/album/%s/tracks?limit=50", s->id);
+        } else {
+            sprintf(path, "/api/spotify/playlist/%s/tracks?limit=40", s->id);
+        }
+        if (NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE) > 0) {
+            ParseTracksResponseIntoRightList(gHttpBuf);
+        }
+    } else {
+        sprintf(path, "/api/spotify/play?uri=%s", encUri);
+        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+    }
+
+    RefreshNowPlaying(true);
     RenderCanvas();
 }
 
@@ -1080,20 +1454,108 @@ static void ConnectAndLoadAll(void)
 {
     RefreshNowPlaying(true);
     LoadLeftColumn();
+    gInitialDataLoaded = true;
+}
+
+static Boolean VerifyServerReachable(void)
+{
+    long n;
+    if (!NetHasServer() || !gHttpBuf) return false;
+    n = NetHttpGet("/api/spotify/status", gHttpBuf, HTTP_BUF_SIZE);
+    return (n > 0 && strncmp(gHttpBuf, "STATUS|", 7) == 0);
+}
+
+static void TransitionToServerFound(void)
+{
+    gConnState         = CONN_FOUND;
+    gFoundCountdownSec = 3;
+    gFoundStartTicks   = TickCount();
+    gInitialDataLoaded = false;
     RenderCanvas();
 }
 
 static void RunInitialDiscovery(void)
 {
+    gConnState = CONN_SEARCHING;
+    RenderCanvas();
+
     if (NetDiscoverServer()) {
         FormatIPAddress(NetGetServerIP(), gIpInput);
-        gIpModalOpen = false;
-        ConnectAndLoadAll();
+        TransitionToServerFound();
     } else {
-        SafeCopy(gIpModalStatus, "UDP discovery failed. Enter Server IP:", sizeof(gIpModalStatus));
-        gIpModalOpen = true;
+        gConnState = CONN_FAILED;
         RenderCanvas();
     }
+}
+
+/* ============================================================================
+ * Hover & Drag Tracking Helpers
+ * ============================================================================ */
+
+static short HitTestTransportHover(Point pt)
+{
+    if (gConnState != CONN_READY || gAboutModalOpen) return BTN_NONE;
+    if (pt.v >= 278 && pt.v <= 301) {
+        if (pt.h >= 191 && pt.h <= 213) return BTN_SHUFFLE;
+        if (pt.h >= 216 && pt.h <= 238) return BTN_PREV;
+        if (pt.h >= 242 && pt.h <= 270) return BTN_PLAY;
+        if (pt.h >= 273 && pt.h <= 295) return BTN_NEXT;
+        if (pt.h >= 297 && pt.h <= 319) return BTN_REPEAT;
+        if (pt.h >= 342 && pt.h <= GetSpeakerButtonRightX()) return BTN_SPEAKER;
+    }
+    if (pt.v >= 303 && pt.v <= 318) {
+        if (pt.h >= 140 && pt.h <= 372) return BTN_TIMELINE;
+        if (pt.h >= 435 && pt.h <= 496) return BTN_VOLUME;
+    }
+    return BTN_NONE;
+}
+
+static void UpdateHoverState(void)
+{
+    Point pt;
+    short newBtn;
+    short newSearchRow = -1;
+    Boolean changed = false;
+
+    if (!gMainWindow || gConnState != CONN_READY) return;
+    SetPort(gMainWindow);
+    GetMouse(&pt);
+
+    newBtn = HitTestTransportHover(pt);
+    if (newBtn != gHoverBtn) {
+        gHoverBtn = newBtn;
+        changed = true;
+    }
+
+    if (gSearchViewOpen) {
+        if (pt.h >= 61 && pt.h <= 452 && pt.v >= SEARCH_TOP_Y && pt.v < (SEARCH_TOP_Y + SEARCH_VISIBLE_ROWS * SEARCH_ROW_H)) {
+            short r = gSearchScroll + (pt.v - SEARCH_TOP_Y) / SEARCH_ROW_H;
+            if (r >= 0 && r < gSearchCount) {
+                newSearchRow = r;
+            }
+        }
+        if (newSearchRow != gSearchHoverRow) {
+            gSearchHoverRow = newSearchRow;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        RenderCanvas();
+    }
+}
+
+/* Tracks a transport button press with visual down-state (`button-states.png` Row 3) */
+static Boolean TrackTransportButtonPress(short btnId)
+{
+    Point pt;
+    gPressedBtn = btnId;
+    RenderCanvas();
+    while (StillDown()) {
+        GetMouse(&pt);
+    }
+    gPressedBtn = BTN_NONE;
+    return true;
 }
 
 /* ============================================================================
@@ -1109,50 +1571,65 @@ static void HandleCanvasClick(Point pt)
         return;
     }
 
-    /* 1. If Manual Server IP Modal is open, handle modal buttons */
-    if (gIpModalOpen) {
-        /* UDP Discover button (136, 172)-(244, 196) */
-        if (pt.v >= 172 && pt.v <= 196 && pt.h >= 136 && pt.h <= 244) {
-            SafeCopy(gIpModalStatus, "Searching via UDP :6801...", sizeof(gIpModalStatus));
-            RenderCanvas();
-            if (NetDiscoverServer()) {
-                FormatIPAddress(NetGetServerIP(), gIpInput);
-                gIpModalOpen = false;
-                ConnectAndLoadAll();
-            } else {
-                SafeCopy(gIpModalStatus, "No UDP reply. Enter IP manually:", sizeof(gIpModalStatus));
+    /* 1. Pre-Connection Server Screens (Server1.png, Server2.png, Server3.png) */
+    if (gConnState != CONN_READY) {
+        if (gConnState == CONN_FOUND) {
+            /* "Let's party!" button (204, 154)-(311, 180) skips remaining countdown */
+            if (pt.h >= 200 && pt.h <= 315 && pt.v >= 150 && pt.v <= 184) {
+                if (!gInitialDataLoaded) {
+                    ConnectAndLoadAll();
+                }
+                gConnState = CONN_READY;
                 RenderCanvas();
             }
             return;
         }
-        /* Connect button (260, 172)-(374, 196) */
-        if (pt.v >= 172 && pt.v <= 196 && pt.h >= 260 && pt.h <= 374) {
+
+        /* "Retry Scan" button (204, 154)-(311, 180) in Server2.png */
+        if (gConnState == CONN_FAILED && pt.h >= 200 && pt.h <= 315 && pt.v >= 150 && pt.v <= 184) {
+            RunInitialDiscovery();
+            return;
+        }
+
+        /* "Connect" button (281, 217)-(346, 243) in Server1.png / Server2.png */
+        if (pt.h >= 278 && pt.h <= 350 && pt.v >= 214 && pt.v <= 246) {
             ip_addr parsed = 0;
             if (ParseIPAddress(gIpInput, &parsed)) {
-                NetSetServer(parsed, DEFAULT_HTTP_PORT);
-                gIpModalOpen = false;
-                ConnectAndLoadAll();
-            } else {
-                SafeCopy(gIpModalStatus, "Invalid IP format (use e.g. 10.0.2.2)", sizeof(gIpModalStatus));
+                gConnState = CONN_SEARCHING;
                 RenderCanvas();
+                NetSetServer(parsed, DEFAULT_HTTP_PORT);
+                if (VerifyServerReachable()) {
+                    TransitionToServerFound();
+                } else {
+                    gConnState = CONN_FAILED;
+                    RenderCanvas();
+                }
             }
             return;
         }
         return;
     }
 
-    /* 2. If Speaker Chooser Popover is open, check if clicked inside (330, 152)-(466, 272) */
+    /* 2. Dynamic-Height Speaker Chooser Popover */
     if (gSpeakerPopupOpen) {
-        if (pt.h >= 330 && pt.h <= 466 && pt.v >= 152 && pt.v <= 272) {
-            short row = (pt.v - 158) / 18;
-            if (row >= 0 && row < 6 && row < gDeviceCount) {
+        short visibleDevs = (gDeviceCount > 0) ? gDeviceCount : 1;
+        short popH, popTop;
+        if (visibleDevs > 8) visibleDevs = 8;
+        popH   = visibleDevs * 18 + 12;
+        popTop = 272 - popH;
+
+        if (pt.h >= 330 && pt.h <= 466 && pt.v >= popTop && pt.v <= 272) {
+            short row = (pt.v - (popTop + 6)) / 18;
+            if (row >= 0 && row < visibleDevs && row < gDeviceCount) {
                 char path[160];
                 char encId[96];
+                SafeCopy(gNowPlaying.deviceName, gDevices[row].name, sizeof(gNowPlaying.deviceName));
+                gSpeakerPopupOpen = false;
+                RenderCanvas();
+
                 UrlEncode(gDevices[row].id, encId, sizeof(encId));
                 sprintf(path, "/api/spotify/transfer?device_id=%s", encId);
                 NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
-                SafeCopy(gNowPlaying.deviceName, gDevices[row].name, sizeof(gNowPlaying.deviceName));
-                gSpeakerPopupOpen = false;
                 RefreshNowPlaying(false);
                 RenderCanvas();
             }
@@ -1169,19 +1646,29 @@ static void HandleCanvasClick(Point pt)
         /* Home / Playlists Toggle (90..138) */
         if (pt.h >= 90 && pt.h <= 138) {
             gHomeMode = !gHomeMode;
-            gSearchFocused = false;
+            gSearchFocused  = false;
+            gSearchViewOpen = false;
             LoadLeftColumn();
             RenderCanvas();
             return;
         }
         /* Search Pill (156..356) */
         if (pt.h >= 156 && pt.h <= 356) {
-            if (pt.h >= 342 && gSearchQuery[0] != '\0') {
-                ExecuteSearchQuery();
-            } else {
-                gSearchFocused = true;
+            /* Clear (X) icon on right side of search pill (340..356) */
+            if (pt.h >= 340 && (gSearchViewOpen || gSearchQuery[0] != '\0')) {
+                gSearchQuery[0] = '\0';
+                gSearchViewOpen = false;
+                gSearchFocused  = false;
                 RenderCanvas();
+                return;
             }
+            /* Magnifying glass icon on left side of search pill (156..172) triggers search if query non-empty */
+            if (pt.h <= 172 && gSearchQuery[0] != '\0') {
+                ExecuteSearchQuery();
+                return;
+            }
+            gSearchFocused = true;
+            RenderCanvas();
             return;
         }
         gSearchFocused = false;
@@ -1193,34 +1680,103 @@ static void HandleCanvasClick(Point pt)
 
     /* 4. Middle Content Area (y = 22..272) */
     if (pt.v >= 22 && pt.v < 273) {
-        /* Left Scrollbar (x = 139..150) */
+        /* 4A. If Search Results Center Panel is open */
+        if (gSearchViewOpen) {
+            /* Top-right Close Circle (X) at (485, 34) 15x15 */
+            if (pt.h >= 480 && pt.h <= 504 && pt.v >= 30 && pt.v <= 54) {
+                gSearchViewOpen = false;
+                RenderCanvas();
+                return;
+            }
+            /* Draggable Search Scrollbar (x = 463..476, y = 35..266) */
+            if (pt.h >= 463 && pt.h <= 476 && gSearchCount > SEARCH_VISIBLE_ROWS) {
+                short maxScroll = gSearchCount - SEARCH_VISIBLE_ROWS;
+                Point curPt = pt;
+                do {
+                    short newScroll = (short)((long)(curPt.v - 35) * maxScroll / 200);
+                    if (newScroll < 0) newScroll = 0;
+                    if (newScroll > maxScroll) newScroll = maxScroll;
+                    if (newScroll != gSearchScroll) {
+                        gSearchScroll = newScroll;
+                        RenderCanvas();
+                    }
+                    GetMouse(&curPt);
+                } while (StillDown());
+                return;
+            }
+            /* Single-click on a Search Result Row (x = 61..452, y = 34..272) */
+            if (pt.h >= 61 && pt.h <= 452 && pt.v >= SEARCH_TOP_Y && pt.v < (SEARCH_TOP_Y + SEARCH_VISIBLE_ROWS * SEARCH_ROW_H)) {
+                short clickedIdx = gSearchScroll + (pt.v - SEARCH_TOP_Y) / SEARCH_ROW_H;
+                if (clickedIdx >= 0 && clickedIdx < gSearchCount) {
+                    ActivateSearchResultRow(clickedIdx);
+                }
+                return;
+            }
+            return;
+        }
+
+        /* 4B. Normal 3-Column View: Draggable Left Scrollbar (x = 139..150) */
         if (pt.h >= 139 && pt.h <= 150 && gLeftCount > VISIBLE_ROWS) {
             short maxScroll = gLeftCount - VISIBLE_ROWS;
-            short newScroll = (short)((long)(pt.v - 35) * maxScroll / 200);
-            if (newScroll < 0) newScroll = 0;
-            if (newScroll > maxScroll) newScroll = maxScroll;
-            gLeftScroll = newScroll;
-            RenderCanvas();
+            Point curPt = pt;
+            do {
+                short newScroll = (short)((long)(curPt.v - 35) * maxScroll / 200);
+                if (newScroll < 0) newScroll = 0;
+                if (newScroll > maxScroll) newScroll = maxScroll;
+                if (newScroll != gLeftScroll) {
+                    gLeftScroll = newScroll;
+                    RenderCanvas();
+                }
+                GetMouse(&curPt);
+            } while (StillDown());
             return;
         }
         /* Left Column Items (x = 8..138, y = 35..243) */
         if (pt.h >= 8 && pt.h <= 138 && pt.v >= LIST_TOP_Y && pt.v < LIST_BOTTOM_Y) {
             short clickedRow = gLeftScroll + (pt.v - LIST_TOP_Y) / ROW_HEIGHT;
             if (clickedRow >= 0 && clickedRow < gLeftCount) {
-                gLeftSelected = clickedRow;
+                unsigned long now = TickCount();
+                Boolean isDblClick = (clickedRow == gLastLeftClickedRow && (now - gLastLeftClickTicks) <= GetDblTime());
+                gLeftSelected       = clickedRow;
+                gLastLeftClickedRow = clickedRow;
+                gLastLeftClickTicks = now;
+                RenderCanvas();
+
                 LoadSelectedLeftItemIntoRightList();
                 RenderCanvas();
+
+                /* Double-clicking a playlist in the left column starts playing it right away */
+                if (isDblClick && gLeftItems[clickedRow].uri[0] != '\0') {
+                    char encUri[128], path[256];
+                    gTimelineFrozen = true;
+                    gNowPlaying.isPlaying  = true;
+                    gNowPlaying.progressMs = 0;
+                    FormatMmSs(0, gNowPlaying.progressMmSs);
+                    RenderCanvas();
+
+                    UrlEncode(gLeftItems[clickedRow].uri, encUri, sizeof(encUri));
+                    sprintf(path, "/api/spotify/play?context_uri=%s", encUri);
+                    NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+                    RefreshNowPlaying(true);
+                    RenderCanvas();
+                }
             }
             return;
         }
-        /* Right Scrollbar (x = 499..511) */
+        /* Draggable Right Scrollbar (x = 499..511) */
         if (pt.h >= 499 && pt.h <= 511 && gRightCount > VISIBLE_ROWS) {
             short maxScroll = gRightCount - VISIBLE_ROWS;
-            short newScroll = (short)((long)(pt.v - 35) * maxScroll / 200);
-            if (newScroll < 0) newScroll = 0;
-            if (newScroll > maxScroll) newScroll = maxScroll;
-            gRightScroll = newScroll;
-            RenderCanvas();
+            Point curPt = pt;
+            do {
+                short newScroll = (short)((long)(curPt.v - 35) * maxScroll / 200);
+                if (newScroll < 0) newScroll = 0;
+                if (newScroll > maxScroll) newScroll = maxScroll;
+                if (newScroll != gRightScroll) {
+                    gRightScroll = newScroll;
+                    RenderCanvas();
+                }
+                GetMouse(&curPt);
+            } while (StillDown());
             return;
         }
         /* Right Column Items (x = 370..498, y = 35..243) */
@@ -1247,15 +1803,35 @@ static void HandleCanvasClick(Point pt)
     if (pt.v >= 273) {
         /* Transport Row (y = 276..303) */
         if (pt.v >= 276 && pt.v <= 303) {
-            /* Shuffle (192..212) */
-            if (pt.h >= 192 && pt.h <= 212) {
-                NetHttpGet("/api/spotify/shuffle?mode=cycle", gHttpBuf, HTTP_BUF_SIZE);
+            /* Shuffle (191..213) */
+            if (pt.h >= 191 && pt.h <= 213) {
+                char path[96];
+                TrackTransportButtonPress(BTN_SHUFFLE);
+                /* Optimistic UI update */
+                if (strcmp(gNowPlaying.shuffleMode, "off") == 0) {
+                    SafeCopy(gNowPlaying.shuffleMode, "on", sizeof(gNowPlaying.shuffleMode));
+                } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
+                    SafeCopy(gNowPlaying.shuffleMode, "smart", sizeof(gNowPlaying.shuffleMode));
+                } else {
+                    SafeCopy(gNowPlaying.shuffleMode, "off", sizeof(gNowPlaying.shuffleMode));
+                }
+                RenderCanvas();
+
+                sprintf(path, "/api/spotify/shuffle?mode=%s", gNowPlaying.shuffleMode);
+                NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
                 RefreshNowPlaying(false);
                 RenderCanvas();
                 return;
             }
-            /* Previous (220..235) */
-            if (pt.h >= 220 && pt.h <= 235) {
+            /* Previous (216..238) */
+            if (pt.h >= 216 && pt.h <= 238) {
+                TrackTransportButtonPress(BTN_PREV);
+                /* Stop timeline immediately and reset to 00:00 before server callback */
+                gTimelineFrozen        = true;
+                gNowPlaying.progressMs = 0;
+                FormatMmSs(0, gNowPlaying.progressMmSs);
+                RenderCanvas();
+
                 NetHttpGet("/api/spotify/previous", gHttpBuf, HTTP_BUF_SIZE);
                 RefreshNowPlaying(true);
                 RenderCanvas();
@@ -1263,56 +1839,117 @@ static void HandleCanvasClick(Point pt)
             }
             /* Play / Pause Circle (242..270) */
             if (pt.h >= 242 && pt.h <= 270) {
-                NetHttpGet("/api/spotify/toggle-play", gHttpBuf, HTTP_BUF_SIZE);
+                Boolean wantPlay = !gNowPlaying.isPlaying;
+                TrackTransportButtonPress(BTN_PLAY);
+                /* Optimistic UI update: flip icon and stop timeline immediately */
+                gNowPlaying.isPlaying = wantPlay;
+                if (!wantPlay) {
+                    gTimelineFrozen = true;
+                }
+                SyncLocalAudioWithSpeaker();
+                RenderCanvas();
+
+                if (wantPlay) {
+                    NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+                } else {
+                    NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
+                }
                 RefreshNowPlaying(false);
                 RenderCanvas();
                 return;
             }
-            /* Next (278..293) */
-            if (pt.h >= 278 && pt.h <= 293) {
+            /* Next (273..295) */
+            if (pt.h >= 273 && pt.h <= 295) {
+                TrackTransportButtonPress(BTN_NEXT);
+                /* Stop timeline immediately and reset to 00:00 before server callback */
+                gTimelineFrozen        = true;
+                gNowPlaying.progressMs = 0;
+                FormatMmSs(0, gNowPlaying.progressMmSs);
+                RenderCanvas();
+
                 NetHttpGet("/api/spotify/next", gHttpBuf, HTTP_BUF_SIZE);
                 RefreshNowPlaying(true);
                 RenderCanvas();
                 return;
             }
-            /* Repeat (299..318) */
-            if (pt.h >= 299 && pt.h <= 318) {
-                NetHttpGet("/api/spotify/repeat?state=cycle", gHttpBuf, HTTP_BUF_SIZE);
+            /* Repeat (297..319) */
+            if (pt.h >= 297 && pt.h <= 319) {
+                char path[96];
+                TrackTransportButtonPress(BTN_REPEAT);
+                /* Optimistic UI update */
+                if (strcmp(gNowPlaying.repeatState, "off") == 0) {
+                    SafeCopy(gNowPlaying.repeatState, "context", sizeof(gNowPlaying.repeatState));
+                } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
+                    SafeCopy(gNowPlaying.repeatState, "track", sizeof(gNowPlaying.repeatState));
+                } else {
+                    SafeCopy(gNowPlaying.repeatState, "off", sizeof(gNowPlaying.repeatState));
+                }
+                RenderCanvas();
+
+                sprintf(path, "/api/spotify/repeat?state=%s", gNowPlaying.repeatState);
+                NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
                 RefreshNowPlaying(false);
                 RenderCanvas();
                 return;
             }
-            /* Speaker Selector (344..465) */
-            if (pt.h >= 344 && pt.h <= 465) {
+            /* Speaker Selector (342..rightX) */
+            if (pt.h >= 342 && pt.h <= GetSpeakerButtonRightX()) {
+                TrackTransportButtonPress(BTN_SPEAKER);
                 LoadDevicesAndTogglePopover();
                 return;
             }
         }
 
-        /* Timeline & Volume Row (y = 303..320) */
+        /* Draggable Timeline & Volume Row (y = 303..320) */
         if (pt.v >= 303 && pt.v <= 320) {
-            /* Timeline Scrubber (143..369) */
-            if (pt.h >= 143 && pt.h <= 369) {
+            /* Timeline Scrubber (140..372) */
+            if (pt.h >= 140 && pt.h <= 372) {
                 char path[96];
-                short pct = (short)(((long)(pt.h - 143) * 100L) / 226L);
-                if (pct < 0) pct = 0;
-                if (pct > 100) pct = 100;
+                short pct = 0;
+                Point curPt = pt;
+                gPressedBtn     = BTN_TIMELINE;
+                gTimelineFrozen = true;
+                do {
+                    pct = (short)(((long)(curPt.h - 143) * 100L) / 226L);
+                    if (pct < 0) pct = 0;
+                    if (pct > 100) pct = 100;
+                    if (gNowPlaying.durationMs > 0) {
+                        gNowPlaying.progressMs = (gNowPlaying.durationMs * pct) / 100L;
+                        FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
+                    }
+                    RenderCanvas();
+                    GetMouse(&curPt);
+                } while (StillDown());
+                gPressedBtn = BTN_NONE;
+                RenderCanvas();
+
                 sprintf(path, "/api/spotify/seek?percent=%d", pct);
                 NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
                 RefreshNowPlaying(false);
                 RenderCanvas();
                 return;
             }
-            /* Volume Scrubber (438..493) */
-            if (pt.h >= 438 && pt.h <= 493) {
+            /* Volume Scrubber (435..496) */
+            if (pt.h >= 435 && pt.h <= 496) {
                 char path[96];
-                short vol = (short)(((long)(pt.h - 438) * 100L) / 55L);
-                if (vol < 0) vol = 0;
-                if (vol > 100) vol = 100;
-                gNowPlaying.volumePct = vol;
+                short vol = gNowPlaying.volumePct;
+                Point curPt = pt;
+                gPressedBtn = BTN_VOLUME;
+                do {
+                    vol = (short)(((long)(curPt.h - 438) * 100L) / 55L);
+                    if (vol < 0) vol = 0;
+                    if (vol > 100) vol = 100;
+                    if (vol != gNowPlaying.volumePct) {
+                        gNowPlaying.volumePct = vol;
+                        RenderCanvas();
+                    }
+                    GetMouse(&curPt);
+                } while (StillDown());
+                gPressedBtn = BTN_NONE;
+                RenderCanvas();
+
                 sprintf(path, "/api/spotify/volume?volume_percent=%d", vol);
                 NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
-                RenderCanvas();
                 return;
             }
         }
@@ -1328,18 +1965,31 @@ static void HandleKeyPress(char ch)
         return;
     }
 
-    /* 1. Manual Server IP Modal Typing */
-    if (gIpModalOpen) {
+    /* 1. Pre-Connection Server Screens Typing */
+    if (gConnState != CONN_READY) {
         short len = (short)strlen(gIpInput);
+        if (gConnState == CONN_FOUND) {
+            if (ch == '\r' || ch == 3 || ch == ' ') {
+                if (!gInitialDataLoaded) {
+                    ConnectAndLoadAll();
+                }
+                gConnState = CONN_READY;
+                RenderCanvas();
+            }
+            return;
+        }
         if (ch == '\r' || ch == 3) { /* Return or Enter */
             ip_addr parsed = 0;
             if (ParseIPAddress(gIpInput, &parsed)) {
-                NetSetServer(parsed, DEFAULT_HTTP_PORT);
-                gIpModalOpen = false;
-                ConnectAndLoadAll();
-            } else {
-                SafeCopy(gIpModalStatus, "Invalid IP format (use e.g. 10.0.2.2)", sizeof(gIpModalStatus));
+                gConnState = CONN_SEARCHING;
                 RenderCanvas();
+                NetSetServer(parsed, DEFAULT_HTTP_PORT);
+                if (VerifyServerReachable()) {
+                    TransitionToServerFound();
+                } else {
+                    gConnState = CONN_FAILED;
+                    RenderCanvas();
+                }
             }
         } else if (ch == 8 && len > 0) { /* Backspace */
             gIpInput[len - 1] = '\0';
@@ -1358,7 +2008,8 @@ static void HandleKeyPress(char ch)
         if (ch == '\r' || ch == 3) {
             ExecuteSearchQuery();
         } else if (ch == 27) { /* Escape */
-            gSearchFocused = false;
+            gSearchFocused  = false;
+            gSearchViewOpen = false;
             RenderCanvas();
         } else if (ch == 8 && len > 0) {
             gSearchQuery[len - 1] = '\0';
@@ -1372,12 +2023,32 @@ static void HandleKeyPress(char ch)
     }
 
     /* 3. Global Keyboard Shortcuts */
+    if (ch == 27 && gSearchViewOpen) { /* Escape closes search view */
+        gSearchViewOpen = false;
+        RenderCanvas();
+        return;
+    }
+
     if (ch == ' ') {
-        NetHttpGet("/api/spotify/toggle-play", gHttpBuf, HTTP_BUF_SIZE);
+        Boolean wantPlay = !gNowPlaying.isPlaying;
+        gNowPlaying.isPlaying = wantPlay;
+        if (!wantPlay) gTimelineFrozen = true;
+        SyncLocalAudioWithSpeaker();
+        RenderCanvas();
+
+        if (wantPlay) {
+            NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+        } else {
+            NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
+        }
         RefreshNowPlaying(false);
         RenderCanvas();
     } else if (ch == '\r' || ch == 3) {
-        ActivateSelectedRightItem();
+        if (gSearchViewOpen && gSearchHoverRow >= 0 && gSearchHoverRow < gSearchCount) {
+            ActivateSearchResultRow(gSearchHoverRow);
+        } else {
+            ActivateSelectedRightItem();
+        }
     } else if (ch == 30) { /* Up Arrow */
         if (gRightSelected > 0) {
             gRightSelected--;
@@ -1419,27 +2090,46 @@ static void HandleMenuChoice(long menuChoice)
                 if (NetHasServer()) {
                     FormatIPAddress(NetGetServerIP(), gIpInput);
                 }
-                SafeCopy(gIpModalStatus, "Enter MacCompanion Server IP:", sizeof(gIpModalStatus));
-                gIpModalOpen = true;
+                gConnState = CONN_FAILED;
                 RenderCanvas();
             } else if (itemID == iFindSearch) {
-                gSearchFocused = true;
-                RenderCanvas();
+                if (gConnState == CONN_READY) {
+                    gSearchFocused = true;
+                    RenderCanvas();
+                }
             } else if (itemID == iQuit) {
                 gRunning = false;
             }
             break;
 
         case mPlayback:
+            if (gConnState != CONN_READY) break;
             if (itemID == iPlayPause) {
-                NetHttpGet("/api/spotify/toggle-play", gHttpBuf, HTTP_BUF_SIZE);
+                Boolean wantPlay = !gNowPlaying.isPlaying;
+                gNowPlaying.isPlaying = wantPlay;
+                if (!wantPlay) gTimelineFrozen = true;
+                SyncLocalAudioWithSpeaker();
+                RenderCanvas();
+                if (wantPlay) {
+                    NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+                } else {
+                    NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
+                }
                 RefreshNowPlaying(false);
                 RenderCanvas();
             } else if (itemID == iNextTrack) {
+                gTimelineFrozen        = true;
+                gNowPlaying.progressMs = 0;
+                FormatMmSs(0, gNowPlaying.progressMmSs);
+                RenderCanvas();
                 NetHttpGet("/api/spotify/next", gHttpBuf, HTTP_BUF_SIZE);
                 RefreshNowPlaying(true);
                 RenderCanvas();
             } else if (itemID == iPrevTrack) {
+                gTimelineFrozen        = true;
+                gNowPlaying.progressMs = 0;
+                FormatMmSs(0, gNowPlaying.progressMmSs);
+                RenderCanvas();
                 NetHttpGet("/api/spotify/previous", gHttpBuf, HTTP_BUF_SIZE);
                 RefreshNowPlaying(true);
                 RenderCanvas();
@@ -1482,7 +2172,6 @@ static void HandleMouseDown(EventRecord *ev)
                 Point pt = ev->where;
                 SetPort(gMainWindow);
                 GlobalToLocal(&pt);
-                /* Allow Cmd-dragging the borderless window on large screens */
                 if ((ev->modifiers & cmdKey) != 0 && pt.v < 22) {
                     DragWindow(gMainWindow, ev->where, &qd.screenBits.bounds);
                 } else {
@@ -1532,9 +2221,12 @@ int main(void)
 
     InitToolbox();
     SetupMenus();
+    NetInit();
+    AudioStreamInit();
 
     gHttpBuf = NewPtrClear(HTTP_BUF_SIZE);
-    memcpy(gCurrentArtworkBits, gDefaultArtworkBits, 5200);
+    /* Start with initial.png placeholder graphic ("Party like it's 1984") */
+    memcpy(gCurrentArtworkBits, gInitialArtworkBits, 5200);
     memset(&gNowPlaying, 0, sizeof(gNowPlaying));
     SafeCopy(gNowPlaying.progressMmSs, "00:00", sizeof(gNowPlaying.progressMmSs));
     SafeCopy(gNowPlaying.durationMmSs, "00:00", sizeof(gNowPlaying.durationMmSs));
@@ -1559,7 +2251,7 @@ int main(void)
     gMainWindow = NewWindow(
         NULL,
         &winBounds,
-        "\pMacCompanion Spotify",
+        "\pMaciSpot",
         true,
         plainDBox,
         (WindowPtr)-1L,
@@ -1567,9 +2259,7 @@ int main(void)
         0
     );
 
-    RenderCanvas();
-
-    /* Perform automatic UDP discovery (:6801) on launch; fallback to Manual IP Modal */
+    /* Show Server1.png and perform UDP discovery (:6801); transition to Server3.png or Server2.png */
     RunInitialDiscovery();
 
     gLastPollTicks   = TickCount();
@@ -1585,7 +2275,7 @@ int main(void)
             AudioStreamPump();
         }
 
-        if (WaitNextEvent(everyEvent, &ev, AudioStreamIsRunning() ? 1 : 4, NULL)) {
+        if (WaitNextEvent(everyEvent, &ev, AudioStreamIsRunning() ? 1 : 2, NULL)) {
             switch (ev.what) {
                 case mouseDown:
                     HandleMouseDown(&ev);
@@ -1601,30 +2291,57 @@ int main(void)
                     break;
 
                 case updateEvt:
-                    BeginUpdate((WindowPtr)ev.message);
                     if ((WindowPtr)ev.message == gMainWindow) {
+                        BeginUpdate(gMainWindow);
                         RenderCanvas();
+                        EndUpdate(gMainWindow);
                     }
-                    EndUpdate((WindowPtr)ev.message);
                     break;
             }
         }
 
+        /* Track button hover states and search result row hover */
+        UpdateHoverState();
+
         nowTicks = TickCount();
 
-        /* Advance local timeline smoothly every 1 second while playing */
-        if (gNowPlaying.isPlaying && !gIpModalOpen && (nowTicks - gLastSecondTicks) >= 60) {
+        /* Handle 3-second countdown on Server3.png (CONN_FOUND) */
+        if (gConnState == CONN_FOUND) {
+            long elapsedTicks;
+            short remSec;
+            if (!gInitialDataLoaded) {
+                ConnectAndLoadAll();
+            }
+            elapsedTicks = (long)(nowTicks - gFoundStartTicks);
+            remSec = 3 - (short)(elapsedTicks / 60);
+            if (remSec <= 0) {
+                gConnState = CONN_READY;
+                RenderCanvas();
+            } else if (remSec != gFoundCountdownSec) {
+                gFoundCountdownSec = remSec;
+                RenderCanvas();
+            }
+            continue;
+        }
+
+        if (gConnState != CONN_READY) {
+            continue;
+        }
+
+        /* Local 1-second timeline progression while playing and not frozen */
+        if (gNowPlaying.isPlaying && !gTimelineFrozen && (nowTicks - gLastSecondTicks) >= 60) {
             gLastSecondTicks = nowTicks;
-            if (gNowPlaying.durationMs > 0 && gNowPlaying.progressMs + 1000 <= gNowPlaying.durationMs) {
+            if (gNowPlaying.progressMs + 1000 <= gNowPlaying.durationMs) {
                 gNowPlaying.progressMs += 1000;
                 FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
-                RenderCanvas();
+                if (!gSpeakerPopupOpen && !gAboutModalOpen) {
+                    RenderCanvas();
+                }
             }
         }
 
-        /* Poll server for Now Playing changes every ~4 seconds when idle or ~6 seconds during audio */
-        if (NetHasServer() && !gIpModalOpen &&
-            (nowTicks - gLastPollTicks) >= (AudioStreamIsRunning() ? 360 : 240)) {
+        /* Poll /api/spotify/now-playing every ~4 seconds (240 ticks) */
+        if (NetHasServer() && !gAboutModalOpen && (nowTicks - gLastPollTicks) >= 240) {
             gLastPollTicks   = nowTicks;
             gLastSecondTicks = nowTicks;
             RefreshNowPlaying(true);
@@ -1633,8 +2350,7 @@ int main(void)
     }
 
     AudioStreamStop();
-    if (gMainWindow != NULL) {
-        DisposeWindow(gMainWindow);
-    }
+    if (gHttpBuf) DisposePtr(gHttpBuf);
+    if (gOffscreenBits) DisposePtr(gOffscreenBits);
     return 0;
 }

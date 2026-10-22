@@ -7,7 +7,7 @@ CLIENT_DIR="$ROOT_DIR/client"
 BUILD_DIR="$CLIENT_DIR/build"
 VERSION_HEADER="$CLIENT_DIR/src/version.h"
 DRIVESHARE_DIR="${BASILISK_DRIVESHARE:-/Applications/Basillisk/driveshare/MacCompanion}"
-APP_NAME="MacCompanionSpotify"
+APP_NAME="MaciSpot"
 
 if [ ! -f "$TOOLCHAIN_FILE" ]; then
     echo "Error: Retro68 toolchain not found at $TOOLCHAIN_FILE"
@@ -17,8 +17,8 @@ fi
 # Extract version strings from client/src/version.h
 VERSION_SHORT=$( sed -n 's/^#define APP_VERSION_SHORT[[:space:]]*"\(.*\)"/\1/p' "$VERSION_HEADER" )
 VERSION_SLUG=$(  sed -n 's/^#define APP_VERSION_SLUG[[:space:]]*"\(.*\)"/\1/p'  "$VERSION_HEADER" )
-VERSION_SHORT="${VERSION_SHORT:-0.1 Beta}"
-VERSION_SLUG="${VERSION_SLUG:-v0.1-beta}"
+VERSION_SHORT="${VERSION_SHORT:-0.2 Beta}"
+VERSION_SLUG="${VERSION_SLUG:-v0.2-beta}"
 
 echo "==> Configuring & building $APP_NAME ($VERSION_SHORT / $VERSION_SLUG)..."
 mkdir -p "$BUILD_DIR"
@@ -39,7 +39,7 @@ cp "$BUILD_DIR/$APP_NAME.dsk" "$RELEASE_DIR/${APP_NAME}-${VERSION_SLUG}.dsk"
 echo "==> Archived release artifacts in $RELEASE_DIR:"
 ls -lh "$RELEASE_DIR/${APP_NAME}-${VERSION_SLUG}.bin" "$RELEASE_DIR/${APP_NAME}-${VERSION_SLUG}.dsk"
 
-# Helper to deploy a Classic Mac APPL with both macOS namedfork/xattr and .rsrc/.finf metadata
+# Helper to deploy a Classic Mac APPL with both macOS namedfork/xattr, .rsrc/.finf metadata, and hasBundle flag (0x2000)
 deploy_appl_to_folder() {
     local src_appl="$1"
     local dst_dir="$2"
@@ -58,7 +58,8 @@ deploy_appl_to_folder() {
     python3 - "$target_appl" "$dst_dir/.finf/$dst_name" "$creator" <<'PYEOF'
 import subprocess, sys
 target_appl, finf_file, creator = sys.argv[1], sys.argv[2], sys.argv[3]
-finfo = ("APPL" + creator[:4]).encode("ascii") + (b"\x00" * 24)
+# FinderInfo: 4B Type ('APPL') + 4B Creator ('MCSP') + 2B fdFlags (0x2000 = hasBundle) + 22B zeros
+finfo = ("APPL" + creator[:4]).encode("ascii") + b"\x20\x00" + (b"\x00" * 22)
 hex_finfo = finfo.hex()
 with open(finf_file, "wb") as f:
     f.write(finfo)
@@ -71,7 +72,7 @@ if [ -d "/Applications/Basillisk/driveshare" ]; then
     echo "==> Deploying to Basilisk II Unix Shared Drive: $DRIVESHARE_DIR"
     mkdir -p "$DRIVESHARE_DIR/launch" "$DRIVESHARE_DIR/Releases"
 
-    # Deploy latest active build
+    # Deploy latest active build as MaciSpot
     deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$DRIVESHARE_DIR" "$APP_NAME" "MCSP"
 
     # Deploy version-numbered copy into Unix -> MacCompanion -> Releases

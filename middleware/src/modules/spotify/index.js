@@ -1352,10 +1352,51 @@ router.get('/playlist/:id/tracks', async (req, res) => {
       items = (container && Array.isArray(container.items)) ? container.items.slice(offset, offset + limit) : [];
     }
 
-    const rows = items
+    let rows = items
       .map((entry) => entry && (entry.item || entry.track))
       .filter(Boolean)
       .map((t) => formatTrackRow('TRACK', t));
+
+    // Fallback for followed third-party playlists restricted by Spotify Dev Mode Web API
+    if (rows.length === 0 && !customFetch) {
+      try {
+        const fetchFn = getFetchImpl();
+        const embedRes = await fetchFn(`https://open.spotify.com/embed/playlist/${encodeURIComponent(playlistId)}`);
+        if (embedRes && embedRes.ok) {
+          const html = await embedRes.text();
+          const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([^<]+)<\/script>/);
+          if (m) {
+            const nextData = JSON.parse(m[1]);
+            const trackList =
+              nextData &&
+              nextData.props &&
+              nextData.props.pageProps &&
+              nextData.props.pageProps.state &&
+              nextData.props.pageProps.state.data &&
+              nextData.props.pageProps.state.data.entity &&
+              nextData.props.pageProps.state.data.entity.trackList;
+            if (Array.isArray(trackList) && trackList.length > 0) {
+              rows = trackList.slice(offset, offset + limit).map((tr) => {
+                const uri = tr.uri || '';
+                const id = uri.includes(':') ? uri.split(':').pop() : uri;
+                const durMs = tr.duration || 0;
+                return [
+                  'TRACK',
+                  id,
+                  tr.title || 'Unknown',
+                  tr.subtitle || '',
+                  '',
+                  durMs,
+                  formatTimeMmSs(durMs),
+                  uri,
+                ];
+              });
+            }
+          }
+        }
+      } catch {}
+    }
+
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -1644,14 +1685,49 @@ router.get('/search', async (req, res) => {
       err.status = 400;
       throw err;
     }
-    const type = (req.query.type || 'track').toLowerCase().trim();
-    const limit = Math.min(25, parseInt(req.query.limit || '15', 10));
+    const rawType = (req.query.type || 'track').toLowerCase().trim();
+    const isMulti = rawType === 'all' || rawType === 'multi' || rawType.includes(',');
+    const apiType = isMulti ? 'track,album,playlist' : rawType;
+    const limit = Math.min(25, parseInt(req.query.limit || (isMulti ? '8' : '15'), 10));
     const data = await callSpotify('/search', {
-      query: { q, type, limit },
+      query: { q, type: apiType, limit },
     });
 
     let rows = [];
-    if (type === 'album' && data && data.albums) {
+    if (isMulti && data) {
+      const tracks = (data.tracks && Array.isArray(data.tracks.items)) ? data.tracks.items.filter(Boolean) : [];
+      const albums = (data.albums && Array.isArray(data.albums.items)) ? data.albums.items.filter(Boolean) : [];
+      const playlists = (data.playlists && Array.isArray(data.playlists.items)) ? data.playlists.items.filter(Boolean) : [];
+      const maxLen = Math.max(tracks.length, albums.length, playlists.length);
+      for (let i = 0; i < maxLen; i++) {
+        if (i < tracks.length) {
+          rows.push(formatTrackRow('TRACK', tracks[i]));
+        }
+        if (i < albums.length) {
+          const a = albums[i];
+          rows.push([
+            'ALBUM',
+            a.id || '',
+            a.name || 'Untitled',
+            Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '',
+            a.total_tracks || 0,
+            a.release_date || '',
+            a.uri || '',
+          ]);
+        }
+        if (i < playlists.length) {
+          const p = playlists[i];
+          rows.push([
+            'PLAYLIST',
+            p.id || '',
+            p.name || 'Untitled',
+            (p.items && p.items.total) || (p.tracks && p.tracks.total) || 0,
+            p.owner ? (p.owner.display_name || p.owner.id) : '',
+            p.uri || '',
+          ]);
+        }
+      }
+    } else if (rawType === 'album' && data && data.albums) {
       rows = (data.albums.items || []).filter(Boolean).map((a) => [
         'ALBUM',
         a.id || '',
@@ -1661,7 +1737,7 @@ router.get('/search', async (req, res) => {
         a.release_date || '',
         a.uri || '',
       ]);
-    } else if (type === 'artist' && data && data.artists) {
+    } else if (rawType === 'artist' && data && data.artists) {
       rows = (data.artists.items || []).filter(Boolean).map((a) => [
         'ARTIST',
         a.id || '',
@@ -1669,7 +1745,7 @@ router.get('/search', async (req, res) => {
         Array.isArray(a.genres) ? a.genres.slice(0, 3).join(', ') : '',
         a.uri || '',
       ]);
-    } else if (type === 'playlist' && data && data.playlists) {
+    } else if (rawType === 'playlist' && data && data.playlists) {
       rows = (data.playlists.items || []).filter(Boolean).map((p) => [
         'PLAYLIST',
         p.id || '',
