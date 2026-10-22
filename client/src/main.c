@@ -254,25 +254,41 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
     long          count  = sizeof(MaciSpotPrefs);
     MaciSpotPrefs prefs;
     OSErr         err;
+    FILE         *fp;
 
     if (!outServerIp) return false;
     *outServerIp = 0;
 
-    if (!GetPrefsFileSpec(&spec)) return false;
-    err = FSpOpenDF(&spec, fsRdPerm, &refNum);
-    if (err != noErr) return false;
+    if (GetPrefsFileSpec(&spec)) {
+        err = FSpOpenDF(&spec, fsRdPerm, &refNum);
+        if (err == noErr) {
+            memset(&prefs, 0, sizeof(prefs));
+            err = FSRead(refNum, &count, &prefs);
+            FSClose(refNum);
+            if (err == noErr &&
+                count == sizeof(MaciSpotPrefs) &&
+                prefs.magic == PREFS_MAGIC &&
+                prefs.seenServerScreen != 0 &&
+                prefs.serverIp != 0) {
+                *outServerIp = prefs.serverIp;
+                return true;
+            }
+        }
+    }
 
-    memset(&prefs, 0, sizeof(prefs));
-    err = FSRead(refNum, &count, &prefs);
-    FSClose(refNum);
-
-    if (err == noErr &&
-        count == sizeof(MaciSpotPrefs) &&
-        prefs.magic == PREFS_MAGIC &&
-        prefs.seenServerScreen != 0 &&
-        prefs.serverIp != 0) {
-        *outServerIp = prefs.serverIp;
-        return true;
+    /* Fallback: check local directory file if Preferences folder was unavailable */
+    fp = fopen("MaciSpot Prefs", "rb");
+    if (fp) {
+        memset(&prefs, 0, sizeof(prefs));
+        if (fread(&prefs, 1, sizeof(MaciSpotPrefs), fp) == sizeof(MaciSpotPrefs) &&
+            prefs.magic == PREFS_MAGIC &&
+            prefs.seenServerScreen != 0 &&
+            prefs.serverIp != 0) {
+            fclose(fp);
+            *outServerIp = prefs.serverIp;
+            return true;
+        }
+        fclose(fp);
     }
     return false;
 }
@@ -284,22 +300,31 @@ static void SaveServerPrefs(ip_addr serverIp)
     long          count  = sizeof(MaciSpotPrefs);
     MaciSpotPrefs prefs;
     OSErr         err;
+    FILE         *fp;
 
     if (serverIp == 0) return;
-    if (!GetPrefsFileSpec(&spec)) return;
-
-    FSpCreate(&spec, 'MCSP', 'pref', smSystemScript);
-    err = FSpOpenDF(&spec, fsWrPerm, &refNum);
-    if (err != noErr) return;
 
     memset(&prefs, 0, sizeof(prefs));
     prefs.magic            = PREFS_MAGIC;
     prefs.serverIp         = serverIp;
     prefs.seenServerScreen = 1;
 
-    SetEOF(refNum, 0);
-    FSWrite(refNum, &count, &prefs);
-    FSClose(refNum);
+    if (GetPrefsFileSpec(&spec)) {
+        FSpCreate(&spec, 'MCSP', 'pref', smSystemScript);
+        err = FSpOpenDF(&spec, fsWrPerm, &refNum);
+        if (err == noErr) {
+            SetEOF(refNum, 0);
+            FSWrite(refNum, &count, &prefs);
+            FSClose(refNum);
+            return;
+        }
+    }
+
+    fp = fopen("MaciSpot Prefs", "wb");
+    if (fp) {
+        fwrite(&prefs, 1, sizeof(MaciSpotPrefs), fp);
+        fclose(fp);
+    }
 }
 
 /* ============================================================================
@@ -1132,36 +1157,47 @@ static void RenderCanvas(void)
     }
 
     /* --------------------------------------------------------------------
-     * 5. About MaciSpot Modal Dialog
+     * 5. About MaciSpot Modal Dialog (with 58x58 ~2x2cm Buy Me a Coffee QR)
      * -------------------------------------------------------------------- */
     if (gAboutModalOpen) {
         Rect dlgRect, shadowRect, btnOk;
+        const char *verLine    = "MaciSpot " APP_VERSION_SHORT;
+        const char *codeLine   = "\"" APP_VERSION_CODENAME "\"";
+        const char *coffeeLine = "Like MaciSpot? Buy me a coffee!";
+        short w;
 
-        SetRect(&shadowRect, 144, 74, 374, 232);
+        SetRect(&shadowRect, 140, 38, 380, 254);
         FillRoundRect(&shadowRect, 10, 10, &qd.gray);
 
-        SetRect(&dlgRect, 140, 70, 370, 228);
+        SetRect(&dlgRect, 136, 34, 376, 250);
         EraseRoundRect(&dlgRect, 10, 10);
         FrameRoundRect(&dlgRect, 10, 10);
         InsetRect(&dlgRect, 2, 2);
         FrameRoundRect(&dlgRect, 8, 8);
 
-        BlitIcon1Bit(gMaciSpotLogoBits, 56, 44, 228, 82, srcCopy);
+        /* MaciSpot Logo (56x44) centered at top */
+        BlitIcon1Bit(gMaciSpotLogoBits, 56, 44, 228, 44, srcCopy);
 
         TextMode(srcOr);
-        MoveTo(184, 142);
-        DrawCStringTruncated("MaciSpot " APP_VERSION_SHORT, 32);
+        w = TextWidth(verLine, 0, (short)strlen(verLine));
+        MoveTo(256 - (w / 2), 102);
+        DrawText(verLine, 0, (short)strlen(verLine));
 
-        MoveTo(202, 158);
-        DrawCStringTruncated("\"" APP_VERSION_CODENAME "\"", 32);
+        w = TextWidth(codeLine, 0, (short)strlen(codeLine));
+        MoveTo(256 - (w / 2), 116);
+        DrawText(codeLine, 0, (short)strlen(codeLine));
 
-        MoveTo(164, 174);
-        DrawCStringTruncated("68k Native + Sound Manager", 32);
+        w = TextWidth(coffeeLine, 0, (short)strlen(coffeeLine));
+        MoveTo(256 - (w / 2), 134);
+        DrawText(coffeeLine, 0, (short)strlen(coffeeLine));
 
-        SetRect(&btnOk, 215, 190, 295, 214);
+        /* 58x58 QR code (~2x2cm on 9" Compact Mac CRT) centered at (227, 144) */
+        BlitIcon1Bit(gAboutQrCodeBits, 58, 58, 227, 144, srcCopy);
+
+        SetRect(&btnOk, 216, 212, 296, 236);
         PaintRoundRect(&btnOk, 6, 6);
         TextMode(srcBic);
-        MoveTo(248, 205);
+        MoveTo(248, 227);
         DrawCStringTruncated("OK", 4);
         TextMode(srcOr);
     }
@@ -1817,8 +1853,8 @@ static Boolean VerifyServerReachable(void)
 {
     long n;
     if (!NetHasServer() || !gHttpBuf) return false;
-    n = NetHttpGet("/api/spotify/status", gHttpBuf, HTTP_BUF_SIZE);
-    return (n > 0 && strncmp(gHttpBuf, "STATUS|", 7) == 0);
+    n = NetHttpGet("/api/ping", gHttpBuf, HTTP_BUF_SIZE);
+    return (n > 0 && strncmp(gHttpBuf, "MACCOMPANION_SERVER|", 20) == 0);
 }
 
 static void TransitionToServerFound(void)
@@ -1909,6 +1945,9 @@ static Boolean TrackTransportButtonPress(short btnId)
     gPressedBtn = btnId;
     RenderCanvas();
     while (StillDown()) {
+        if (AudioStreamIsRunning()) {
+            AudioStreamPump();
+        }
         GetMouse(&pt);
     }
     gPressedBtn = BTN_NONE;
@@ -2060,6 +2099,9 @@ static void HandleCanvasClick(Point pt)
                         gSearchScroll = newScroll;
                         RenderCanvas();
                     }
+                    if (AudioStreamIsRunning()) {
+                        AudioStreamPump();
+                    }
                     GetMouse(&curPt);
                 } while (StillDown());
                 return;
@@ -2086,6 +2128,9 @@ static void HandleCanvasClick(Point pt)
                 if (newScroll != gLeftScroll) {
                     gLeftScroll = newScroll;
                     RenderCanvas();
+                }
+                if (AudioStreamIsRunning()) {
+                    AudioStreamPump();
                 }
                 GetMouse(&curPt);
             } while (StillDown());
@@ -2134,6 +2179,9 @@ static void HandleCanvasClick(Point pt)
                 if (newScroll != gRightScroll) {
                     gRightScroll = newScroll;
                     RenderCanvas();
+                }
+                if (AudioStreamIsRunning()) {
+                    AudioStreamPump();
                 }
                 GetMouse(&curPt);
             } while (StillDown());
@@ -2267,14 +2315,21 @@ static void HandleCanvasClick(Point pt)
                 gPressedBtn     = BTN_TIMELINE;
                 gTimelineFrozen = true;
                 do {
+                    long newProg = gNowPlaying.progressMs;
                     pct = (short)(((long)(curPt.h - 143) * 100L) / 226L);
                     if (pct < 0) pct = 0;
                     if (pct > 100) pct = 100;
                     if (gNowPlaying.durationMs > 0) {
-                        gNowPlaying.progressMs = (gNowPlaying.durationMs * pct) / 100L;
-                        FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
+                        newProg = (gNowPlaying.durationMs * pct) / 100L;
                     }
-                    RenderCanvas();
+                    if (newProg != gNowPlaying.progressMs) {
+                        gNowPlaying.progressMs = newProg;
+                        FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
+                        RenderCanvas();
+                    }
+                    if (AudioStreamIsRunning()) {
+                        AudioStreamPump();
+                    }
                     GetMouse(&curPt);
                 } while (StillDown());
                 gPressedBtn = BTN_NONE;
@@ -2301,6 +2356,9 @@ static void HandleCanvasClick(Point pt)
                     if (vol != gNowPlaying.volumePct) {
                         gNowPlaying.volumePct = vol;
                         RenderCanvas();
+                    }
+                    if (AudioStreamIsRunning()) {
+                        AudioStreamPump();
                     }
                     GetMouse(&curPt);
                 } while (StillDown());

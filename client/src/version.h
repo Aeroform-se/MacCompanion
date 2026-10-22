@@ -7,13 +7,13 @@
  */
 #define APP_NAME_STR            "MaciSpot"
 #define APP_VERSION_MAJOR_BCD   0x00
-#define APP_VERSION_MINOR_BCD   0x32
-#define APP_VERSION_STAGE       beta
+#define APP_VERSION_MINOR_BCD   0x33
+#define APP_VERSION_STAGE       release
 #define APP_VERSION_NONFINAL    0x01
 
-#define APP_VERSION_SHORT       "0.3.2 Beta"
-#define APP_VERSION_CODENAME    "Golden goose 2"
-#define APP_VERSION_LONG        "0.3.2 Beta \"Golden goose 2\" (MaciSpot 68k)"
-#define APP_VERSION_SLUG        "v0.3.2-beta"
+#define APP_VERSION_SHORT       "0.3.3 RC"
+#define APP_VERSION_CODENAME    "Precious"
+#define APP_VERSION_LONG        "0.3.3 RC \"Precious\" (MaciSpot 68k)"
+#define APP_VERSION_SLUG        "v0.3.3-rc"
 
 #endif /* VERSION_H */
