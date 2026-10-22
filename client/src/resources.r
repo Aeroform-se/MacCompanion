@@ -3,9 +3,8 @@
 
 /*
  * SIZE -1 resource:
- * - acceptSuspendResumeEvents: cooperative multitasking support
- * - canBackground: receive nullEvent while in background so TCP audio & UDP state keep running!
- * - 384 KB preferred / 256 KB minimum partition (plenty for double-buffered 22kHz PCM + QuickDraw UI)
+ * - acceptSuspendResumeEvents & canBackground: keeps TCP audio & timeline alive in background
+ * - 512 KB preferred / 384 KB minimum RAM partition
  */
 resource 'SIZE' (-1) {
     reserved,
@@ -24,8 +23,8 @@ resource 'SIZE' (-1) {
     reserved,
     reserved,
     reserved,
-    393216,
-    262144
+    524288,
+    393216
 };
 
 resource 'MBAR' (128) {
@@ -47,7 +46,8 @@ resource 'MENU' (129, "File") {
     allEnabled,
     enabled, "File",
     {
-        "Reconnect to Server", noIcon, "R", noMark, plain,
+        "Server IP / Reconnect...", noIcon, "R", noMark, plain,
+        "Find Search...", noIcon, "F", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Quit", noIcon, "Q", noMark, plain
     }
@@ -62,6 +62,7 @@ resource 'MENU' (130, "Playback") {
         "Next Track", noIcon, "N", noMark, plain,
         "Previous Track", noIcon, "B", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
-        "Toggle Local 68k Audio", noIcon, "L", noMark, plain
+        "Like / Unlike Track", noIcon, "L", noMark, plain,
+        "Choose Speaker...", noIcon, "K", noMark, plain
     }
 };

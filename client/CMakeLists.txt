@@ -6,6 +6,7 @@ set(CMAKE_C_STANDARD 99)
 add_application(MacCompanionSpotify
     CREATOR "MCSP"
     src/main.c
+    src/network.c
     src/resources.r
 )
 

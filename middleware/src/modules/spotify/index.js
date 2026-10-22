@@ -203,6 +203,9 @@ function normalizeSpotifyUri(input, defaultType = 'track') {
   };
 }
 
+let likedCache = { uri: null, liked: false, ts: 0 };
+const artworkCache = new Map();
+
 /**
  * Checks if a track URI is saved in the user's "Liked Songs" library using Spotify's `/me/library/contains`.
  */
@@ -210,10 +213,15 @@ async function checkIsTrackLiked(trackIdOrUri) {
   if (!trackIdOrUri) return false;
   try {
     const { uri } = normalizeSpotifyUri(trackIdOrUri, 'track');
+    if (!customFetch && likedCache.uri === uri && (Date.now() - likedCache.ts) < 30000) {
+      return likedCache.liked;
+    }
     const res = await callSpotify('/me/library/contains', {
       query: { uris: uri },
     });
-    return Array.isArray(res) && Boolean(res[0]);
+    const liked = Array.isArray(res) && Boolean(res[0]);
+    likedCache = { uri, liked, ts: Date.now() };
+    return liked;
   } catch {
     return false;
   }
@@ -1504,6 +1512,38 @@ router.get('/albums', async (req, res) => {
 });
 
 /**
+ * GET /api/spotify/new-releases?limit=20
+ * Lists newly released albums.
+ */
+router.get('/new-releases', async (req, res) => {
+  try {
+    const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
+    let items = [];
+    try {
+      const data = await callSpotify('/browse/new-releases', { query: { limit } });
+      items = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
+    } catch {
+      const data = await callSpotify('/search', { query: { q: 'tag:new', type: 'album', limit } });
+      items = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
+    }
+    const rows = items.filter(Boolean).map((a) => [
+      'ALBUM',
+      a.id || '',
+      a.name || 'Untitled',
+      Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '',
+      a.total_tracks || 0,
+      a.release_date || '',
+      a.uri || '',
+    ]);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
  * GET /api/spotify/album/:id/tracks?limit=50&offset=0
  * Lists tracks inside an album.
  */
@@ -1701,7 +1741,10 @@ router.get('/artwork', async (req, res) => {
     }
 
     let result;
-    if (imageUrl) {
+    const cacheKey = imageUrl ? `${imageUrl}|${size}|${dither}|${format}` : null;
+    if (!customFetch && cacheKey && artworkCache.has(cacheKey)) {
+      result = artworkCache.get(cacheKey);
+    } else if (imageUrl) {
       const fetchFn = getFetchImpl();
       const imgRes = await fetchFn(imageUrl);
       if (!imgRes.ok) {
@@ -1713,6 +1756,13 @@ router.get('/artwork', async (req, res) => {
         dither,
         format,
       });
+      if (!customFetch && cacheKey) {
+        if (artworkCache.size > 12) {
+          const oldest = artworkCache.keys().next().value;
+          artworkCache.delete(oldest);
+        }
+        artworkCache.set(cacheKey, result);
+      }
     } else {
       result = await generatePlaceholderArtwork({ size, dither, format });
     }
