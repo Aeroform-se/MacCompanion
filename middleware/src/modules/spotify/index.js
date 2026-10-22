@@ -993,7 +993,7 @@ async function injectSmartShuffleRecommendations() {
 
     // Search related tracks & radio mix tracks for the artist
     const searchData = await callSpotify('/search', {
-      query: { q: `${q}`, type: 'track', limit: 15 },
+      query: { q: `${q}`, type: 'track', limit: 10 },
     });
     const candidates = (searchData && searchData.tracks && Array.isArray(searchData.tracks.items))
       ? searchData.tracks.items.filter((t) => t.id !== raw.item.id)
@@ -1163,7 +1163,7 @@ router.all('/radio', async (req, res) => {
 
     // 2. Fallback: Build a dynamic radio track list from search and start playing them
     const trackSearch = await callSpotify('/search', {
-      query: { q: artistQuery, type: 'track', limit: 20 },
+      query: { q: artistQuery, type: 'track', limit: 10 },
     });
     const tracks = (trackSearch && trackSearch.tracks && Array.isArray(trackSearch.tracks.items))
       ? trackSearch.tracks.items.filter((t) => t && t.uri)
@@ -1665,7 +1665,7 @@ router.get('/new-releases', async (req, res) => {
       const data = await callSpotify('/browse/new-releases', { query: { limit } });
       items = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
     } catch {
-      const data = await callSpotify('/search', { query: { q: 'tag:new', type: 'album', limit } });
+      const data = await callSpotify('/search', { query: { q: 'tag:new', type: 'album', limit: Math.min(10, limit) } });
       items = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
     }
     const rows = items.filter(Boolean).map((a) => [
@@ -1790,7 +1790,7 @@ router.get('/search', async (req, res) => {
     const rawType = (req.query.type || 'track').toLowerCase().trim();
     const isMulti = rawType === 'all' || rawType === 'multi' || rawType.includes(',');
     const apiType = isMulti ? 'track,album,playlist' : rawType;
-    const limit = Math.min(25, parseInt(req.query.limit || (isMulti ? '8' : '15'), 10));
+    const limit = Math.max(1, Math.min(10, parseInt(req.query.limit || '10', 10) || 10));
     const data = await callSpotify('/search', {
       query: { q, type: apiType, limit },
     });

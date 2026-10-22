@@ -7,13 +7,13 @@
  */
 #define APP_NAME_STR            "MaciSpot"
 #define APP_VERSION_MAJOR_BCD   0x00
-#define APP_VERSION_MINOR_BCD   0x30
+#define APP_VERSION_MINOR_BCD   0x31
 #define APP_VERSION_STAGE       beta
 #define APP_VERSION_NONFINAL    0x01
 
-#define APP_VERSION_SHORT       "0.3 Beta"
-#define APP_VERSION_CODENAME    "Soda"
-#define APP_VERSION_LONG        "0.3 Beta \"Soda\" (MaciSpot 68k)"
-#define APP_VERSION_SLUG        "v0.3-beta"
+#define APP_VERSION_SHORT       "0.3.1 Beta"
+#define APP_VERSION_CODENAME    "Golden goose"
+#define APP_VERSION_LONG        "0.3.1 Beta \"Golden goose\" (MaciSpot 68k)"
+#define APP_VERSION_SLUG        "v0.3.1-beta"
 
 #endif /* VERSION_H */

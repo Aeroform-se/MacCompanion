@@ -21,6 +21,8 @@
 #include <Processes.h>
 #include <OSUtils.h>
 #include <Memory.h>
+#include <Files.h>
+#include <Folders.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -215,6 +217,87 @@ static char           *gHttpBuf           = NULL;
 /* Forward declarations */
 static void RenderCanvas(void);
 static void ConnectAndLoadAll(void);
+
+/* ============================================================================
+ * Persistent Server Preferences ("MaciSpot Prefs" in System Folder:Preferences)
+ * ============================================================================ */
+
+#define PREFS_MAGIC         0x4D435331UL /* 'MCS1' */
+
+typedef struct {
+    unsigned long magic;
+    ip_addr       serverIp;
+    unsigned char seenServerScreen;
+    unsigned char reserved[3];
+} MaciSpotPrefs;
+
+static Boolean GetPrefsFileSpec(FSSpec *outSpec)
+{
+    short vRefNum = 0;
+    long  dirID   = 0;
+    OSErr err;
+
+    err = FindFolder(kOnSystemDisk, kPreferencesFolderType, kCreateFolder, &vRefNum, &dirID);
+    if (err != noErr) return false;
+
+    err = FSMakeFSSpec(vRefNum, dirID, "\pMaciSpot Prefs", outSpec);
+    return (err == noErr || err == fnfErr);
+}
+
+static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
+{
+    FSSpec        spec;
+    short         refNum = 0;
+    long          count  = sizeof(MaciSpotPrefs);
+    MaciSpotPrefs prefs;
+    OSErr         err;
+
+    if (!outServerIp) return false;
+    *outServerIp = 0;
+
+    if (!GetPrefsFileSpec(&spec)) return false;
+    err = FSpOpenDF(&spec, fsRdPerm, &refNum);
+    if (err != noErr) return false;
+
+    memset(&prefs, 0, sizeof(prefs));
+    err = FSRead(refNum, &count, &prefs);
+    FSClose(refNum);
+
+    if (err == noErr &&
+        count == sizeof(MaciSpotPrefs) &&
+        prefs.magic == PREFS_MAGIC &&
+        prefs.seenServerScreen != 0 &&
+        prefs.serverIp != 0) {
+        *outServerIp = prefs.serverIp;
+        return true;
+    }
+    return false;
+}
+
+static void SaveServerPrefs(ip_addr serverIp)
+{
+    FSSpec        spec;
+    short         refNum = 0;
+    long          count  = sizeof(MaciSpotPrefs);
+    MaciSpotPrefs prefs;
+    OSErr         err;
+
+    if (serverIp == 0) return;
+    if (!GetPrefsFileSpec(&spec)) return;
+
+    FSpCreate(&spec, 'MCSP', 'pref', smSystemScript);
+    err = FSpOpenDF(&spec, fsWrPerm, &refNum);
+    if (err != noErr) return;
+
+    memset(&prefs, 0, sizeof(prefs));
+    prefs.magic            = PREFS_MAGIC;
+    prefs.serverIp         = serverIp;
+    prefs.seenServerScreen = 1;
+
+    SetEOF(refNum, 0);
+    FSWrite(refNum, &count, &prefs);
+    FSClose(refNum);
+}
 
 /* ============================================================================
  * String & Pipe Parsing Utilities
@@ -1536,7 +1619,7 @@ static void ExecuteSearchQuery(void)
 
     if (!NetHasServer() || gSearchQuery[0] == '\0') return;
     UrlEncode(gSearchQuery, encQ, sizeof(encQ));
-    sprintf(path, "/api/spotify/search?q=%s&type=all&limit=12", encQ);
+    sprintf(path, "/api/spotify/search?q=%s&type=all&limit=10", encQ);
 
     if (NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE) > 0) {
         ParseSearchResults(gHttpBuf);
@@ -1782,6 +1865,7 @@ static void HandleCanvasClick(Point pt)
         if (gConnState == CONN_FOUND) {
             /* "Let's party!" button (204, 154)-(311, 180) skips remaining countdown */
             if (pt.h >= 200 && pt.h <= 315 && pt.v >= 150 && pt.v <= 184) {
+                SaveServerPrefs(NetGetServerIP());
                 if (!gInitialDataLoaded) {
                     ConnectAndLoadAll();
                 }
@@ -2177,6 +2261,7 @@ static void HandleKeyPress(char ch)
         short len = (short)strlen(gIpInput);
         if (gConnState == CONN_FOUND) {
             if (ch == '\r' || ch == 3 || ch == ' ') {
+                SaveServerPrefs(NetGetServerIP());
                 if (!gInitialDataLoaded) {
                     ConnectAndLoadAll();
                 }
@@ -2442,8 +2527,31 @@ int main(void)
         0
     );
 
-    /* Show Server1.png and perform UDP discovery (:6801); transition to Server3.png or Server2.png */
-    RunInitialDiscovery();
+    /*
+     * Startup Server Connection Flow:
+     * If the user has already seen the server screen at least once and we have a saved
+     * Server IP in "System Folder:Preferences:MaciSpot Prefs", immediately open the
+     * full UI on that IP and verify/load in the background. If the server does not
+     * respond at the saved IP, fall back to the server connection screen.
+     */
+    {
+        ip_addr savedIp = 0;
+        if (LoadSavedServerPrefs(&savedIp)) {
+            FormatIPAddress(savedIp, gIpInput);
+            NetSetServer(savedIp, DEFAULT_HTTP_PORT);
+            gConnState = CONN_READY;
+            RenderCanvas();
+
+            if (VerifyServerReachable()) {
+                ConnectAndLoadAll();
+                RenderCanvas();
+            } else {
+                RunInitialDiscovery();
+            }
+        } else {
+            RunInitialDiscovery();
+        }
+    }
 
     gLastPollTicks   = TickCount();
     gLastSecondTicks = TickCount();
@@ -2498,6 +2606,7 @@ int main(void)
             elapsedTicks = (long)(nowTicks - gFoundStartTicks);
             remSec = 3 - (short)(elapsedTicks / 60);
             if (remSec <= 0) {
+                SaveServerPrefs(NetGetServerIP());
                 gConnState = CONN_READY;
                 RenderCanvas();
             } else if (remSec != gFoundCountdownSec) {
