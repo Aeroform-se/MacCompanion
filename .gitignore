@@ -26,6 +26,7 @@ rescources/
 resources/
 emulator/
 toolchain/
+releases/
 *.psd
 *.rom
 *.ROM

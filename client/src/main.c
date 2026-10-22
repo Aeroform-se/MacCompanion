@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "version.h"
 #include "assets.h"
 #include "network.h"
 
@@ -129,6 +130,9 @@ static short           gDeviceCount       = 0;
 static Boolean         gIpModalOpen       = false;
 static char            gIpInput[32]       = "10.0.2.2";
 static char            gIpModalStatus[64] = "UDP discovery timed out. Enter Server IP:";
+
+/* About Box Modal state */
+static Boolean         gAboutModalOpen    = false;
 
 /* Left & Right List state */
 static LeftItem        gLeftItems[MAX_LEFT_ITEMS];
@@ -701,6 +705,39 @@ static void RenderCanvas(void)
         TextMode(srcOr);
     }
 
+    /* --------------------------------------------------------------------
+     * 6. About MacCompanion Spotify Modal Dialog
+     * -------------------------------------------------------------------- */
+    if (gAboutModalOpen) {
+        Rect dlgRect, shadowRect, btnOk;
+
+        SetRect(&shadowRect, 144, 94, 374, 210);
+        FillRoundRect(&shadowRect, 10, 10, &qd.gray);
+
+        SetRect(&dlgRect, 140, 90, 370, 206);
+        EraseRoundRect(&dlgRect, 10, 10);
+        FrameRoundRect(&dlgRect, 10, 10);
+        InsetRect(&dlgRect, 2, 2);
+        FrameRoundRect(&dlgRect, 8, 8);
+
+        TextMode(srcOr);
+        MoveTo(156, 114);
+        DrawCStringTruncated("MacCompanion Spotify", 32);
+
+        MoveTo(156, 132);
+        DrawCStringTruncated("Version: " APP_VERSION_SHORT, 32);
+
+        MoveTo(156, 148);
+        DrawCStringTruncated("68k Native + Sound Manager", 32);
+
+        SetRect(&btnOk, 215, 168, 295, 192);
+        PaintRoundRect(&btnOk, 6, 6);
+        TextMode(srcBic);
+        MoveTo(246, 183);
+        DrawCStringTruncated("OK", 4);
+        TextMode(srcOr);
+    }
+
     /* Blit offscreen canvas to main window in a single tear-free CopyBits call */
     if (gOffscreenReady) {
         Rect fullRect;
@@ -1065,6 +1102,13 @@ static void RunInitialDiscovery(void)
 
 static void HandleCanvasClick(Point pt)
 {
+    /* 0. If About Modal is open, any click closes it */
+    if (gAboutModalOpen) {
+        gAboutModalOpen = false;
+        RenderCanvas();
+        return;
+    }
+
     /* 1. If Manual Server IP Modal is open, handle modal buttons */
     if (gIpModalOpen) {
         /* UDP Discover button (136, 172)-(244, 196) */
@@ -1277,6 +1321,13 @@ static void HandleCanvasClick(Point pt)
 
 static void HandleKeyPress(char ch)
 {
+    /* 0. If About Modal is open, any key closes it */
+    if (gAboutModalOpen) {
+        gAboutModalOpen = false;
+        RenderCanvas();
+        return;
+    }
+
     /* 1. Manual Server IP Modal Typing */
     if (gIpModalOpen) {
         short len = (short)strlen(gIpInput);
@@ -1355,7 +1406,8 @@ static void HandleMenuChoice(long menuChoice)
     switch (menuID) {
         case mApple:
             if (itemID == iAbout) {
-                SysBeep(10);
+                gAboutModalOpen = true;
+                RenderCanvas();
             } else {
                 GetMenuItemText(GetMenuHandle(mApple), itemID, daName);
                 OpenDeskAcc(daName);

@@ -1,5 +1,29 @@
 #include "Types.r"
 #include "SysTypes.r"
+#include "version.h"
+
+/*
+ * Classic Mac OS 'vers' (1) & (2) resources for System 7 Finder "Get Info" (Cmd+I)
+ */
+resource 'vers' (1) {
+    APP_VERSION_MAJOR_BCD,
+    APP_VERSION_MINOR_BCD,
+    APP_VERSION_STAGE,
+    APP_VERSION_NONFINAL,
+    verUS,
+    APP_VERSION_SHORT,
+    APP_VERSION_LONG
+};
+
+resource 'vers' (2) {
+    APP_VERSION_MAJOR_BCD,
+    APP_VERSION_MINOR_BCD,
+    APP_VERSION_STAGE,
+    APP_VERSION_NONFINAL,
+    verUS,
+    APP_VERSION_SHORT,
+    "MacCompanion Suite"
+};
 
 /*
  * SIZE -1 resource:

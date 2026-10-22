@@ -3,6 +3,8 @@ project(MacCompanionSpotify C)
 
 set(CMAKE_C_STANDARD 99)
 
+list(APPEND REZ_INCLUDE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
 add_application(MacCompanionSpotify
     CREATOR "MCSP"
     src/main.c
