@@ -17,8 +17,8 @@ fi
 # Extract version strings from client/src/version.h
 VERSION_SHORT=$( sed -n 's/^#define APP_VERSION_SHORT[[:space:]]*"\(.*\)"/\1/p' "$VERSION_HEADER" )
 VERSION_SLUG=$(  sed -n 's/^#define APP_VERSION_SLUG[[:space:]]*"\(.*\)"/\1/p'  "$VERSION_HEADER" )
-VERSION_SHORT="${VERSION_SHORT:-0.2 Beta}"
-VERSION_SLUG="${VERSION_SLUG:-v0.2-beta}"
+VERSION_SHORT="${VERSION_SHORT:-0.3 Beta}"
+VERSION_SLUG="${VERSION_SLUG:-v0.3-beta}"
 
 echo "==> Configuring & building $APP_NAME ($VERSION_SHORT / $VERSION_SLUG)..."
 mkdir -p "$BUILD_DIR"
@@ -70,7 +70,20 @@ PYEOF
 
 if [ -d "/Applications/Basillisk/driveshare" ]; then
     echo "==> Deploying to Basilisk II Unix Shared Drive: $DRIVESHARE_DIR"
-    mkdir -p "$DRIVESHARE_DIR/launch" "$DRIVESHARE_DIR/Releases"
+    mkdir -p "$DRIVESHARE_DIR/Releases"
+
+    # Clean up obsolete/unnecessary files from the Basilisk II shared folder
+    rm -rf "$DRIVESHARE_DIR/LaunchAPPLServer" \
+           "$DRIVESHARE_DIR/.rsrc/LaunchAPPLServer" \
+           "$DRIVESHARE_DIR/.finf/LaunchAPPLServer" \
+           "$DRIVESHARE_DIR/MacCompanionSpotify" \
+           "$DRIVESHARE_DIR/.rsrc/MacCompanionSpotify" \
+           "$DRIVESHARE_DIR/.finf/MacCompanionSpotify" \
+           "$DRIVESHARE_DIR/MacCompanionSpotify.bin" \
+           "$DRIVESHARE_DIR/MacCompanionSpotify.dsk" \
+           "$DRIVESHARE_DIR/$APP_NAME.bin" \
+           "$DRIVESHARE_DIR/$APP_NAME.dsk" \
+           "$DRIVESHARE_DIR/launch"
 
     # Deploy latest active build as MaciSpot
     deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$DRIVESHARE_DIR" "$APP_NAME" "MCSP"
@@ -78,16 +91,6 @@ if [ -d "/Applications/Basillisk/driveshare" ]; then
     # Deploy version-numbered copy into Unix -> MacCompanion -> Releases
     VERSIONED_APP_NAME="$APP_NAME $VERSION_SHORT"
     deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$DRIVESHARE_DIR/Releases" "$VERSIONED_APP_NAME" "MCSP"
-
-    # Also copy MacBinary (.bin) and HFS floppy (.dsk)
-    cp "$BUILD_DIR/$APP_NAME.bin" "$DRIVESHARE_DIR/$APP_NAME.bin"
-    cp "$BUILD_DIR/$APP_NAME.dsk" "$DRIVESHARE_DIR/$APP_NAME.dsk"
-
-    # Deploy LaunchAPPLServer if present
-    LAUNCH_SERVER="$ROOT_DIR/toolchain/Retro68-build/build-target/LaunchAPPL/Server/LaunchAPPLServer.APPL"
-    if [ -f "$LAUNCH_SERVER" ]; then
-        deploy_appl_to_folder "$LAUNCH_SERVER" "$DRIVESHARE_DIR" "LaunchAPPLServer" "LAPL"
-    fi
 
     echo "==> Deployed to Basilisk II:"
     echo "    - Latest build:   $DRIVESHARE_DIR/$APP_NAME"

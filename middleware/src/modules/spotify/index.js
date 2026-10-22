@@ -227,6 +227,60 @@ async function checkIsTrackLiked(trackIdOrUri) {
   }
 }
 
+  // Track the most recently loaded tracklist URIs (e.g. Liked Songs, Recently Played,
+  // Top Tracks, Search Results) so playing a track without a context_uri still loads
+  // the full upcoming tracklist into Spotify's player for Next/Previous & auto-advance.
+  let lastTrackListUris = [];
+  function recordTrackListRows(rows) {
+    if (!Array.isArray(rows)) return;
+    const uris = rows
+      .filter((r) => Array.isArray(r) && (r[0] === 'TRACK' || r[0] === 'RECENT' || r[0] === 'TOP_TRACK') && typeof r[7] === 'string' && r[7].startsWith('spotify:track:'))
+      .map((r) => r[7]);
+    if (uris.length > 0) {
+      lastTrackListUris = uris;
+    }
+  }
+
+  // Short-lived optimistic state overrides (3s TTL) so /now-playing never flickers back
+  // to stale Spotify cloud state immediately after Play/Pause/Seek/Shuffle/Repeat/Volume/Like.
+  const OPTIMISTIC_TTL_MS = 3000;
+  const optimisticState = {
+    isPlaying: null,
+    isPlayingTs: 0,
+    progressMs: null,
+    progressTs: 0,
+    volumePct: null,
+    volumeTs: 0,
+    shuffleMode: null,
+    shuffleTs: 0,
+    repeatState: null,
+    repeatTs: 0,
+  };
+
+  function applyOptimisticOverrides(np) {
+    if (!np || customFetch) return np;
+    const now = Date.now();
+    if (optimisticState.isPlaying !== null && (now - optimisticState.isPlayingTs) < OPTIMISTIC_TTL_MS) {
+      np.isPlaying = optimisticState.isPlaying;
+    }
+    if (optimisticState.progressMs !== null && (now - optimisticState.progressTs) < OPTIMISTIC_TTL_MS) {
+      const elapsed = np.isPlaying ? Math.max(0, now - optimisticState.progressTs) : 0;
+      np.progressMs = Math.min(np.durationMs || Number.MAX_SAFE_INTEGER, optimisticState.progressMs + elapsed);
+      np.progressFormatted = formatTimeMmSs(np.progressMs);
+    }
+    if (optimisticState.volumePct !== null && (now - optimisticState.volumeTs) < OPTIMISTIC_TTL_MS) {
+      np.volumePercent = optimisticState.volumePct;
+    }
+    if (optimisticState.shuffleMode !== null && (now - optimisticState.shuffleTs) < OPTIMISTIC_TTL_MS) {
+      np.shuffleMode = optimisticState.shuffleMode;
+      np.shuffleState = optimisticState.shuffleMode !== 'off';
+    }
+    if (optimisticState.repeatState !== null && (now - optimisticState.repeatTs) < OPTIMISTIC_TTL_MS) {
+      np.repeatState = optimisticState.repeatState;
+    }
+    return np;
+  }
+
 /**
  * Validates the current token and checks internet/Spotify API reachability.
  */
@@ -654,10 +708,10 @@ router.get('/now-playing', async (req, res) => {
     if (raw && raw.item && raw.item.id) {
       isLiked = await checkIsTrackLiked(raw.item.id);
     }
-    const np = normalizeNowPlaying(raw, {
+    const np = applyOptimisticOverrides(normalizeNowPlaying(raw, {
       isLiked,
       smartShuffleOverride: Boolean(data.smartShuffleActive && raw && raw.shuffle_state),
-    });
+    }));
     const pipe = `${formatPipeRow(nowPlayingToPipeRow(np))}\n`;
     if (req.query.format === 'json') {
       return res.json({ ok: true, data: np, pipe: pipe.trim() });
@@ -720,6 +774,8 @@ router.all('/seek', async (req, res) => {
     }
 
     const targetMs = Math.max(0, parseInt(positionMs || '0', 10));
+    optimisticState.progressMs = targetMs;
+    optimisticState.progressTs = Date.now();
     await callSpotify('/me/player/seek', {
       method: 'PUT',
       query: { position_ms: targetMs },
@@ -760,14 +816,26 @@ router.all('/play', async (req, res) => {
         const normOff = normalizeSpotifyUri(offsetUri, 'track');
         body.offset = { uri: normOff.uri };
       }
+      optimisticState.progressMs = 0;
+      optimisticState.progressTs = Date.now();
     } else if (uri) {
       const normTrack = normalizeSpotifyUri(uri, 'track');
-      body = { uris: [normTrack.uri] };
+      if (!customFetch && lastTrackListUris.length > 1 && lastTrackListUris.includes(normTrack.uri)) {
+        body = { uris: lastTrackListUris, offset: { uri: normTrack.uri } };
+      } else {
+        body = { uris: [normTrack.uri] };
+      }
+      optimisticState.progressMs = 0;
+      optimisticState.progressTs = Date.now();
     }
     if (positionMs !== undefined && body) {
       body.position_ms = parseInt(positionMs, 10);
+      optimisticState.progressMs = body.position_ms;
+      optimisticState.progressTs = Date.now();
     }
 
+    optimisticState.isPlaying = true;
+    optimisticState.isPlayingTs = Date.now();
     await callPlayerCommand('/me/player/play', {
       method: 'PUT',
       query: deviceId ? { device_id: deviceId } : undefined,
@@ -783,6 +851,8 @@ router.all('/play', async (req, res) => {
 
 router.all('/pause', async (req, res) => {
   try {
+    optimisticState.isPlaying = false;
+    optimisticState.isPlayingTs = Date.now();
     await callPlayerCommand('/me/player/pause', { method: 'PUT' });
     const pipe = 'OK|PAUSE\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
@@ -797,9 +867,13 @@ router.all('/toggle-play', async (req, res) => {
     const raw = await callSpotify('/me/player');
     const isPlaying = Boolean(raw && raw.is_playing);
     if (isPlaying) {
+      optimisticState.isPlaying = false;
+      optimisticState.isPlayingTs = Date.now();
       await callPlayerCommand('/me/player/pause', { method: 'PUT' });
       return sendPipeResponse(req, res, 'OK|PAUSE\n');
     } else {
+      optimisticState.isPlaying = true;
+      optimisticState.isPlayingTs = Date.now();
       await callPlayerCommand('/me/player/play', { method: 'PUT' });
       return sendPipeResponse(req, res, 'OK|PLAY\n');
     }
@@ -810,7 +884,14 @@ router.all('/toggle-play', async (req, res) => {
 
 router.all('/next', async (req, res) => {
   try {
+    optimisticState.isPlaying = true;
+    optimisticState.isPlayingTs = Date.now();
+    optimisticState.progressMs = 0;
+    optimisticState.progressTs = Date.now();
     await callPlayerCommand('/me/player/next', { method: 'POST' });
+    if (!customFetch) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
     const pipe = 'OK|NEXT\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -821,7 +902,14 @@ router.all('/next', async (req, res) => {
 
 router.all('/previous', async (req, res) => {
   try {
+    optimisticState.isPlaying = true;
+    optimisticState.isPlayingTs = Date.now();
+    optimisticState.progressMs = 0;
+    optimisticState.progressTs = Date.now();
     await callPlayerCommand('/me/player/previous', { method: 'POST' });
+    if (!customFetch) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
     const pipe = 'OK|PREVIOUS\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -841,6 +929,8 @@ router.all('/volume', async (req, res) => {
     } else {
       vol = Math.max(0, Math.min(100, parseInt(req.query.volume_percent ?? (req.body && req.body.volume_percent) ?? '50', 10)));
     }
+    optimisticState.volumePct = vol;
+    optimisticState.volumeTs = Date.now();
     await callPlayerCommand('/me/player/volume', {
       method: 'PUT',
       query: { volume_percent: vol },
@@ -874,6 +964,8 @@ router.all('/repeat', async (req, res) => {
       state = order[(order.indexOf(current) + 1) % order.length];
     }
 
+    optimisticState.repeatState = state;
+    optimisticState.repeatTs = Date.now();
     await callSpotify('/me/player/repeat', {
       method: 'PUT',
       query: { state },
@@ -958,6 +1050,8 @@ router.all('/shuffle', async (req, res) => {
     }
 
     const boolShuffle = targetMode === 'on' || targetMode === 'smart';
+    optimisticState.shuffleMode = targetMode;
+    optimisticState.shuffleTs = Date.now();
     await callSpotify('/me/player/shuffle', {
       method: 'PUT',
       query: { state: boolShuffle },
@@ -1118,6 +1212,7 @@ router.get('/liked', async (req, res) => {
       .map((entry) => entry && (entry.track || entry.item))
       .filter(Boolean)
       .map((t) => formatTrackRow('TRACK', t));
+    recordTrackListRows(rows);
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, total: data ? data.total : rows.length, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -1154,6 +1249,7 @@ router.all('/like', async (req, res) => {
       method: 'PUT',
       query: { uris: uri },
     });
+    likedCache = { uri, liked: true, ts: Date.now() };
 
     const pipe = `${formatPipeRow(['OK', 'LIKE', id, trackName || uri])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, id, uri, pipe: pipe.trim() });
@@ -1189,6 +1285,7 @@ router.all('/unlike', async (req, res) => {
       method: 'DELETE',
       query: { uris: uri },
     });
+    likedCache = { uri, liked: false, ts: Date.now() };
 
     const pipe = `${formatPipeRow(['OK', 'UNLIKE', id, trackName || uri])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, id, uri, pipe: pipe.trim() });
@@ -1226,6 +1323,7 @@ router.all('/toggle-like', async (req, res) => {
     });
 
     const nextLiked = !currentlyLiked;
+    likedCache = { uri, liked: nextLiked, ts: Date.now() };
     const pipe = `${formatPipeRow(['OK', 'LIKED', nextLiked ? '1' : '0', id])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, liked: nextLiked, id, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -1397,6 +1495,7 @@ router.get('/playlist/:id/tracks', async (req, res) => {
       } catch {}
     }
 
+    recordTrackListRows(rows);
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -1482,6 +1581,7 @@ router.get('/recently-played', async (req, res) => {
       .map((entry) => entry && entry.track)
       .filter(Boolean)
       .map((t) => formatTrackRow('RECENT', t));
+    recordTrackListRows(rows);
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -1512,6 +1612,7 @@ router.get('/top', async (req, res) => {
           a.uri || '',
         ])
       : items.map((t) => formatTrackRow('TOP_TRACK', t));
+    recordTrackListRows(rows);
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -1609,6 +1710,7 @@ router.get('/album/:id/tracks', async (req, res) => {
       formatTimeMmSs(t.duration_ms || 0),
       t.uri || '',
     ]);
+    recordTrackListRows(rows);
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, album: albumObj, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -1759,6 +1861,7 @@ router.get('/search', async (req, res) => {
       rows = tracks.filter(Boolean).map((t) => formatTrackRow('TRACK', t));
     }
 
+    recordTrackListRows(rows);
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, data, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
