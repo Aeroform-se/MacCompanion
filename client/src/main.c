@@ -102,6 +102,7 @@ typedef struct {
     char id[64];
     char name[64];
     char artist[64];
+    long durationMs;
     char durationMmSs[12];
     char uri[96];
 } RightItem;
@@ -111,6 +112,7 @@ typedef struct {
     char id[64];
     char title[64];
     char subtitle[64]; /* Artist or Owner */
+    long durationMs;
     char uri[96];
 } SearchItem;
 
@@ -201,10 +203,11 @@ static short           gLastLeftClickedRow = -1;
 
 /* Now Playing & Artwork state */
 static NowPlayingState gNowPlaying;
-static Boolean         gTimelineFrozen    = false;
+static Boolean         gTimelineFrozen       = false;
+static unsigned long   gTrackLockUntilTicks  = 0;
 static char            gLoadedArtTrackId[64] = "";
 static unsigned char   gCurrentArtworkBits[5200];
-static unsigned short  gAudioSampleRateHz = 22255;
+static unsigned short  gAudioSampleRateHz    = 22255;
 
 /* Timing for periodic state & timeline updates */
 static unsigned long   gLastPollTicks     = 0;
@@ -1184,6 +1187,46 @@ static void ResetPollTimersAfterAction(void)
     gLastSecondTicks = TickCount();
 }
 
+/* Immediately turns off the displayed album artwork (pure black in 1-bit QuickDraw) while waiting for new art */
+static void BlankCurrentArtwork(void)
+{
+    memset(gCurrentArtworkBits, 0xFF, 5200);
+    gLoadedArtTrackId[0] = '\0';
+}
+
+/*
+ * Immediately switches the UI to the chosen track (highlighting it in the track list,
+ * showing its Artist & Title under the artwork, resetting timeline to 00:00, and turning
+ * off the old artwork) and locks it so background polls never jump back.
+ */
+static void LockOptimisticTrackSelection(const char *id, const char *name, const char *artist, long durationMs)
+{
+    gTimelineFrozen        = false;
+    gNowPlaying.isPlaying  = true;
+    gNowPlaying.progressMs = 0;
+    FormatMmSs(0, gNowPlaying.progressMmSs);
+
+    if (durationMs > 0) {
+        gNowPlaying.durationMs = durationMs;
+        FormatMmSs(durationMs, gNowPlaying.durationMmSs);
+    }
+
+    if (id && id[0] != '\0') {
+        SafeCopy(gNowPlaying.trackId, id, sizeof(gNowPlaying.trackId));
+    }
+    if (name && name[0] != '\0') {
+        SafeCopy(gNowPlaying.trackName, name, sizeof(gNowPlaying.trackName));
+    }
+    if (artist && artist[0] != '\0') {
+        SafeCopy(gNowPlaying.artistName, artist, sizeof(gNowPlaying.artistName));
+    }
+
+    gTrackLockUntilTicks = TickCount() + 300; /* 5-second lock against stale cloud polls */
+    BlankCurrentArtwork();
+    SyncRightSelectionToPlayingTrack();
+    ResetPollTimersAfterAction();
+}
+
 static void SyncLocalAudioWithSpeaker(void)
 {
     Boolean is68kSpeaker = false;
@@ -1214,9 +1257,18 @@ static void SyncLocalAudioWithSpeaker(void)
 static void FetchCurrentArtwork(void)
 {
     long n;
+    char path[160];
     if (!NetHasServer() || !gHttpBuf) return;
 
-    n = NetHttpGet("/api/spotify/artwork?size=200&format=raw", gHttpBuf, HTTP_BUF_SIZE);
+    if (gNowPlaying.trackId[0] != '\0') {
+        char encId[96];
+        UrlEncode(gNowPlaying.trackId, encId, sizeof(encId));
+        sprintf(path, "/api/spotify/artwork?size=200&format=raw&track_id=%s", encId);
+    } else {
+        SafeCopy(path, "/api/spotify/artwork?size=200&format=raw", sizeof(path));
+    }
+
+    n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     if (n >= 5208) {
         memcpy(gCurrentArtworkBits, gHttpBuf + 8, 5200);
         SafeCopy(gLoadedArtTrackId, gNowPlaying.trackId, sizeof(gLoadedArtTrackId));
@@ -1227,6 +1279,8 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
 {
     long n;
     char field[96];
+    char incomingTrackId[64];
+    Boolean trackLocked;
 
     if (!NetHasServer() || !gHttpBuf) return;
 
@@ -1235,11 +1289,27 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
         return;
     }
 
+    GetPipeField(gHttpBuf, 2, incomingTrackId, sizeof(incomingTrackId));
+    trackLocked = (gTrackLockUntilTicks != 0 && (long)(gTrackLockUntilTicks - TickCount()) > 0);
+
+    /*
+     * If the user recently clicked a track and Spotify's cloud is still reporting the
+     * previous track ID, keep our locked track selection / Artist / Title / timeline!
+     */
+    if (trackLocked &&
+        gNowPlaying.trackId[0] != '\0' &&
+        incomingTrackId[0] != '\0' &&
+        strcmp(incomingTrackId, gNowPlaying.trackId) != 0) {
+        SyncLocalAudioWithSpeaker();
+        return;
+    }
+    gTrackLockUntilTicks = 0;
+
     GetPipeField(gHttpBuf, 1, field, sizeof(field));
     gNowPlaying.isPlaying = (field[0] == '1');
     gTimelineFrozen       = false;
 
-    GetPipeField(gHttpBuf, 2, gNowPlaying.trackId, sizeof(gNowPlaying.trackId));
+    SafeCopy(gNowPlaying.trackId, incomingTrackId, sizeof(gNowPlaying.trackId));
     GetPipeField(gHttpBuf, 3, gNowPlaying.trackName, sizeof(gNowPlaying.trackName));
     GetPipeField(gHttpBuf, 4, gNowPlaying.artistName, sizeof(gNowPlaying.artistName));
     GetPipeField(gHttpBuf, 5, gNowPlaying.albumName, sizeof(gNowPlaying.albumName));
@@ -1292,12 +1362,15 @@ static void ParseTracksResponseIntoRightList(const char *buf)
             strcmp(rowKind, "RECENT") == 0 ||
             strcmp(rowKind, "TOP_TRACK") == 0 ||
             strcmp(rowKind, "QUEUE") == 0) {
+            char durStr[24];
             RightItem *it = &gRightItems[gRightCount++];
             SafeCopy(it->kind, "TRACK", sizeof(it->kind));
             GetPipeField(line, 1, it->id, sizeof(it->id));
             GetPipeField(line, 2, it->name, sizeof(it->name));
             GetPipeField(line, 3, it->artist, sizeof(it->artist));
-            GetPipeField(line, 6, it->durationMmSs, sizeof(it->durationMmSs));
+            GetPipeField(line, 5, durStr, sizeof(durStr));
+            it->durationMs = atol(durStr);
+            FormatMmSs(it->durationMs, it->durationMmSs);
             GetPipeField(line, 7, it->uri, sizeof(it->uri));
         } else if (strcmp(rowKind, "ALBUM") == 0) {
             RightItem *it = &gRightItems[gRightCount++];
@@ -1305,6 +1378,7 @@ static void ParseTracksResponseIntoRightList(const char *buf)
             GetPipeField(line, 1, it->id, sizeof(it->id));
             GetPipeField(line, 2, it->name, sizeof(it->name));
             GetPipeField(line, 3, it->artist, sizeof(it->artist));
+            it->durationMs = 0;
             it->durationMmSs[0] = '\0';
             GetPipeField(line, 6, it->uri, sizeof(it->uri));
         }
@@ -1442,20 +1516,14 @@ static void PlayRightItemAtIndex(short idx)
         return;
     }
 
-    /* Lock UI into the new playing track state immediately */
-    gTimelineFrozen        = false;
-    gNowPlaying.isPlaying  = true;
-    gNowPlaying.progressMs = 0;
-    FormatMmSs(0, gNowPlaying.progressMmSs);
-    SafeCopy(gNowPlaying.trackId, it->id, sizeof(gNowPlaying.trackId));
-    SafeCopy(gNowPlaying.trackName, it->name, sizeof(gNowPlaying.trackName));
-    if (it->artist[0] != '\0') {
-        SafeCopy(gNowPlaying.artistName, it->artist, sizeof(gNowPlaying.artistName));
-    }
-    if (it->durationMmSs[0] != '\0') {
-        SafeCopy(gNowPlaying.durationMmSs, it->durationMmSs, sizeof(gNowPlaying.durationMmSs));
-    }
-    SyncRightSelectionToPlayingTrack();
+    /*
+     * Immediately lock UI into the clicked track:
+     * 1. Highlight this track in the track list and keep it stuck there.
+     * 2. Switch Artist & Track Title under the artwork immediately.
+     * 3. Turn off the old album artwork immediately while waiting for the new one.
+     */
+    LockOptimisticTrackSelection(it->id, it->name, it->artist, it->durationMs);
+    SyncLocalAudioWithSpeaker();
     RenderCanvas();
 
     if (strcmp(it->kind, "PLAYLIST") == 0) {
@@ -1474,7 +1542,14 @@ static void PlayRightItemAtIndex(short idx)
 
     NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     ResetPollTimersAfterAction();
-    RefreshNowPlaying(true);
+
+    if (strcmp(it->kind, "PLAYLIST") == 0) {
+        RefreshNowPlaying(true);
+    } else {
+        /* Fetch the new track's artwork directly by track_id without overwriting locked track state */
+        FetchCurrentArtwork();
+    }
+    ResetPollTimersAfterAction();
     RenderCanvas();
 }
 
@@ -1483,11 +1558,12 @@ static void TriggerNextTrack(void)
     short curIdx = FindPlayingTrackIndexInRightList();
 
     /*
-     * If playing from a tracklist without a playlist/album context_uri
-     * (e.g. Liked Songs, Search Results, Recently Played, Top Tracks),
-     * advance directly to the next track in `gRightItems`!
+     * If we know the next track in `gRightItems` (either in a tracklist without context_uri,
+     * or in a playlist/album when shuffle is off), step directly to `nextIdx` so the track
+     * list highlight, Artist/Title, and blanked artwork switch immediately on click!
      */
-    if (gActiveContextUri[0] == '\0' && curIdx >= 0 && gRightCount > 0) {
+    if (curIdx >= 0 && gRightCount > 0 &&
+        (gActiveContextUri[0] == '\0' || strcmp(gNowPlaying.shuffleMode, "off") == 0)) {
         short nextIdx = curIdx + 1;
         if (nextIdx >= gRightCount && strcmp(gNowPlaying.repeatState, "off") != 0) {
             nextIdx = 0;
@@ -1498,20 +1574,13 @@ static void TriggerNextTrack(void)
         }
     }
 
-    /* Even in a playlist/album context, optimistically preview the next row if shuffle is off */
+    /* When shuffle is active, blank old artwork and reset timeline immediately while server picks next track */
     gTimelineFrozen        = true;
     gNowPlaying.isPlaying  = true;
     gNowPlaying.progressMs = 0;
     FormatMmSs(0, gNowPlaying.progressMmSs);
-    if (curIdx >= 0 && curIdx + 1 < gRightCount && strcmp(gNowPlaying.shuffleMode, "off") == 0) {
-        RightItem *nxt = &gRightItems[curIdx + 1];
-        if (strcmp(nxt->kind, "TRACK") == 0) {
-            SafeCopy(gNowPlaying.trackId, nxt->id, sizeof(gNowPlaying.trackId));
-            SafeCopy(gNowPlaying.trackName, nxt->name, sizeof(gNowPlaying.trackName));
-            SafeCopy(gNowPlaying.artistName, nxt->artist, sizeof(gNowPlaying.artistName));
-            SyncRightSelectionToPlayingTrack();
-        }
-    }
+    gTrackLockUntilTicks   = 0;
+    BlankCurrentArtwork();
     RenderCanvas();
 
     NetHttpGet("/api/spotify/next", gHttpBuf, HTTP_BUF_SIZE);
@@ -1524,7 +1593,8 @@ static void TriggerPreviousTrack(void)
 {
     short curIdx = FindPlayingTrackIndexInRightList();
 
-    if (gActiveContextUri[0] == '\0' && curIdx >= 0 && gRightCount > 0) {
+    if (curIdx >= 0 && gRightCount > 0 &&
+        (gActiveContextUri[0] == '\0' || strcmp(gNowPlaying.shuffleMode, "off") == 0)) {
         short prevIdx = (curIdx > 0 && gNowPlaying.progressMs < 4000) ? (curIdx - 1) : curIdx;
         if (prevIdx >= 0 && strcmp(gRightItems[prevIdx].kind, "TRACK") == 0) {
             PlayRightItemAtIndex(prevIdx);
@@ -1536,15 +1606,8 @@ static void TriggerPreviousTrack(void)
     gNowPlaying.isPlaying  = true;
     gNowPlaying.progressMs = 0;
     FormatMmSs(0, gNowPlaying.progressMmSs);
-    if (curIdx > 0 && strcmp(gNowPlaying.shuffleMode, "off") == 0) {
-        RightItem *prv = &gRightItems[curIdx - 1];
-        if (strcmp(prv->kind, "TRACK") == 0) {
-            SafeCopy(gNowPlaying.trackId, prv->id, sizeof(gNowPlaying.trackId));
-            SafeCopy(gNowPlaying.trackName, prv->name, sizeof(gNowPlaying.trackName));
-            SafeCopy(gNowPlaying.artistName, prv->artist, sizeof(gNowPlaying.artistName));
-            SyncRightSelectionToPlayingTrack();
-        }
-    }
+    gTrackLockUntilTicks   = 0;
+    BlankCurrentArtwork();
     RenderCanvas();
 
     NetHttpGet("/api/spotify/previous", gHttpBuf, HTTP_BUF_SIZE);
@@ -1585,11 +1648,14 @@ static void ParseSearchResults(const char *buf)
         GetPipeField(line, 0, rowKind, sizeof(rowKind));
 
         if (strcmp(rowKind, "TRACK") == 0) {
+            char durStr[24];
             SearchItem *s = &gSearchItems[gSearchCount++];
             SafeCopy(s->kind, "TRACK", sizeof(s->kind));
             GetPipeField(line, 1, s->id, sizeof(s->id));
             GetPipeField(line, 2, s->title, sizeof(s->title));
             GetPipeField(line, 3, s->subtitle, sizeof(s->subtitle));
+            GetPipeField(line, 5, durStr, sizeof(durStr));
+            s->durationMs = atol(durStr);
             GetPipeField(line, 7, s->uri, sizeof(s->uri));
         } else if (strcmp(rowKind, "ALBUM") == 0) {
             SearchItem *s = &gSearchItems[gSearchCount++];
@@ -1644,18 +1710,17 @@ static void ActivateSearchResultRow(short idx)
     /* Single-click plays immediately and closes search view back to main UI */
     gSearchViewOpen = false;
     gSearchFocused  = false;
-    gTimelineFrozen = false;
-    gNowPlaying.isPlaying  = true;
-    gNowPlaying.progressMs = 0;
-    FormatMmSs(0, gNowPlaying.progressMmSs);
-    if (strcmp(s->kind, "TRACK") == 0) {
-        SafeCopy(gNowPlaying.trackId, s->id, sizeof(gNowPlaying.trackId));
-    }
-    SafeCopy(gNowPlaying.trackName, s->title, sizeof(gNowPlaying.trackName));
-    SafeCopy(gNowPlaying.artistName, s->subtitle, sizeof(gNowPlaying.artistName));
 
     UrlEncode(s->uri[0] ? s->uri : s->id, encUri, sizeof(encUri));
     if (strcmp(s->kind, "ALBUM") == 0 || strcmp(s->kind, "PLAYLIST") == 0) {
+        gTrackLockUntilTicks   = 0;
+        gTimelineFrozen        = true;
+        gNowPlaying.isPlaying  = true;
+        gNowPlaying.progressMs = 0;
+        FormatMmSs(0, gNowPlaying.progressMmSs);
+        SafeCopy(gNowPlaying.trackName, s->title, sizeof(gNowPlaying.trackName));
+        SafeCopy(gNowPlaying.artistName, s->subtitle, sizeof(gNowPlaying.artistName));
+        BlankCurrentArtwork();
         SafeCopy(gActiveContextUri, s->uri, sizeof(gActiveContextUri));
         SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
         RenderCanvas();
@@ -1670,6 +1735,9 @@ static void ActivateSearchResultRow(short idx)
         if (NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE) > 0) {
             ParseTracksResponseIntoRightList(gHttpBuf);
         }
+        ResetPollTimersAfterAction();
+        RefreshNowPlaying(true);
+        RenderCanvas();
     } else {
         /* Populate right column with the search result songs so Next/Prev & track highlight work! */
         gActiveContextUri[0] = '\0';
@@ -1682,20 +1750,21 @@ static void ActivateSearchResultRow(short idx)
                 SafeCopy(rt->id, gSearchItems[i].id, sizeof(rt->id));
                 SafeCopy(rt->name, gSearchItems[i].title, sizeof(rt->name));
                 SafeCopy(rt->artist, gSearchItems[i].subtitle, sizeof(rt->artist));
-                rt->durationMmSs[0] = '\0';
+                rt->durationMs = gSearchItems[i].durationMs;
+                FormatMmSs(rt->durationMs, rt->durationMmSs);
                 SafeCopy(rt->uri, gSearchItems[i].uri, sizeof(rt->uri));
             }
         }
-        SyncRightSelectionToPlayingTrack();
+        LockOptimisticTrackSelection(s->id, s->title, s->subtitle, s->durationMs);
+        SyncLocalAudioWithSpeaker();
         RenderCanvas();
 
         sprintf(path, "/api/spotify/play?uri=%s", encUri);
         NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        FetchCurrentArtwork();
+        ResetPollTimersAfterAction();
+        RenderCanvas();
     }
-
-    ResetPollTimersAfterAction();
-    RefreshNowPlaying(true);
-    RenderCanvas();
 }
 
 static void LoadDevicesAndTogglePopover(void)
