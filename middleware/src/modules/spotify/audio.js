@@ -352,7 +352,7 @@ class AudioStreamEngine extends EventEmitter {
       '-ar', '44100',
       '-ac', '2',
       '-i', 'pipe:0',
-      '-af', `aresample=osr=${hz}:dither_method=triangular`,
+      '-af', `aresample=osr=${hz}:dither_method=shibata`,
       '-f', 'u8',
       '-acodec', 'pcm_u8',
       '-ac', '1',
@@ -449,13 +449,16 @@ class AudioStreamEngine extends EventEmitter {
       '--backend', 'pipe',
       '--bitrate', '320',
       '--format', 'S16',
+      '--dither', 'none',
+      '--volume-ctrl', 'cubic',
+      '--volume-range', '30',
       '--system-cache', cacheDir,
       '--disable-audio-cache',
-      '--initial-volume', '85',
+      '--initial-volume', '100',
       '--access-token', speakerToken,
     ];
 
-    console.log(`[AudioEngine] Starting librespot ("${DEVICE_NAME}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz, triangular dither, direct flush)`);
+    console.log(`[AudioEngine] Starting librespot ("${DEVICE_NAME}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz, shibata dither, direct flush)`);
     const lsProc = spawn('librespot', librespotArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
