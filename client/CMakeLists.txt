@@ -9,7 +9,9 @@ add_application(SpotiMac
     CREATOR "MCSP"
     src/main.c
     src/network.c
+    src/visualizer.c
     src/resources.r
 )
 
 target_compile_options(SpotiMac PRIVATE -O2 -Wall -Wno-multichar -Wno-pointer-sign)
+set_source_files_properties(src/visualizer.c PROPERTIES COMPILE_FLAGS "-O3")

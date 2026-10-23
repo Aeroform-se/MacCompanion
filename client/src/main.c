@@ -1,6 +1,6 @@
 /*
  * SpotiMac — Native 68k Macintosh Spotify Client
- * Version 0.3.6 RC ("Amazeballs")
+ * Version 0.3.7 ("Partylizer")
  * Compiled with Retro68 + Apple Universal Interfaces 3.4.2
  *
  * UI Design: 512 x 322 flush canvas below the 20px Mac OS menu bar
@@ -30,6 +30,7 @@
 #include "version.h"
 #include "assets.h"
 #include "network.h"
+#include "visualizer.h"
 
 /* ============================================================================
  * Constants & Layout Geometry (512 x 322 Canvas)
@@ -86,6 +87,11 @@
 #define BTN_VOLUME          8
 #define BTN_LIKE            9
 #define BTN_COLLAPSE        10
+#define BTN_VIZ_TOGGLE      11
+#define BTN_VIZ_1           12
+#define BTN_VIZ_2           13
+#define BTN_VIZ_3           14
+#define BTN_VIZ_4           15
 
 #define MINI_W              192
 #define MINI_H              68
@@ -209,12 +215,16 @@ static short           gLastClickedRow     = -1;
 static unsigned long   gLastLeftClickTicks = 0;
 static short           gLastLeftClickedRow = -1;
 
-/* Now Playing & Artwork state */
+/* Now Playing, Artwork & Visualizer state */
 static NowPlayingState gNowPlaying;
 static Boolean         gTimelineFrozen       = false;
 static unsigned long   gTrackLockUntilTicks  = 0;
 static char            gLoadedArtTrackId[64] = "";
 static unsigned char   gCurrentArtworkBits[5200];
+static unsigned char   gVisualizerBits[5200];
+static Boolean         gVisualizerOpen       = false;
+static short           gVizMode              = VIZ_MODE_EQ;
+static unsigned long   gLastVizTicks         = 0;
 static unsigned short  gAudioSampleRateHz    = 22255;
 
 /* Timing for periodic state & timeline updates */
@@ -1311,8 +1321,12 @@ static void RenderCanvas(void)
             FillRect(&thumbRect, &qd.gray);
         }
 
-        /* 2B. Center Column: 200x200 1-Bit Album Artwork moved -10px y to (156, 35)-(356, 235) */
-        BlitIcon1Bit(gCurrentArtworkBits, 200, 200, 156, 35, srcCopy);
+        /* 2B. Center Column: 200x200 1-Bit Album Artwork or Visualizer at (156, 35)-(356, 235) */
+        if (gVisualizerOpen) {
+            BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
+        } else {
+            BlitIcon1Bit(gCurrentArtworkBits, 200, 200, 156, 35, srcCopy);
+        }
 
         /* Two-line Artist (y = 249) and Track Title (y = 261) centered below artwork (UI-update.png) */
         if (gNowPlaying.trackName[0] != '\0') {
@@ -1369,6 +1383,22 @@ static void RenderCanvas(void)
     EraseRect(&r);
     TextMode(srcOr);
     PenNormal();
+
+    /* Album Art / Visualizations Toggle (19, 285) 44x10 (visuals-toggle.png) */
+    {
+        Boolean hov = (gHoverBtn == BTN_VIZ_TOGGLE) && (gPressedBtn != BTN_VIZ_TOGGLE);
+        BlitIcon1Bit(gVisualizerOpen ? gIconVizToggleOn : gIconVizToggleOff, 44, 10, 19, 285, srcCopy);
+        DrawButtonHoverDots(37, 298, hov);
+    }
+
+    /* Visualizer 1..4 Selector Row (19, 305) 44x6 + 3x2 Active Indicator (visuals-toggle-select.png) */
+    if (gVisualizerOpen) {
+        static const short kVizIndX[4] = { 21, 33, 45, 57 };
+        short indX = kVizIndX[gVizMode & 3];
+        SetRect(&r, indX, 300, indX + 3, 302);
+        PaintRect(&r);
+        BlitIcon1Bit(gIconVizNumbers, 44, 6, 19, 305, srcCopy);
+    }
 
     /* Like / Save Heart button (155, 285) 11x10 + hover dots at (157, 298) */
     {
@@ -1641,6 +1671,41 @@ static void RenderCanvas(void)
         CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &fullRect, &fullRect, srcCopy, NULL);
     }
 
+    SetPort(savePort);
+}
+
+/*
+ * Fast 30 FPS Visualizer Blit:
+ * Renders the next 200x200 visualizer frame into `gVisualizerBits` and blits ONLY
+ * the 200x200 center square `(156, 35)-(356, 235)` directly to `gMainWindow`
+ * (and `gOffscreenPort`), avoiding full-screen 512x322 redraw overhead.
+ */
+static void RenderVisualizerFastFrame(void)
+{
+    GrafPtr savePort;
+    if (!gVisualizerOpen || gMiniPlayerMode || gSearchViewOpen || gConnState != CONN_READY) return;
+    if (!gMainWindow) return;
+
+    VisualizerRenderFrame(
+        gVizMode,
+        gNowPlaying.isPlaying,
+        gNowPlaying.progressMs,
+        gNowPlaying.trackId,
+        gVisualizerBits
+    );
+
+    if (gSpeakerPopupOpen || gAboutModalOpen) {
+        RenderCanvas();
+        return;
+    }
+
+    GetPort(&savePort);
+    if (gOffscreenReady) {
+        SetPort(&gOffscreenPort);
+        BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
+    }
+    SetPort(gMainWindow);
+    BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
     SetPort(savePort);
 }
 
@@ -2401,6 +2466,7 @@ static short HitTestTransportHover(Point pt)
 {
     if (gConnState != CONN_READY || gAboutModalOpen) return BTN_NONE;
     if (pt.v >= 278 && pt.v <= 301) {
+        if (pt.h >= 16 && pt.h <= 66) return BTN_VIZ_TOGGLE;
         if (pt.h >= 150 && pt.h <= 172) return BTN_LIKE;
         if (pt.h >= 191 && pt.h <= 213) return BTN_SHUFFLE;
         if (pt.h >= 216 && pt.h <= 238) return BTN_PREV;
@@ -2410,7 +2476,13 @@ static short HitTestTransportHover(Point pt)
         if (pt.h >= 342 && pt.h <= GetSpeakerButtonRightX()) return BTN_SPEAKER;
         if (pt.h >= 478 && pt.h <= 498) return BTN_COLLAPSE;
     }
-    if (pt.v >= 303 && pt.v <= 318) {
+    if (pt.v >= 300 && pt.v <= 318) {
+        if (gVisualizerOpen && pt.h >= 16 && pt.h <= 66) {
+            if (pt.h < 29) return BTN_VIZ_1;
+            if (pt.h < 41) return BTN_VIZ_2;
+            if (pt.h < 53) return BTN_VIZ_3;
+            return BTN_VIZ_4;
+        }
         if (pt.h >= 140 && pt.h <= 372) return BTN_TIMELINE;
         if (pt.h >= 435 && pt.h <= 496) return BTN_VOLUME;
     }
@@ -2764,13 +2836,36 @@ static void HandleCanvasClick(Point pt)
             }
             return;
         }
+        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset */
+        if (gVisualizerOpen && pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235) {
+            gVizMode = (gVizMode + 1) & 3;
+            VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+            RenderCanvas();
+            return;
+        }
         return;
     }
 
     /* 5. Bottom Play Bar (y = 273..322) */
     if (pt.v >= 273) {
-        /* Transport Row (y = 276..303) */
-        if (pt.v >= 276 && pt.v <= 303) {
+        /* Transport Row (y = 276..302) */
+        if (pt.v >= 276 && pt.v <= 302) {
+            /* Album Art / Visualizations Toggle (16..66) */
+            if (pt.h >= 16 && pt.h <= 66) {
+                if (pt.h <= 29 && gVisualizerOpen) {
+                    gVisualizerOpen = false;
+                } else if (pt.h >= 50 && !gVisualizerOpen) {
+                    gVisualizerOpen = true;
+                } else {
+                    gVisualizerOpen = !gVisualizerOpen;
+                }
+                if (gVisualizerOpen) {
+                    VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+                    gLastVizTicks = TickCount();
+                }
+                TrackTransportButtonPress(BTN_VIZ_TOGGLE);
+                return;
+            }
             /* Like / Save Heart (150..172) */
             if (pt.h >= 150 && pt.h <= 172) {
                 if (gNowPlaying.trackId[0] != '\0') {
@@ -2870,8 +2965,20 @@ static void HandleCanvasClick(Point pt)
             }
         }
 
-        /* Draggable Timeline & Volume Row (y = 303..320) */
-        if (pt.v >= 303 && pt.v <= 320) {
+        /* Visualizer 1..4 Selector + Draggable Timeline & Volume Row (y = 300..320) */
+        if (pt.v >= 300 && pt.v <= 320) {
+            /* Visualizer Preset Selector 1 2 3 4 (16..66) */
+            if (gVisualizerOpen && pt.h >= 16 && pt.h <= 66) {
+                if (pt.h < 29) gVizMode = 0;
+                else if (pt.h < 41) gVizMode = 1;
+                else if (pt.h < 53) gVizMode = 2;
+                else gVizMode = 3;
+
+                VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+                gLastVizTicks = TickCount();
+                RenderCanvas();
+                return;
+            }
             /* Timeline Scrubber (140..372) */
             if (pt.h >= 140 && pt.h <= 372) {
                 char path[96];
@@ -3038,6 +3145,19 @@ static void HandleKeyPress(char ch)
         TriggerPreviousTrack();
     } else if (ch == 31) { /* Down Arrow */
         TriggerNextTrack();
+    } else if (ch >= '1' && ch <= '4') {
+        gVisualizerOpen = true;
+        gVizMode = (short)(ch - '1');
+        VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+        gLastVizTicks = TickCount();
+        RenderCanvas();
+    } else if (ch == 'v' || ch == 'V') {
+        gVisualizerOpen = !gVisualizerOpen;
+        if (gVisualizerOpen) {
+            VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+            gLastVizTicks = TickCount();
+        }
+        RenderCanvas();
     }
 }
 
@@ -3308,6 +3428,8 @@ int main(void)
     NetInit();
     InitMyMacSpeakerName();
     AudioStreamInit();
+    VisualizerInit();
+    memset(gVisualizerBits, 0xFF, sizeof(gVisualizerBits));
 
     gHttpBuf = NewPtrClear(HTTP_BUF_SIZE);
     /* Start with initial.png placeholder graphic ("Party like it's 1984") */
@@ -3407,7 +3529,12 @@ int main(void)
             AudioStreamPump();
         }
 
-        if (WaitNextEvent(everyEvent, &ev, AudioStreamIsRunning() ? 1 : 2, NULL)) {
+        if (WaitNextEvent(
+                everyEvent,
+                &ev,
+                (AudioStreamIsRunning() || (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen)) ? 0 : 2,
+                NULL
+            )) {
             switch (ev.what) {
                 case mouseDown:
                     HandleMouseDown(&ev);
@@ -3463,6 +3590,13 @@ int main(void)
 
         if (gConnState != CONN_READY) {
             continue;
+        }
+
+        /* Real-Time 30 FPS Visualizer Pump (every 2 ticks = 30.075 FPS on 60.15 Hz Mac VBL) */
+        if (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen && !gAboutModalOpen &&
+            (nowTicks - gLastVizTicks) >= 2) {
+            gLastVizTicks = nowTicks;
+            RenderVisualizerFastFrame();
         }
 
         /* Local 1-second timeline progression while playing and not frozen */

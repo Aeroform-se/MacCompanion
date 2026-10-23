@@ -32,9 +32,11 @@ static unsigned short gAudioSampleRateHz = 22255;
 static SndChannelPtr  gSndChan           = NULL;
 static SndCallBackUPP gSndCallBackUPP    = NULL;
 static SoundHeader    gSndHeaders[NUM_AUDIO_BUFFERS];
-static Ptr            gPcmBuffers[NUM_AUDIO_BUFFERS] = { NULL, NULL };
-static long           gPcmFilled[NUM_AUDIO_BUFFERS]  = { 0, 0 };
-static volatile short gBufferBusy[NUM_AUDIO_BUFFERS] = { 0, 0 };
+static Ptr            gPcmBuffers[NUM_AUDIO_BUFFERS]      = { NULL, NULL };
+static long           gPcmFilled[NUM_AUDIO_BUFFERS]       = { 0, 0 };
+static long           gBufferQueuedLen[NUM_AUDIO_BUFFERS] = { 0, 0 };
+static unsigned long  gBufferQueuedTick[NUM_AUDIO_BUFFERS]= { 0, 0 };
+static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0 };
 static short          gNextFillBuf       = 0;
 static Boolean        gPrebuffering      = true;
 
@@ -501,8 +503,10 @@ static void QueueSoundBuffer(short idx)
     sh->encode        = stdSH;
     sh->baseFrequency = kMiddleC;
 
-    gBufferBusy[idx]  = 1;
-    gPcmFilled[idx]   = 0;
+    gBufferQueuedLen[idx]  = gPcmFilled[idx];
+    gBufferQueuedTick[idx] = TickCount();
+    gBufferBusy[idx]       = 1;
+    gPcmFilled[idx]        = 0;
 
     cmd.cmd    = bufferCmd;
     cmd.param1 = 0;
@@ -630,6 +634,45 @@ void AudioStreamStop(void)
 Boolean AudioStreamIsRunning(void)
 {
     return gAudioRunning;
+}
+
+Boolean AudioGetLiveSamples(unsigned char *outSamples, short count)
+{
+    short playBuf = -1;
+    long  bufLen;
+    long  elapsedTicks;
+    long  samplesPerTick;
+    long  offset;
+
+    if (!outSamples || count <= 0 || !gAudioRunning) return false;
+
+    if (gBufferBusy[0] && gBufferBusy[1]) {
+        playBuf = ((long)(gBufferQueuedTick[1] - gBufferQueuedTick[0]) >= 0) ? 0 : 1;
+    } else if (gBufferBusy[0]) {
+        playBuf = 0;
+    } else if (gBufferBusy[1]) {
+        playBuf = 1;
+    } else {
+        return false;
+    }
+
+    if (!gPcmBuffers[playBuf] || gBufferQueuedLen[playBuf] < count) {
+        return false;
+    }
+
+    bufLen = gBufferQueuedLen[playBuf];
+    elapsedTicks = (long)(TickCount() - gBufferQueuedTick[playBuf]);
+    if (elapsedTicks < 0) elapsedTicks = 0;
+    if (elapsedTicks > 20) elapsedTicks = 20;
+
+    samplesPerTick = (gAudioSampleRateHz <= 12000) ? 185L : 371L;
+    offset = (elapsedTicks * samplesPerTick) % (bufLen - count + 1);
+    if (offset < 0 || offset + count > bufLen) {
+        offset = 0;
+    }
+
+    memcpy(outSamples, gPcmBuffers[playBuf] + offset, (size_t)count);
+    return true;
 }
 
 void AudioStreamPump(void)

@@ -54,5 +54,6 @@ Boolean AudioStreamStart(unsigned short sampleRateHz);
 void AudioStreamStop(void);
 Boolean AudioStreamIsRunning(void);
 void AudioStreamPump(void);
+Boolean AudioGetLiveSamples(unsigned char *outSamples, short count);
 
 #endif /* NETWORK_H */
