@@ -259,8 +259,25 @@ class RealTimePacer extends Transform {
     super({ highWaterMark: 7056 });
     this.nextFrameTimeMs = 0;
     this.timer = null;
+    this.activeDoneCallback = null;
     this.stopped = false;
     this.alignRemainder = Buffer.alloc(0);
+    this.flushEpoch = 0;
+  }
+
+  flush() {
+    this.flushEpoch++;
+    this.nextFrameTimeMs = 0;
+    this.alignRemainder = Buffer.alloc(0);
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    if (this.activeDoneCallback) {
+      const cb = this.activeDoneCallback;
+      this.activeDoneCallback = null;
+      cb();
+    }
   }
 
   _transform(chunk, encoding, callback) {
@@ -282,10 +299,21 @@ class RealTimePacer extends Transform {
     }
 
     let offset = 0;
+    const myEpoch = this.flushEpoch;
+    this.activeDoneCallback = callback;
+
     const pumpNextFrame = () => {
-      if (this.stopped || offset >= alignedLen) {
+      if (this.stopped || myEpoch !== this.flushEpoch) {
         this.timer = null;
-        return callback();
+        return;
+      }
+      if (offset >= alignedLen) {
+        this.timer = null;
+        if (this.activeDoneCallback === callback) {
+          this.activeDoneCallback = null;
+          callback();
+        }
+        return;
       }
 
       const end = Math.min(offset + FRAME_BYTES, alignedLen);
@@ -295,9 +323,10 @@ class RealTimePacer extends Transform {
       const durationMs = (slice.length / LIBRESPOT_BYTES_PER_SEC) * 1000;
       const now = performance.now();
 
-      // If starting fresh or resuming after a pause (> 200ms gap), reset clock
+      // If starting fresh or resuming after a pause (> 200ms gap), allow a 160ms pre-fill burst
+      // so the 68k client's double-buffer fills immediately without initial underrun jitter
       if (now - this.nextFrameTimeMs > 200) {
-        this.nextFrameTimeMs = now;
+        this.nextFrameTimeMs = now - 160;
       }
 
       const delayMs = Math.max(0, this.nextFrameTimeMs - now);
@@ -308,10 +337,10 @@ class RealTimePacer extends Transform {
         setImmediate(pumpNextFrame);
       } else {
         this.timer = setTimeout(() => {
-          if (!this.stopped) {
+          if (!this.stopped && myEpoch === this.flushEpoch) {
             this.push(slice);
+            pumpNextFrame();
           }
-          pumpNextFrame();
         }, delayMs);
       }
     };
@@ -484,6 +513,12 @@ class AudioStreamEngine extends EventEmitter {
   getActiveMacSpeakerName() {
     const active = this.getActiveMacClient();
     return active ? active.name : DEVICE_NAME;
+  }
+
+  onPause() {
+    if (this.pacer && typeof this.pacer.flush === 'function') {
+      this.pacer.flush();
+    }
   }
 
   isPaired() {

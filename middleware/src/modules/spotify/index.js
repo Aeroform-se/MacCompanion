@@ -885,6 +885,7 @@ router.all('/pause', async (req, res) => {
   try {
     optimisticState.isPlaying = false;
     optimisticState.isPlayingTs = Date.now();
+    audioEngine.onPause();
     await callPlayerCommand('/me/player/pause', { method: 'PUT' });
     const pipe = 'OK|PAUSE\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
@@ -901,6 +902,7 @@ router.all('/toggle-play', async (req, res) => {
     if (isPlaying) {
       optimisticState.isPlaying = false;
       optimisticState.isPlayingTs = Date.now();
+      audioEngine.onPause();
       await callPlayerCommand('/me/player/pause', { method: 'PUT' });
       return sendPipeResponse(req, res, 'OK|PAUSE\n');
     } else {

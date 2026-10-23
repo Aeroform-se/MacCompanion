@@ -1,6 +1,6 @@
 /*
  * SpotiMac — Native 68k Macintosh Spotify Client
- * Version 0.3.5 RC ("Business")
+ * Version 0.3.6 RC ("Amazeballs")
  * Compiled with Retro68 + Apple Universal Interfaces 3.4.2
  *
  * UI Design: 512 x 322 flush canvas below the 20px Mac OS menu bar
@@ -775,6 +775,199 @@ static void RenderSearchCenterPanel(void)
     TextMode(srcOr);
 }
 
+/*
+ * Custom Window Definition Procedure (WDEF) for the 192x68 Mini-Player window.
+ * Masks both `contRgn` and `strucRgn` to the exact rounded-corner silhouette of
+ * Layer 1 in `Mini-player.psd` so there is no black background behind the rounded
+ * corners — only the white rounded window masked directly against the background.
+ */
+static pascal long MiniPlayerWDEF(short varCode, WindowPtr window, short message, long param)
+{
+    WindowPeek wp = (WindowPeek)window;
+    (void)varCode;
+
+    switch (message) {
+        case wDraw:
+            return 0;
+
+        case wHit: {
+            Point hitPt;
+            hitPt.v = HiWord(param);
+            hitPt.h = LoWord(param);
+            if (PtInRgn(hitPt, wp->contRgn)) {
+                return wInContent;
+            }
+            return wNoHit;
+        }
+
+        case wCalcRgns: {
+            GrafPtr   savePort;
+            Point     topLeft;
+            short     gx, gy;
+            RgnHandle tmpRgn = NewRgn();
+
+            GetPort(&savePort);
+            SetPort(window);
+            topLeft.h = window->portRect.left;
+            topLeft.v = window->portRect.top;
+            LocalToGlobal(&topLeft);
+            SetPort(savePort);
+
+            gx = topLeft.h;
+            gy = topLeft.v;
+
+            /* Exact 192x68 rounded-corner alpha mask from Layer 1 of Mini-player.psd */
+            SetRectRgn(wp->contRgn, gx + 4, gy + 0, gx + MINI_W - 4, gy + MINI_H);
+            if (tmpRgn) {
+                SetRectRgn(tmpRgn, gx + 2, gy + 1, gx + MINI_W - 2, gy + MINI_H - 1);
+                UnionRgn(wp->contRgn, tmpRgn, wp->contRgn);
+                SetRectRgn(tmpRgn, gx + 1, gy + 2, gx + MINI_W - 1, gy + MINI_H - 2);
+                UnionRgn(wp->contRgn, tmpRgn, wp->contRgn);
+                SetRectRgn(tmpRgn, gx + 0, gy + 4, gx + MINI_W,     gy + MINI_H - 4);
+                UnionRgn(wp->contRgn, tmpRgn, wp->contRgn);
+                DisposeRgn(tmpRgn);
+            }
+            CopyRgn(wp->contRgn, wp->strucRgn);
+            return 0;
+        }
+
+        case wNew:
+        case wDispose:
+        case wGrow:
+        case wDrawGIcon:
+            return 0;
+    }
+    return 0;
+}
+
+static void InstallMiniPlayerWDEF(WindowPtr win)
+{
+    Handle stub;
+    if (!win) return;
+    stub = NewHandle(6);
+    if (stub && *stub) {
+        unsigned char *p = (unsigned char *)*stub;
+        long procAddr = (long)MiniPlayerWDEF;
+        HLock(stub);
+        p[0] = 0x4E; /* 68000 JMP.L absolute */
+        p[1] = 0xF9;
+        *(long *)(p + 2) = procAddr;
+        ((WindowPeek)win)->windowDefProc = stub;
+        MiniPlayerWDEF(0, win, wCalcRgns, 0);
+    }
+}
+
+/*
+ * Non-blocking window drag loop that continuously pumps `AudioStreamPump()`
+ * while the mouse button is held down so music playback never stops while
+ * moving the Mini-Player or Main Window around the screen.
+ */
+static void DragWindowWithAudio(WindowPtr win, Point startGlobalPt)
+{
+    GrafPtr   savePort, wmgrPort;
+    RgnHandle savedClip;
+    Point     winOrigin, curGlobalPt;
+    short     winW, winH, origLeft, origTop, curLeft, curTop;
+    Rect      outlineRect;
+    Boolean   isMini = (win == gMiniWindow);
+
+    if (!win) return;
+    GetPort(&savePort);
+    SetPort(win);
+    winOrigin.h = win->portRect.left;
+    winOrigin.v = win->portRect.top;
+    LocalToGlobal(&winOrigin);
+    winW = win->portRect.right - win->portRect.left;
+    winH = win->portRect.bottom - win->portRect.top;
+
+    origLeft = winOrigin.h;
+    origTop  = winOrigin.v;
+    curLeft  = origLeft;
+    curTop   = origTop;
+
+    GetWMgrPort(&wmgrPort);
+    SetPort(wmgrPort);
+    savedClip = NewRgn();
+    if (savedClip) {
+        GetClip(savedClip);
+    }
+    ClipRect(&qd.screenBits.bounds);
+    PenNormal();
+    PenPat(&qd.gray);
+    PenMode(patXor);
+
+    SetRect(&outlineRect, curLeft, curTop, curLeft + winW, curTop + winH);
+    if (isMini) {
+        FrameRoundRect(&outlineRect, 8, 8);
+    } else {
+        FrameRect(&outlineRect);
+    }
+
+    while (StillDown()) {
+        short newLeft, newTop;
+        if (AudioStreamIsRunning()) {
+            AudioStreamPump();
+        }
+        GetMouse(&curGlobalPt);
+        newLeft = origLeft + (curGlobalPt.h - startGlobalPt.h);
+        newTop  = origTop  + (curGlobalPt.v - startGlobalPt.v);
+
+        if (newTop < 20) newTop = 20;
+        if (newTop > qd.screenBits.bounds.bottom - 16) {
+            newTop = qd.screenBits.bounds.bottom - 16;
+        }
+        if (newLeft < qd.screenBits.bounds.left - winW + 24) {
+            newLeft = qd.screenBits.bounds.left - winW + 24;
+        }
+        if (newLeft > qd.screenBits.bounds.right - 24) {
+            newLeft = qd.screenBits.bounds.right - 24;
+        }
+
+        if (newLeft != curLeft || newTop != curTop) {
+            /* Erase old XOR outline */
+            SetRect(&outlineRect, curLeft, curTop, curLeft + winW, curTop + winH);
+            if (isMini) {
+                FrameRoundRect(&outlineRect, 8, 8);
+            } else {
+                FrameRect(&outlineRect);
+            }
+
+            curLeft = newLeft;
+            curTop  = newTop;
+
+            /* Draw new XOR outline */
+            SetRect(&outlineRect, curLeft, curTop, curLeft + winW, curTop + winH);
+            if (isMini) {
+                FrameRoundRect(&outlineRect, 8, 8);
+            } else {
+                FrameRect(&outlineRect);
+            }
+        }
+    }
+
+    /* Erase final XOR outline before moving the window */
+    SetRect(&outlineRect, curLeft, curTop, curLeft + winW, curTop + winH);
+    if (isMini) {
+        FrameRoundRect(&outlineRect, 8, 8);
+    } else {
+        FrameRect(&outlineRect);
+    }
+
+    PenNormal();
+    if (savedClip) {
+        SetClip(savedClip);
+        DisposeRgn(savedClip);
+    }
+    SetPort(savePort);
+
+    if (curLeft != origLeft || curTop != origTop) {
+        MoveWindow(win, curLeft, curTop, false);
+        if (AudioStreamIsRunning()) {
+            AudioStreamPump();
+        }
+    }
+}
+
 static void RenderMiniPlayer(void)
 {
     GrafPtr savePort;
@@ -799,26 +992,9 @@ static void RenderMiniPlayer(void)
     TextMode(srcOr);
     PenNormal();
 
-    /* 1. White interior (192x68) with exact rounded corner curves from Mini-player.png */
+    /* 1. Pure white interior (192x68); rounded corners are masked by MiniPlayerWDEF */
     SetRect(&r, 0, 0, MINI_W, MINI_H);
     EraseRect(&r);
-
-    /* Top-left corner */
-    MoveTo(0, 0); LineTo(3, 0);
-    MoveTo(0, 1); LineTo(1, 1);
-    MoveTo(0, 2); LineTo(0, 3);
-    /* Top-right corner */
-    MoveTo(MINI_W - 4, 0); LineTo(MINI_W - 1, 0);
-    MoveTo(MINI_W - 2, 1); LineTo(MINI_W - 1, 1);
-    MoveTo(MINI_W - 1, 2); LineTo(MINI_W - 1, 3);
-    /* Bottom-left corner */
-    MoveTo(0, MINI_H - 4); LineTo(0, MINI_H - 3);
-    MoveTo(0, MINI_H - 2); LineTo(1, MINI_H - 2);
-    MoveTo(0, MINI_H - 1); LineTo(3, MINI_H - 1);
-    /* Bottom-right corner */
-    MoveTo(MINI_W - 1, MINI_H - 4); LineTo(MINI_W - 1, MINI_H - 3);
-    MoveTo(MINI_W - 2, MINI_H - 2); LineTo(MINI_W - 1, MINI_H - 2);
-    MoveTo(MINI_W - 4, MINI_H - 1); LineTo(MINI_W - 1, MINI_H - 1);
 
     /* 2. Centered "Artist - Song title" at top (baseline y = 15) */
     if (gNowPlaying.trackName[0] != '\0') {
@@ -899,15 +1075,15 @@ static void RenderMiniPlayer(void)
         DrawButtonHoverDots(118, 44, hov);
     }
 
-    /* Repeat (135, 30/31) + hover dots at (138, 44) */
+    /* Repeat (135, 30) 13x12 + hover dots at (138, 44) */
     {
         Boolean hov = (gHoverBtn == BTN_REPEAT) && (gPressedBtn != BTN_REPEAT);
         if (strcmp(gNowPlaying.repeatState, "track") == 0) {
-            BlitIcon1Bit(gIconRepeatTrack, 12, 11, 135, 31, srcCopy);
+            BlitIcon1Bit(gIconRepeatTrack, 13, 12, 135, 30, srcCopy);
         } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
-            BlitIcon1Bit(gIconRepeatAll12, 12, 12, 135, 30, srcCopy);
+            BlitIcon1Bit(gIconRepeatAll, 13, 12, 135, 30, srcCopy);
         } else {
-            BlitIcon1Bit(gIconRepeatOff, 12, 11, 135, 31, srcCopy);
+            BlitIcon1Bit(gIconRepeatOff, 13, 12, 135, 30, srcCopy);
         }
         DrawButtonHoverDots(138, 44, hov);
     }
@@ -1253,15 +1429,15 @@ static void RenderCanvas(void)
         DrawButtonHoverDots(282, 298, hov);
     }
 
-    /* Repeat button (303, 284/285) + hover dots at (306, 298) */
+    /* Repeat button (303, 284) 13x12 + hover dots at (306, 298) */
     {
         Boolean hov = (gHoverBtn == BTN_REPEAT) && (gPressedBtn != BTN_REPEAT);
         if (strcmp(gNowPlaying.repeatState, "track") == 0) {
-            BlitIcon1Bit(gIconRepeatTrack, 12, 11, 303, 285, srcCopy);
+            BlitIcon1Bit(gIconRepeatTrack, 13, 12, 303, 284, srcCopy);
         } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
-            BlitIcon1Bit(gIconRepeatAll12, 12, 12, 303, 284, srcCopy);
+            BlitIcon1Bit(gIconRepeatAll, 13, 12, 303, 284, srcCopy);
         } else {
-            BlitIcon1Bit(gIconRepeatOff, 12, 11, 303, 285, srcCopy);
+            BlitIcon1Bit(gIconRepeatOff, 13, 12, 303, 284, srcCopy);
         }
         DrawButtonHoverDots(306, 298, hov);
     }
@@ -2643,11 +2819,12 @@ static void HandleCanvasClick(Point pt)
                 gNowPlaying.isPlaying = wantPlay;
                 gTimelineFrozen       = !wantPlay;
                 TrackTransportButtonPress(BTN_PLAY);
-                SyncLocalAudioWithSpeaker();
 
                 if (wantPlay) {
                     NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+                    SyncLocalAudioWithSpeaker();
                 } else {
+                    SyncLocalAudioWithSpeaker();
                     NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
                 }
                 ResetPollTimersAfterAction();
@@ -2840,12 +3017,13 @@ static void HandleKeyPress(char ch)
         Boolean wantPlay = !gNowPlaying.isPlaying;
         gNowPlaying.isPlaying = wantPlay;
         gTimelineFrozen       = !wantPlay;
-        SyncLocalAudioWithSpeaker();
         RenderCanvas();
 
         if (wantPlay) {
             NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+            SyncLocalAudioWithSpeaker();
         } else {
+            SyncLocalAudioWithSpeaker();
             NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
         }
         ResetPollTimersAfterAction();
@@ -2908,11 +3086,12 @@ static void HandleMenuChoice(long menuChoice)
                 Boolean wantPlay = !gNowPlaying.isPlaying;
                 gNowPlaying.isPlaying = wantPlay;
                 gTimelineFrozen       = !wantPlay;
-                SyncLocalAudioWithSpeaker();
                 RenderCanvas();
                 if (wantPlay) {
                     NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+                    SyncLocalAudioWithSpeaker();
                 } else {
+                    SyncLocalAudioWithSpeaker();
                     NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
                 }
                 ResetPollTimersAfterAction();
@@ -2973,10 +3152,11 @@ static void HandleMiniPlayerClick(EventRecord *ev, Point pt)
         gNowPlaying.isPlaying = wantPlay;
         gTimelineFrozen       = !wantPlay;
         TrackTransportButtonPress(BTN_PLAY);
-        SyncLocalAudioWithSpeaker();
         if (wantPlay) {
             NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+            SyncLocalAudioWithSpeaker();
         } else {
+            SyncLocalAudioWithSpeaker();
             NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
         }
         ResetPollTimersAfterAction();
@@ -3040,7 +3220,7 @@ static void HandleMiniPlayerClick(EventRecord *ev, Point pt)
 
     /* Clicking anywhere else on the Mini-Player drags the window freely across the screen */
     if (gMiniWindow && ev) {
-        DragWindow(gMiniWindow, ev->where, &qd.screenBits.bounds);
+        DragWindowWithAudio(gMiniWindow, ev->where);
     }
 }
 
@@ -3060,7 +3240,7 @@ static void HandleMouseDown(EventRecord *ev)
 
         case inDrag:
             if (whichWindow != NULL) {
-                DragWindow(whichWindow, ev->where, &qd.screenBits.bounds);
+                DragWindowWithAudio(whichWindow, ev->where);
             }
             break;
 
@@ -3077,7 +3257,7 @@ static void HandleMouseDown(EventRecord *ev)
                 SetPort(gMainWindow);
                 GlobalToLocal(&pt);
                 if ((ev->modifiers & cmdKey) != 0 && pt.v < 22) {
-                    DragWindow(gMainWindow, ev->where, &qd.screenBits.bounds);
+                    DragWindowWithAudio(gMainWindow, ev->where);
                 } else {
                     HandleCanvasClick(pt);
                 }
@@ -3185,6 +3365,7 @@ int main(void)
             false,
             0
         );
+        InstallMiniPlayerWDEF(gMiniWindow);
     }
 
     /*

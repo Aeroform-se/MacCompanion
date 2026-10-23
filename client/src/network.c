@@ -36,6 +36,7 @@ static Ptr            gPcmBuffers[NUM_AUDIO_BUFFERS] = { NULL, NULL };
 static long           gPcmFilled[NUM_AUDIO_BUFFERS]  = { 0, 0 };
 static volatile short gBufferBusy[NUM_AUDIO_BUFFERS] = { 0, 0 };
 static short          gNextFillBuf       = 0;
+static Boolean        gPrebuffering      = true;
 
 /*
  * Interrupt-safe Sound Manager callback:
@@ -583,6 +584,7 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
         gPcmFilled[i]  = 0;
     }
     gNextFillBuf  = 0;
+    gPrebuffering = true;
     gAudioRunning = true;
     return true;
 }
@@ -594,6 +596,7 @@ void AudioStreamStop(void)
 
     if (!gAudioRunning && gAudioStream == 0 && !gSndChan) return;
     gAudioRunning = false;
+    gPrebuffering = true;
 
     if (gSndChan) {
         SndCommand cmd;
@@ -636,11 +639,31 @@ void AudioStreamPump(void)
 
     if (!gAudioRunning || gAudioStream == 0 || !gSndChan) return;
 
+    /*
+     * If the Sound Manager currently has no buffers playing and both buffers are
+     * empty (e.g., fresh start, resume after pause, or recovery after a seek/skip),
+     * re-arm prebuffering so Buffer 0 only starts playing once Buffer 1 also has a
+     * >= 2,048-byte (~92ms) cushion ready.
+     */
+    if (!gBufferBusy[0] && !gBufferBusy[1] && gPcmFilled[0] == 0 && gPcmFilled[1] == 0) {
+        gPrebuffering = true;
+        gNextFillBuf  = 0;
+    }
+
     for (attempts = 0; attempts < NUM_AUDIO_BUFFERS; attempts++) {
-        short idx = gNextFillBuf;
+        short idx;
         unsigned short unread = 0;
+        long targetSize;
         long needed;
         unsigned short toRead;
+
+        if (gPrebuffering) {
+            idx = (gPcmFilled[0] < 4096) ? 0 : 1;
+            targetSize = 4096;
+        } else {
+            idx = gNextFillBuf;
+            targetSize = AUDIO_CHUNK_SIZE;
+        }
 
         if (gBufferBusy[idx]) {
             break;
@@ -660,7 +683,10 @@ void AudioStreamPump(void)
             break;
         }
 
-        needed = AUDIO_CHUNK_SIZE - gPcmFilled[idx];
+        needed = targetSize - gPcmFilled[idx];
+        if (needed <= 0) {
+            break;
+        }
         toRead = (unread > (unsigned short)needed) ? (unsigned short)needed : unread;
 
         memset(&pb, 0, sizeof(pb));
@@ -677,7 +703,18 @@ void AudioStreamPump(void)
             break;
         }
 
-        if (gPcmFilled[idx] >= 4096) {
+        if (gPrebuffering) {
+            if (gPcmFilled[0] >= 4096 && gPcmFilled[1] >= 2048) {
+                gPrebuffering = false;
+                QueueSoundBuffer(0);
+                if (gPcmFilled[1] >= 4096) {
+                    QueueSoundBuffer(1);
+                    gNextFillBuf = 0;
+                } else {
+                    gNextFillBuf = 1;
+                }
+            }
+        } else if (gPcmFilled[idx] >= 4096) {
             QueueSoundBuffer(idx);
             gNextFillBuf = (idx + 1) % NUM_AUDIO_BUFFERS;
         } else {
