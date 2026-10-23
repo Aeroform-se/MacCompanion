@@ -207,7 +207,15 @@ function normalizeSpotifyUri(input, defaultType = 'track') {
 }
 
 let likedCache = { uri: null, liked: false, ts: 0 };
+const likedStatusMap = new Map(); // uri -> { liked: boolean, ts: number }
 const artworkCache = new Map();
+
+function setCachedLikedStatus(uri, liked) {
+  if (!uri) return;
+  const now = Date.now();
+  likedCache = { uri, liked: Boolean(liked), ts: now };
+  likedStatusMap.set(uri, { liked: Boolean(liked), ts: now });
+}
 
 /**
  * Checks if a track URI is saved in the user's "Liked Songs" library using Spotify's `/me/library/contains`.
@@ -216,14 +224,20 @@ async function checkIsTrackLiked(trackIdOrUri) {
   if (!trackIdOrUri) return false;
   try {
     const { uri } = normalizeSpotifyUri(trackIdOrUri, 'track');
-    if (!customFetch && likedCache.uri === uri && (Date.now() - likedCache.ts) < 30000) {
-      return likedCache.liked;
+    if (!customFetch) {
+      const entry = likedStatusMap.get(uri);
+      if (entry && (Date.now() - entry.ts) < 120000) {
+        return entry.liked;
+      }
+      if (likedCache.uri === uri && (Date.now() - likedCache.ts) < 30000) {
+        return likedCache.liked;
+      }
     }
     const res = await callSpotify('/me/library/contains', {
       query: { uris: uri },
     });
     const liked = Array.isArray(res) && Boolean(res[0]);
-    likedCache = { uri, liked, ts: Date.now() };
+    setCachedLikedStatus(uri, liked);
     return liked;
   } catch {
     return false;
@@ -234,24 +248,45 @@ async function checkIsTrackLiked(trackIdOrUri) {
   // Top Tracks, Search Results) so playing a track without a context_uri still loads
   // the full upcoming tracklist into Spotify's player for Next/Previous & auto-advance.
   let lastTrackListUris = [];
-  function recordTrackListRows(rows) {
+  function recordTrackListRows(rows, { allLiked = false } = {}) {
     if (!Array.isArray(rows)) return;
     const uris = rows
       .filter((r) => Array.isArray(r) && (r[0] === 'TRACK' || r[0] === 'RECENT' || r[0] === 'TOP_TRACK') && typeof r[7] === 'string' && r[7].startsWith('spotify:track:'))
       .map((r) => r[7]);
     if (uris.length > 0) {
       lastTrackListUris = uris;
+      if (!customFetch) {
+        if (allLiked) {
+          for (const u of uris) setCachedLikedStatus(u, true);
+        } else {
+          // Non-blocking batch pre-warm of liked status for up to 40 tracks in the active list
+          const batch = uris.slice(0, 40);
+          callSpotify('/me/library/contains', {
+            query: { uris: batch.join(',') },
+          }).then((res) => {
+            if (Array.isArray(res)) {
+              batch.forEach((u, idx) => {
+                if (typeof res[idx] === 'boolean') {
+                  setCachedLikedStatus(u, res[idx]);
+                }
+              });
+            }
+          }).catch(() => {});
+        }
+      }
     }
   }
 
-  // Short-lived optimistic state overrides (3s TTL) so /now-playing never flickers back
-  // to stale Spotify cloud state immediately after Play/Pause/Seek/Shuffle/Repeat/Volume/Like.
-  const OPTIMISTIC_TTL_MS = 3000;
+  // Optimistic state overrides so /now-playing and /timeline never flicker or bounce back
+  // to stale Spotify cloud state after Play/Pause/Seek/Shuffle/Repeat/Volume/Like.
+  const OPTIMISTIC_TTL_MS = 6000;
+  const OPTIMISTIC_PROGRESS_TTL_MS = 20000;
   const optimisticState = {
     isPlaying: null,
     isPlayingTs: 0,
     progressMs: null,
     progressTs: 0,
+    progressTrackId: null,
     volumePct: null,
     volumeTs: 0,
     shuffleMode: null,
@@ -291,10 +326,23 @@ async function checkIsTrackLiked(trackIdOrUri) {
     if (optimisticState.isPlaying !== null && (now - optimisticState.isPlayingTs) < OPTIMISTIC_TTL_MS) {
       np.isPlaying = optimisticState.isPlaying;
     }
-    if (optimisticState.progressMs !== null && (now - optimisticState.progressTs) < OPTIMISTIC_TTL_MS) {
-      const elapsed = np.isPlaying ? Math.max(0, now - optimisticState.progressTs) : 0;
-      np.progressMs = Math.min(np.durationMs || Number.MAX_SAFE_INTEGER, optimisticState.progressMs + elapsed);
-      np.progressFormatted = formatTimeMmSs(np.progressMs);
+    if (optimisticState.progressMs !== null && (now - optimisticState.progressTs) < OPTIMISTIC_PROGRESS_TTL_MS) {
+      const sameTrack = !optimisticState.progressTrackId || !np.trackId || np.trackId === optimisticState.progressTrackId;
+      if (sameTrack) {
+        const elapsed = np.isPlaying ? Math.max(0, now - optimisticState.progressTs) : 0;
+        const expectedMs = Math.min(np.durationMs || Number.MAX_SAFE_INTEGER, optimisticState.progressMs + elapsed);
+        const cloudDiff = Math.abs((np.progressMs || 0) - expectedMs);
+        // Once >3s have elapsed and Spotify Cloud has caught up within 1.5s of expectedMs,
+        // hand off to Spotify's cloud clock; otherwise keep our authoritative progressMs
+        // so the timeline never bounces back after a seek or pause.
+        if ((now - optimisticState.progressTs) > 3000 && cloudDiff <= 1500) {
+          optimisticState.progressMs = np.progressMs;
+          optimisticState.progressTs = now;
+        } else {
+          np.progressMs = expectedMs;
+          np.progressFormatted = formatTimeMmSs(np.progressMs);
+        }
+      }
     }
     if (optimisticState.volumePct !== null && (now - optimisticState.volumeTs) < OPTIMISTIC_TTL_MS) {
       np.volumePercent = optimisticState.volumePct;
@@ -306,7 +354,7 @@ async function checkIsTrackLiked(trackIdOrUri) {
     if (optimisticState.repeatState !== null && (now - optimisticState.repeatTs) < OPTIMISTIC_TTL_MS) {
       np.repeatState = optimisticState.repeatState;
     }
-    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 5000) {
+    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 6000) {
       np.deviceName = optimisticState.deviceName;
     }
     return np;
@@ -736,13 +784,14 @@ async function refreshNowPlayingCache() {
   nowPlayingCache.refreshInFlight = true;
   try {
     const raw = await callSpotify('/me/player');
+    const playerFetchedAt = Date.now();
     let isLiked = false;
     if (raw && raw.item && raw.item.id) {
       isLiked = await checkIsTrackLiked(raw.item.id);
     }
     nowPlayingCache.raw = raw || null;
     nowPlayingCache.isLiked = isLiked;
-    nowPlayingCache.fetchedAt = Date.now();
+    nowPlayingCache.fetchedAt = playerFetchedAt;
   } catch {
     // Keep previous cached state on transient cloud error
   } finally {
@@ -765,26 +814,37 @@ router.get('/now-playing', async (req, res) => {
     let isLiked = false;
 
     if (!customFetch && nowPlayingCache.fetchedAt > 0 && (Date.now() - nowPlayingCache.fetchedAt) < 30000) {
-      // Serve immediately (<1ms) from cache and trigger background refresh if >2.5s old
+      // Serve immediately (<1ms) from cache and trigger background refresh if >2.0s old
       raw = nowPlayingCache.raw ? { ...nowPlayingCache.raw } : null;
       if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
         const elapsed = Math.max(0, Date.now() - nowPlayingCache.fetchedAt);
         const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
         raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
       }
-      isLiked = nowPlayingCache.isLiked;
-      if ((Date.now() - nowPlayingCache.fetchedAt) > 2500) {
+      if (raw && raw.item && raw.item.uri) {
+        const cachedEntry = likedStatusMap.get(raw.item.uri);
+        isLiked = cachedEntry ? cachedEntry.liked : nowPlayingCache.isLiked;
+      } else {
+        isLiked = nowPlayingCache.isLiked;
+      }
+      if ((Date.now() - nowPlayingCache.fetchedAt) > 2000) {
         refreshNowPlayingCache();
       }
     } else {
       raw = await callSpotify('/me/player');
+      const playerFetchedAt = Date.now();
       if (raw && raw.item && raw.item.id) {
         isLiked = await checkIsTrackLiked(raw.item.id);
       }
       if (!customFetch) {
-        nowPlayingCache.raw = raw || null;
+        nowPlayingCache.raw = raw ? { ...raw } : null;
         nowPlayingCache.isLiked = isLiked;
-        nowPlayingCache.fetchedAt = Date.now();
+        nowPlayingCache.fetchedAt = playerFetchedAt;
+        if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
+          const elapsed = Math.max(0, Date.now() - playerFetchedAt);
+          const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
+          raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
+        }
       }
     }
 
@@ -805,13 +865,37 @@ router.get('/now-playing', async (req, res) => {
 
 /**
  * GET /api/spotify/timeline
- * Ultra-lightweight endpoint specifically for frequent 68k timeline polling:
+ * Ultra-lightweight endpoint specifically for direct 68k timeline polling & post-Pause/Seek sync:
  *   TIMELINE|is_playing(1/0)|progress_ms|duration_ms|progress_mmss|duration_mmss|percent(0-100)|track_id
  */
 router.get('/timeline', async (req, res) => {
   try {
-    const raw = await callSpotify('/me/player');
-    const np = normalizeNowPlaying(raw);
+    let raw = null;
+    if (customFetch || req.query.direct === '1' || !nowPlayingCache.fetchedAt || (Date.now() - nowPlayingCache.fetchedAt) > 2000) {
+      raw = await callSpotify('/me/player');
+      const playerFetchedAt = Date.now();
+      if (!customFetch && raw) {
+        nowPlayingCache.raw = { ...raw };
+        nowPlayingCache.fetchedAt = playerFetchedAt;
+        // If we just paused and queried Spotify directly, lock the exact paused position
+        // if Spotify reports a paused progress_ms close to our paused clock.
+        if (optimisticState.isPlaying === false && typeof raw.progress_ms === 'number') {
+          if (optimisticState.progressMs === null || Math.abs(raw.progress_ms - optimisticState.progressMs) <= 3500) {
+            optimisticState.progressMs = raw.progress_ms;
+            optimisticState.progressTs = playerFetchedAt;
+          }
+        }
+      }
+    } else if (nowPlayingCache.raw) {
+      raw = { ...nowPlayingCache.raw };
+      if (raw.is_playing && typeof raw.progress_ms === 'number') {
+        const elapsed = Math.max(0, Date.now() - nowPlayingCache.fetchedAt);
+        const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
+        raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
+      }
+    }
+
+    const np = applyOptimisticOverrides(normalizeNowPlaying(raw));
     const pct = np.durationMs > 0 ? Math.min(100, Math.round((np.progressMs / np.durationMs) * 100)) : 0;
     const pipe = `${formatPipeRow([
       'TIMELINE',
@@ -855,12 +939,21 @@ router.all('/seek', async (req, res) => {
     }
 
     const targetMs = Math.max(0, parseInt(positionMs || '0', 10));
+    const now = Date.now();
     optimisticState.progressMs = targetMs;
-    optimisticState.progressTs = Date.now();
+    optimisticState.progressTs = now;
+    if (nowPlayingCache.raw && nowPlayingCache.raw.item && nowPlayingCache.raw.item.id) {
+      optimisticState.progressTrackId = nowPlayingCache.raw.item.id;
+    }
+    if (nowPlayingCache.raw) {
+      nowPlayingCache.raw.progress_ms = targetMs;
+      nowPlayingCache.fetchedAt = now;
+    }
     await callSpotify('/me/player/seek', {
       method: 'PUT',
       query: { position_ms: targetMs },
     });
+    optimisticState.progressTs = Date.now();
     const pipe = `${formatPipeRow(['OK', 'SEEK', targetMs, formatTimeMmSs(targetMs)])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, positionMs: targetMs, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -890,23 +983,31 @@ router.all('/play', async (req, res) => {
     const deviceId = req.query.device_id || (req.body && req.body.device_id);
 
     let body;
+    let targetTrackId = null;
     if (contextUri) {
       const normCtx = normalizeSpotifyUri(contextUri, 'playlist');
       body = { context_uri: normCtx.uri };
       if (offsetUri) {
         const normOff = normalizeSpotifyUri(offsetUri, 'track');
         body.offset = { uri: normOff.uri };
+        targetTrackId = normOff.id;
       }
       optimisticState.progressMs = 0;
       optimisticState.progressTs = Date.now();
+      optimisticState.progressTrackId = targetTrackId;
     } else if (uri) {
       const normTrack = normalizeSpotifyUri(uri, 'track');
+      targetTrackId = normTrack.id;
       if (!customFetch && lastTrackListUris.length > 1 && lastTrackListUris.includes(normTrack.uri)) {
         body = { uris: lastTrackListUris, offset: { uri: normTrack.uri } };
       } else {
         body = { uris: [normTrack.uri] };
       }
       optimisticState.progressMs = 0;
+      optimisticState.progressTs = Date.now();
+      optimisticState.progressTrackId = targetTrackId;
+    } else if (optimisticState.progressMs !== null) {
+      // Resuming from pause: re-anchor progressTs to now so elapsed time resumes from paused position
       optimisticState.progressTs = Date.now();
     }
     if (positionMs !== undefined && body) {
@@ -922,6 +1023,10 @@ router.all('/play', async (req, res) => {
       query: deviceId ? { device_id: deviceId } : undefined,
       body,
     });
+    // Reset progressTs to the exact moment Spotify accepted the play command
+    if (optimisticState.progressMs !== null) {
+      optimisticState.progressTs = Date.now();
+    }
     nowPlayingCache.fetchedAt = 0;
     const pipe = 'OK|PLAY\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
@@ -933,8 +1038,21 @@ router.all('/play', async (req, res) => {
 
 router.all('/pause', async (req, res) => {
   try {
+    const now = Date.now();
+    // Freeze optimistic progressMs at the exact moment of pause
+    if (optimisticState.progressMs !== null && (now - optimisticState.progressTs) < OPTIMISTIC_PROGRESS_TTL_MS) {
+      if (optimisticState.isPlaying !== false) {
+        optimisticState.progressMs += Math.max(0, now - optimisticState.progressTs);
+      }
+      optimisticState.progressTs = now;
+    } else if (nowPlayingCache.raw && typeof nowPlayingCache.raw.progress_ms === 'number' && nowPlayingCache.fetchedAt > 0) {
+      const elapsed = nowPlayingCache.raw.is_playing ? Math.max(0, now - nowPlayingCache.fetchedAt) : 0;
+      optimisticState.progressMs = nowPlayingCache.raw.progress_ms + elapsed;
+      optimisticState.progressTs = now;
+      optimisticState.progressTrackId = (nowPlayingCache.raw.item && nowPlayingCache.raw.item.id) || null;
+    }
     optimisticState.isPlaying = false;
-    optimisticState.isPlayingTs = Date.now();
+    optimisticState.isPlayingTs = now;
     audioEngine.onPause();
     await callPlayerCommand('/me/player/pause', { method: 'PUT' });
     nowPlayingCache.fetchedAt = 0;
@@ -950,16 +1068,27 @@ router.all('/toggle-play', async (req, res) => {
   try {
     const raw = await callSpotify('/me/player');
     const isPlaying = Boolean(raw && raw.is_playing);
+    const now = Date.now();
     if (isPlaying) {
+      if (raw && typeof raw.progress_ms === 'number') {
+        optimisticState.progressMs = raw.progress_ms;
+        optimisticState.progressTs = now;
+        optimisticState.progressTrackId = (raw.item && raw.item.id) || null;
+      }
       optimisticState.isPlaying = false;
-      optimisticState.isPlayingTs = Date.now();
+      optimisticState.isPlayingTs = now;
       audioEngine.onPause();
       await callPlayerCommand('/me/player/pause', { method: 'PUT' });
       nowPlayingCache.fetchedAt = 0;
       return sendPipeResponse(req, res, 'OK|PAUSE\n');
     } else {
+      if (raw && typeof raw.progress_ms === 'number') {
+        optimisticState.progressMs = raw.progress_ms;
+        optimisticState.progressTs = now;
+        optimisticState.progressTrackId = (raw.item && raw.item.id) || null;
+      }
       optimisticState.isPlaying = true;
-      optimisticState.isPlayingTs = Date.now();
+      optimisticState.isPlayingTs = now;
       await callPlayerCommand('/me/player/play', { method: 'PUT' });
       nowPlayingCache.fetchedAt = 0;
       return sendPipeResponse(req, res, 'OK|PLAY\n');
@@ -1301,9 +1430,43 @@ router.get('/liked', async (req, res) => {
       .map((entry) => entry && (entry.track || entry.item))
       .filter(Boolean)
       .map((t) => formatTrackRow('TRACK', t));
-    recordTrackListRows(rows);
+    recordTrackListRows(rows, { allLiked: true });
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, total: data ? data.total : rows.length, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/liked-status?track_id=...
+ * Fast, lightweight direct endpoint returning whether a track is in Liked Songs:
+ *   LIKED|1|<track_id>  or  LIKED|0|<track_id>
+ */
+router.get('/liked-status', async (req, res) => {
+  try {
+    let target = req.query.track_id || req.query.uri || req.query.id;
+    if (!target) {
+      if (nowPlayingCache.raw && nowPlayingCache.raw.item && nowPlayingCache.raw.item.id) {
+        target = nowPlayingCache.raw.item.id;
+      } else {
+        const raw = await callSpotify('/me/player');
+        if (raw && raw.item && raw.item.id) {
+          target = raw.item.id;
+        }
+      }
+    }
+    if (!target) {
+      return sendPipeResponse(req, res, 'LIKED|0|\n');
+    }
+    const { id, uri } = normalizeSpotifyUri(target, 'track');
+    const liked = await checkIsTrackLiked(uri);
+    if (nowPlayingCache.raw && nowPlayingCache.raw.item && nowPlayingCache.raw.item.id === id) {
+      nowPlayingCache.isLiked = liked;
+    }
+    const pipe = `${formatPipeRow(['LIKED', liked ? '1' : '0', id])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, id, liked, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
   } catch (err) {
     return handleRouteError(req, res, err);
@@ -1338,7 +1501,10 @@ router.all('/like', async (req, res) => {
       method: 'PUT',
       query: { uris: uri },
     });
-    likedCache = { uri, liked: true, ts: Date.now() };
+    setCachedLikedStatus(uri, true);
+    if (nowPlayingCache.raw && nowPlayingCache.raw.item && nowPlayingCache.raw.item.id === id) {
+      nowPlayingCache.isLiked = true;
+    }
 
     const pipe = `${formatPipeRow(['OK', 'LIKE', id, trackName || uri])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, id, uri, pipe: pipe.trim() });
@@ -1374,7 +1540,10 @@ router.all('/unlike', async (req, res) => {
       method: 'DELETE',
       query: { uris: uri },
     });
-    likedCache = { uri, liked: false, ts: Date.now() };
+    setCachedLikedStatus(uri, false);
+    if (nowPlayingCache.raw && nowPlayingCache.raw.item && nowPlayingCache.raw.item.id === id) {
+      nowPlayingCache.isLiked = false;
+    }
 
     const pipe = `${formatPipeRow(['OK', 'UNLIKE', id, trackName || uri])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, id, uri, pipe: pipe.trim() });
@@ -1412,7 +1581,10 @@ router.all('/toggle-like', async (req, res) => {
     });
 
     const nextLiked = !currentlyLiked;
-    likedCache = { uri, liked: nextLiked, ts: Date.now() };
+    setCachedLikedStatus(uri, nextLiked);
+    if (nowPlayingCache.raw && nowPlayingCache.raw.item && nowPlayingCache.raw.item.id === id) {
+      nowPlayingCache.isLiked = nextLiked;
+    }
     const pipe = `${formatPipeRow(['OK', 'LIKED', nextLiked ? '1' : '0', id])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, liked: nextLiked, id, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);

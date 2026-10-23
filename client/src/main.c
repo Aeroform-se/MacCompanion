@@ -233,9 +233,12 @@ static short           gVizMode              = VIZ_MODE_EQ;
 static unsigned long   gLastVizTicks         = 0;
 static unsigned short  gAudioSampleRateHz    = 22255;
 
-/* Timing for periodic state & timeline updates */
-static unsigned long   gLastPollTicks     = 0;
-static unsigned long   gLastSecondTicks   = 0;
+/* Timing for periodic state & tick-anchored timeline updates */
+static unsigned long   gLastPollTicks        = 0;
+static unsigned long   gTimelineAnchorTicks  = 0;
+static long            gTimelineAnchorMs     = 0;
+static unsigned long   gSeekLockUntilTicks   = 0;
+static Boolean         gPauseSynced          = false;
 
 /* Shared scratch buffer for HTTP responses */
 #define HTTP_BUF_SIZE  16384
@@ -1750,10 +1753,38 @@ static void VisualizerNetworkIdlePump(void)
  * Middleware API Actions & Data Loading
  * ============================================================================ */
 
+static void SetTimelinePosition(long progressMs)
+{
+    if (progressMs < 0) progressMs = 0;
+    if (gNowPlaying.durationMs > 0 && progressMs > gNowPlaying.durationMs) {
+        progressMs = gNowPlaying.durationMs;
+    }
+    gNowPlaying.progressMs = progressMs;
+    FormatMmSs(progressMs, gNowPlaying.progressMmSs);
+    gTimelineAnchorMs    = progressMs;
+    gTimelineAnchorTicks = TickCount();
+}
+
+static long GetCurrentInterpolatedProgressMs(void)
+{
+    unsigned long elapsedTicks;
+    long curMs;
+    if (!gNowPlaying.isPlaying || gTimelineFrozen) {
+        return gNowPlaying.progressMs;
+    }
+    elapsedTicks = TickCount() - gTimelineAnchorTicks;
+    /* Mac VBL tick rate is 60.15 Hz (60 ticks = 1000 ms -> elapsedTicks * 50 / 3) */
+    curMs = gTimelineAnchorMs + (long)((elapsedTicks * 50UL) / 3UL);
+    if (gNowPlaying.durationMs > 0 && curMs > gNowPlaying.durationMs) {
+        curMs = gNowPlaying.durationMs;
+    }
+    return curMs;
+}
+
 static void ResetPollTimersAfterAction(void)
 {
-    gLastPollTicks   = TickCount();
-    gLastSecondTicks = TickCount();
+    /* Only defer the next 4-second background poll; never reset the timeline anchor! */
+    gLastPollTicks = TickCount();
 }
 
 /* Immediately turns off the displayed album artwork (pure black in 1-bit QuickDraw) while waiting for new art */
@@ -1770,15 +1801,16 @@ static void BlankCurrentArtwork(void)
  */
 static void LockOptimisticTrackSelection(const char *id, const char *name, const char *artist, long durationMs)
 {
-    gTimelineFrozen        = false;
-    gNowPlaying.isPlaying  = true;
-    gNowPlaying.progressMs = 0;
-    FormatMmSs(0, gNowPlaying.progressMmSs);
+    gTimelineFrozen      = false;
+    gPauseSynced         = false;
+    gSeekLockUntilTicks  = 0;
+    gNowPlaying.isPlaying = true;
 
     if (durationMs > 0) {
         gNowPlaying.durationMs = durationMs;
         FormatMmSs(durationMs, gNowPlaying.durationMmSs);
     }
+    SetTimelinePosition(0);
 
     if (id && id[0] != '\0') {
         SafeCopy(gNowPlaying.trackId, id, sizeof(gNowPlaying.trackId));
@@ -1790,7 +1822,7 @@ static void LockOptimisticTrackSelection(const char *id, const char *name, const
         SafeCopy(gNowPlaying.artistName, artist, sizeof(gNowPlaying.artistName));
     }
 
-    gTrackLockUntilTicks = TickCount() + 300; /* 5-second lock against stale cloud polls */
+    gTrackLockUntilTicks = TickCount() + 360; /* 6-second lock against stale cloud polls */
     BlankCurrentArtwork();
     SyncRightSelectionToPlayingTrack();
     ResetPollTimersAfterAction();
@@ -1916,21 +1948,95 @@ static void FetchCurrentArtwork(void)
     }
 }
 
-static void RefreshNowPlaying(Boolean fetchArtIfChanged)
+/*
+ * Fast direct micro-call to fetch a track's liked (heart) status without waiting
+ * for a full /now-playing payload. Backed by batch pre-warming on the server.
+ */
+static void FetchTrackLikedStatus(const char *trackId)
 {
     long n;
-    char field[96];
-    char incomingTrackId[64];
-    char encId[64], encName[96], path[220];
-    Boolean trackLocked;
+    char encId[96], path[160], field[16];
+    if (!NetHasServer() || !gHttpBuf || !trackId || trackId[0] == '\0') return;
+
+    UrlEncode(trackId, encId, sizeof(encId));
+    sprintf(path, "/api/spotify/liked-status?track_id=%s", encId);
+    n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+    if (n > 0 && strncmp(gHttpBuf, "LIKED|", 6) == 0) {
+        GetPipeField(gHttpBuf, 1, field, sizeof(field));
+        gNowPlaying.isLiked = (field[0] == '1');
+    }
+}
+
+/*
+ * Fast direct micro-call to poll the authoritative playback timecode immediately
+ * after Pause, Play, or Seek.
+ */
+static void PollDirectTimeline(void)
+{
+    long n, apiProgressMs, apiDurMs;
+    unsigned long reqStartTicks, rttTicks;
+    char field[64];
+    Boolean seekLocked;
 
     if (!NetHasServer() || !gHttpBuf) return;
 
+    reqStartTicks = TickCount();
+    n = NetHttpGet("/api/spotify/timeline?direct=1", gHttpBuf, HTTP_BUF_SIZE);
+    rttTicks = TickCount() - reqStartTicks;
+    if (n <= 0 || strncmp(gHttpBuf, "TIMELINE|", 9) != 0) return;
+
+    GetPipeField(gHttpBuf, 2, field, sizeof(field));
+    apiProgressMs = atol(field);
+
+    GetPipeField(gHttpBuf, 3, field, sizeof(field));
+    apiDurMs = atol(field);
+    if (apiDurMs > 0) {
+        gNowPlaying.durationMs = apiDurMs;
+        FormatMmSs(gNowPlaying.durationMs, gNowPlaying.durationMmSs);
+    }
+
+    if (gNowPlaying.isPlaying) {
+        /* Add half-RTT compensation for response transit time */
+        apiProgressMs += (long)((rttTicks * 25UL) / 3UL);
+    }
+
+    seekLocked = (gSeekLockUntilTicks != 0 && (long)(gSeekLockUntilTicks - TickCount()) > 0);
+    if (seekLocked) {
+        long curLocalMs = GetCurrentInterpolatedProgressMs();
+        long diff = apiProgressMs - curLocalMs;
+        if (diff < 0) diff = -diff;
+        if (diff <= 2000) {
+            SetTimelinePosition(apiProgressMs);
+        }
+    } else {
+        SetTimelinePosition(apiProgressMs);
+    }
+
+    if (!gNowPlaying.isPlaying) {
+        gPauseSynced = true;
+    }
+}
+
+static void RefreshNowPlaying(Boolean fetchArtIfChanged)
+{
+    long n, apiProgressMs;
+    unsigned long reqStartTicks, rttTicks;
+    char field[96];
+    char incomingTrackId[64];
+    char prevTrackId[64];
+    char encId[64], encName[96], path[220];
+    Boolean trackLocked, seekLocked, sameTrack;
+
+    if (!NetHasServer() || !gHttpBuf) return;
+
+    SafeCopy(prevTrackId, gNowPlaying.trackId, sizeof(prevTrackId));
     UrlEncode(gMyClientId, encId, sizeof(encId));
     UrlEncode(gMySpeakerName, encName, sizeof(encName));
     sprintf(path, "/api/spotify/now-playing?client_id=%s&client_name=%s", encId, encName);
 
+    reqStartTicks = TickCount();
     n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+    rttTicks = TickCount() - reqStartTicks;
     if (n <= 0 || strncmp(gHttpBuf, "PLAYING|", 8) != 0) {
         return;
     }
@@ -1951,24 +2057,53 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     }
     gTrackLockUntilTicks = 0;
 
+    sameTrack = (prevTrackId[0] != '\0' && strcmp(incomingTrackId, prevTrackId) == 0);
+    if (!sameTrack) {
+        gSeekLockUntilTicks = 0;
+        gPauseSynced        = false;
+    }
+
     GetPipeField(gHttpBuf, 1, field, sizeof(field));
     gNowPlaying.isPlaying = (field[0] == '1');
-    gTimelineFrozen       = false;
+    if (gNowPlaying.isPlaying) {
+        gTimelineFrozen = false;
+        gPauseSynced    = false;
+    }
 
     SafeCopy(gNowPlaying.trackId, incomingTrackId, sizeof(gNowPlaying.trackId));
     GetPipeField(gHttpBuf, 3, gNowPlaying.trackName, sizeof(gNowPlaying.trackName));
     GetPipeField(gHttpBuf, 4, gNowPlaying.artistName, sizeof(gNowPlaying.artistName));
     GetPipeField(gHttpBuf, 5, gNowPlaying.albumName, sizeof(gNowPlaying.albumName));
 
-    GetPipeField(gHttpBuf, 6, field, sizeof(field));
-    gNowPlaying.progressMs = atol(field);
-
     GetPipeField(gHttpBuf, 7, field, sizeof(field));
     gNowPlaying.durationMs = atol(field);
-
-    /* Always format timecodes with leading zeros (02:00, never 2:00) */
-    FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
     FormatMmSs(gNowPlaying.durationMs, gNowPlaying.durationMmSs);
+
+    GetPipeField(gHttpBuf, 6, field, sizeof(field));
+    apiProgressMs = atol(field);
+    if (gNowPlaying.isPlaying) {
+        /* Add half-RTT compensation for response transit time */
+        apiProgressMs += (long)((rttTicks * 25UL) / 3UL);
+    }
+
+    seekLocked = (sameTrack && gSeekLockUntilTicks != 0 && (long)(gSeekLockUntilTicks - TickCount()) > 0);
+    if (!gNowPlaying.isPlaying && gPauseSynced && sameTrack) {
+        /* Keep exact paused timecode already synced by PollDirectTimeline() */
+        FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
+    } else if (seekLocked) {
+        /* During the 15s seek lock, never bounce back to a stale pre-seek timecode */
+        long curLocalMs = GetCurrentInterpolatedProgressMs();
+        long diff = apiProgressMs - curLocalMs;
+        if (diff < 0) diff = -diff;
+        if (diff <= 2000) {
+            SetTimelinePosition(apiProgressMs);
+        } else {
+            gNowPlaying.progressMs = curLocalMs;
+            FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
+        }
+    } else {
+        SetTimelinePosition(apiProgressMs);
+    }
 
     GetPipeField(gHttpBuf, 10, field, sizeof(field));
     gNowPlaying.volumePct = (short)atoi(field);
@@ -2084,6 +2219,88 @@ static void LoadSelectedLeftItemIntoRightList(void)
     }
 }
 
+static void PopulateLeftColumnPlaylistsOnly(void)
+{
+    long n;
+    gLeftCount    = 0;
+    gLeftSelected = 0;
+    gLeftScroll   = 0;
+
+    SafeCopy(gLeftItems[0].kind, "LIKED", 16);
+    SafeCopy(gLeftItems[0].id,   "liked", 64);
+    SafeCopy(gLeftItems[0].name, "Liked", 64);
+    gLeftItems[0].uri[0] = '\0';
+    gLeftCount = 1;
+
+    if (NetHasServer() && gHttpBuf) {
+        n = NetHttpGet("/api/spotify/playlists?limit=35", gHttpBuf, HTTP_BUF_SIZE);
+        if (n > 0) {
+            const char *line = gHttpBuf;
+            while (line && *line && gLeftCount < MAX_LEFT_ITEMS) {
+                const char *nextLine = strchr(line, '\n');
+                char rowKind[16];
+                GetPipeField(line, 0, rowKind, sizeof(rowKind));
+                if (strcmp(rowKind, "PLAYLIST") == 0) {
+                    LeftItem *it = &gLeftItems[gLeftCount++];
+                    SafeCopy(it->kind, "PLAYLIST", sizeof(it->kind));
+                    GetPipeField(line, 1, it->id, sizeof(it->id));
+                    GetPipeField(line, 2, it->name, sizeof(it->name));
+                    GetPipeField(line, 5, it->uri, sizeof(it->uri));
+                }
+                if (!nextLine) break;
+                line = nextLine + 1;
+            }
+        }
+    }
+}
+
+/*
+ * Ensures the Playlists library column is active and highlights/selects the specified
+ * playlist (inserting it right below "Liked" if it came from Search Results and wasn't
+ * already in the user's top 35 library playlists).
+ */
+static void SelectOrInsertPlaylistInLeftColumn(const char *id, const char *name, const char *uri)
+{
+    short i, foundIdx = -1;
+
+    if (gHomeMode || gLeftCount == 0) {
+        gHomeMode = false;
+        PopulateLeftColumnPlaylistsOnly();
+    }
+
+    for (i = 0; i < gLeftCount; i++) {
+        if (strcmp(gLeftItems[i].kind, "PLAYLIST") == 0 &&
+            ((id && id[0] != '\0' && strcmp(gLeftItems[i].id, id) == 0) ||
+             (uri && uri[0] != '\0' && strcmp(gLeftItems[i].uri, uri) == 0))) {
+            foundIdx = i;
+            break;
+        }
+    }
+
+    if (foundIdx < 0) {
+        short insertAt = (gLeftCount >= 1) ? 1 : 0;
+        if (gLeftCount < MAX_LEFT_ITEMS) {
+            gLeftCount++;
+        }
+        for (i = gLeftCount - 1; i > insertAt; i--) {
+            gLeftItems[i] = gLeftItems[i - 1];
+        }
+        SafeCopy(gLeftItems[insertAt].kind, "PLAYLIST", sizeof(gLeftItems[insertAt].kind));
+        SafeCopy(gLeftItems[insertAt].id,   id ? id : "", sizeof(gLeftItems[insertAt].id));
+        SafeCopy(gLeftItems[insertAt].name, name ? name : "Playlist", sizeof(gLeftItems[insertAt].name));
+        SafeCopy(gLeftItems[insertAt].uri,  uri ? uri : "", sizeof(gLeftItems[insertAt].uri));
+        foundIdx = insertAt;
+    }
+
+    gLeftSelected = foundIdx;
+    if (gLeftSelected < gLeftScroll) {
+        gLeftScroll = gLeftSelected;
+    } else if (gLeftSelected >= gLeftScroll + VISIBLE_ROWS) {
+        gLeftScroll = gLeftSelected - VISIBLE_ROWS + 1;
+    }
+    if (gLeftScroll < 0) gLeftScroll = 0;
+}
+
 static void LoadLeftColumn(void)
 {
     gLeftCount    = 0;
@@ -2109,33 +2326,7 @@ static void LoadLeftColumn(void)
 
         gLeftCount = 4;
     } else {
-        long n;
-        SafeCopy(gLeftItems[0].kind, "LIKED", 16);
-        SafeCopy(gLeftItems[0].id,   "liked", 64);
-        SafeCopy(gLeftItems[0].name, "Liked", 64);
-        gLeftItems[0].uri[0] = '\0';
-        gLeftCount = 1;
-
-        if (NetHasServer() && gHttpBuf) {
-            n = NetHttpGet("/api/spotify/playlists?limit=35", gHttpBuf, HTTP_BUF_SIZE);
-            if (n > 0) {
-                const char *line = gHttpBuf;
-                while (line && *line && gLeftCount < MAX_LEFT_ITEMS) {
-                    const char *nextLine = strchr(line, '\n');
-                    char rowKind[16];
-                    GetPipeField(line, 0, rowKind, sizeof(rowKind));
-                    if (strcmp(rowKind, "PLAYLIST") == 0) {
-                        LeftItem *it = &gLeftItems[gLeftCount++];
-                        SafeCopy(it->kind, "PLAYLIST", sizeof(it->kind));
-                        GetPipeField(line, 1, it->id, sizeof(it->id));
-                        GetPipeField(line, 2, it->name, sizeof(it->name));
-                        GetPipeField(line, 5, it->uri, sizeof(it->uri));
-                    }
-                    if (!nextLine) break;
-                    line = nextLine + 1;
-                }
-            }
-        }
+        PopulateLeftColumnPlaylistsOnly();
     }
 
     LoadSelectedLeftItemIntoRightList();
@@ -2163,13 +2354,13 @@ static void PlayRightItemAtIndex(short idx)
     }
 
     /*
-     * Immediately lock UI into the clicked track:
-     * 1. Highlight this track in the track list and keep it stuck there.
-     * 2. Switch Artist & Track Title under the artwork immediately.
-     * 3. Turn off the old album artwork immediately while waiting for the new one.
+     * Prioritized New Song Load Sequence:
+     * 0. Optimistic UI lock (instant highlight, title/artist, 00:00 timeline, blank old art)
+     * 1. Audio playback first (/api/spotify/play + local audio stream)
+     * 2. Album artwork second (direct /api/spotify/artwork)
+     * 3. Heart / Liked status third (direct /api/spotify/liked-status)
      */
     LockOptimisticTrackSelection(it->id, it->name, it->artist, it->durationMs);
-    SyncLocalAudioWithSpeaker();
     RenderCanvas();
 
     if (strcmp(it->kind, "PLAYLIST") == 0) {
@@ -2186,14 +2377,21 @@ static void PlayRightItemAtIndex(short idx)
         }
     }
 
+    /* 1. Audio playback first */
     NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
-    ResetPollTimersAfterAction();
+    SetTimelinePosition(0);
+    SyncLocalAudioWithSpeaker();
 
     if (strcmp(it->kind, "PLAYLIST") == 0) {
         RefreshNowPlaying(true);
     } else {
-        /* Fetch the new track's artwork directly by track_id without overwriting locked track state */
-        FetchCurrentArtwork();
+        /* 2. Album artwork second */
+        if (!gVisualizerOpen) {
+            FetchCurrentArtwork();
+            RenderCanvas();
+        }
+        /* 3. Heart / Liked status third */
+        FetchTrackLikedStatus(gNowPlaying.trackId);
     }
     ResetPollTimersAfterAction();
     RenderCanvas();
@@ -2221,17 +2419,19 @@ static void TriggerNextTrack(void)
     }
 
     /* When shuffle is active, blank old artwork and reset timeline immediately while server picks next track */
-    gTimelineFrozen        = true;
-    gNowPlaying.isPlaying  = true;
-    gNowPlaying.progressMs = 0;
-    FormatMmSs(0, gNowPlaying.progressMmSs);
-    gTrackLockUntilTicks   = 0;
+    gTimelineFrozen       = true;
+    gPauseSynced          = false;
+    gSeekLockUntilTicks   = 0;
+    gNowPlaying.isPlaying = true;
+    SetTimelinePosition(0);
+    gTrackLockUntilTicks  = 0;
     BlankCurrentArtwork();
     RenderCanvas();
 
     NetHttpGet("/api/spotify/next", gHttpBuf, HTTP_BUF_SIZE);
-    ResetPollTimersAfterAction();
+    SetTimelinePosition(0);
     RefreshNowPlaying(true);
+    ResetPollTimersAfterAction();
     RenderCanvas();
 }
 
@@ -2248,17 +2448,19 @@ static void TriggerPreviousTrack(void)
         }
     }
 
-    gTimelineFrozen        = true;
-    gNowPlaying.isPlaying  = true;
-    gNowPlaying.progressMs = 0;
-    FormatMmSs(0, gNowPlaying.progressMmSs);
-    gTrackLockUntilTicks   = 0;
+    gTimelineFrozen       = true;
+    gPauseSynced          = false;
+    gSeekLockUntilTicks   = 0;
+    gNowPlaying.isPlaying = true;
+    SetTimelinePosition(0);
+    gTrackLockUntilTicks  = 0;
     BlankCurrentArtwork();
     RenderCanvas();
 
     NetHttpGet("/api/spotify/previous", gHttpBuf, HTTP_BUF_SIZE);
-    ResetPollTimersAfterAction();
+    SetTimelinePosition(0);
     RefreshNowPlaying(true);
+    ResetPollTimersAfterAction();
     RenderCanvas();
 }
 
@@ -2359,21 +2561,18 @@ static void ActivateSearchResultRow(short idx)
 
     UrlEncode(s->uri[0] ? s->uri : s->id, encUri, sizeof(encUri));
     if (strcmp(s->kind, "ALBUM") == 0 || strcmp(s->kind, "PLAYLIST") == 0) {
-        gTrackLockUntilTicks   = 0;
-        gTimelineFrozen        = true;
-        gNowPlaying.isPlaying  = true;
-        gNowPlaying.progressMs = 0;
-        FormatMmSs(0, gNowPlaying.progressMmSs);
-        SafeCopy(gNowPlaying.trackName, s->title, sizeof(gNowPlaying.trackName));
-        SafeCopy(gNowPlaying.artistName, s->subtitle, sizeof(gNowPlaying.artistName));
-        BlankCurrentArtwork();
+        Boolean lockedFirstTrack = false;
+        Boolean isPlaylist       = (strcmp(s->kind, "PLAYLIST") == 0);
+
+        /* Highlight and select the playlist in the left library column! */
+        if (isPlaylist) {
+            SelectOrInsertPlaylistInLeftColumn(s->id, s->title, s->uri);
+        }
+
         SafeCopy(gActiveContextUri, s->uri, sizeof(gActiveContextUri));
         SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
-        RenderCanvas();
 
-        sprintf(path, "/api/spotify/play?context_uri=%s", encUri);
-        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
-        if (strcmp(s->kind, "ALBUM") == 0) {
+        if (!isPlaylist) {
             sprintf(path, "/api/spotify/album/%s/tracks?limit=50", s->id);
         } else {
             sprintf(path, "/api/spotify/playlist/%s/tracks?limit=40", s->id);
@@ -2381,8 +2580,49 @@ static void ActivateSearchResultRow(short idx)
         if (NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE) > 0) {
             ParseTracksResponseIntoRightList(gHttpBuf);
         }
+
+        if (gRightCount > 0 &&
+            strcmp(gRightItems[0].kind, "TRACK") == 0 &&
+            strcmp(gNowPlaying.shuffleMode, "off") == 0) {
+            gRightSelected = 0;
+            LockOptimisticTrackSelection(
+                gRightItems[0].id,
+                gRightItems[0].name,
+                gRightItems[0].artist,
+                gRightItems[0].durationMs
+            );
+            lockedFirstTrack = true;
+        } else {
+            gTrackLockUntilTicks  = 0;
+            gTimelineFrozen       = true;
+            gPauseSynced          = false;
+            gSeekLockUntilTicks   = 0;
+            gNowPlaying.isPlaying = true;
+            SetTimelinePosition(0);
+            SafeCopy(gNowPlaying.trackName, s->title, sizeof(gNowPlaying.trackName));
+            SafeCopy(gNowPlaying.artistName, s->subtitle, sizeof(gNowPlaying.artistName));
+            BlankCurrentArtwork();
+        }
+        RenderCanvas();
+
+        /* 1. Audio playback first */
+        sprintf(path, "/api/spotify/play?context_uri=%s", encUri);
+        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        SetTimelinePosition(0);
+        SyncLocalAudioWithSpeaker();
+
+        if (lockedFirstTrack) {
+            /* 2. Album artwork second */
+            if (!gVisualizerOpen) {
+                FetchCurrentArtwork();
+                RenderCanvas();
+            }
+            /* 3. Heart / Liked status third */
+            FetchTrackLikedStatus(gNowPlaying.trackId);
+        } else {
+            RefreshNowPlaying(true);
+        }
         ResetPollTimersAfterAction();
-        RefreshNowPlaying(true);
         RenderCanvas();
     } else {
         /* Populate right column with the search result songs so Next/Prev & track highlight work! */
@@ -2402,12 +2642,22 @@ static void ActivateSearchResultRow(short idx)
             }
         }
         LockOptimisticTrackSelection(s->id, s->title, s->subtitle, s->durationMs);
-        SyncLocalAudioWithSpeaker();
         RenderCanvas();
 
+        /* 1. Audio playback first */
         sprintf(path, "/api/spotify/play?uri=%s", encUri);
         NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
-        FetchCurrentArtwork();
+        SetTimelinePosition(0);
+        SyncLocalAudioWithSpeaker();
+
+        /* 2. Album artwork second */
+        if (!gVisualizerOpen) {
+            FetchCurrentArtwork();
+            RenderCanvas();
+        }
+
+        /* 3. Heart / Liked status third */
+        FetchTrackLikedStatus(gNowPlaying.trackId);
         ResetPollTimersAfterAction();
         RenderCanvas();
     }
@@ -2514,10 +2764,10 @@ static short HitTestTransportHover(Point pt)
         if (pt.h >= 478 && pt.h <= 498) return BTN_COLLAPSE;
     }
     if (pt.v >= 300 && pt.v <= 318) {
-        if (gVisualizerOpen && pt.h >= 18 && pt.h <= 91) {
-            short idx = (pt.h >= 82) ? 9 : (pt.h - 19) / 7;
+        if (gVisualizerOpen && pt.h >= 18 && pt.h <= 69) {
+            short idx = (pt.h - 19) / 7;
             if (idx < 0) idx = 0;
-            if (idx > 9) idx = 9;
+            if (idx >= VIZ_MODE_COUNT) idx = VIZ_MODE_COUNT - 1;
             return (short)(BTN_VIZ_1 + idx);
         }
         if (pt.h >= 140 && pt.h <= 372) return BTN_TIMELINE;
@@ -2621,6 +2871,53 @@ static Boolean TrackTransportButtonPress(short btnId)
     gPressedBtn = BTN_NONE;
     RenderCanvas();
     return true;
+}
+
+/*
+ * Unified Play / Pause Toggle with Optimistic UI + Immediate Direct Timecode Sync:
+ * - On Pause: immediately freezes the timeline, stops local audio, sends /pause,
+ *   then directly polls /api/spotify/timeline?direct=1 and locks gPauseSynced so
+ *   later background polls never jump the paused timeline.
+ * - On Play: immediately unfreezes & re-anchors the timeline, sends /play, starts
+ *   local audio, and directly polls /api/spotify/timeline?direct=1.
+ */
+static void PerformTogglePlayPause(Boolean useButtonTracking)
+{
+    Boolean wantPlay = !gNowPlaying.isPlaying;
+
+    if (!wantPlay) {
+        long curMs = GetCurrentInterpolatedProgressMs();
+        gNowPlaying.isPlaying  = false;
+        gTimelineFrozen        = true;
+        gPauseSynced           = false;
+        SetTimelinePosition(curMs);
+    } else {
+        gNowPlaying.isPlaying  = true;
+        gTimelineFrozen        = false;
+        gPauseSynced           = false;
+        SetTimelinePosition(gNowPlaying.progressMs);
+    }
+
+    if (useButtonTracking) {
+        TrackTransportButtonPress(BTN_PLAY);
+    } else {
+        RenderCanvas();
+    }
+
+    if (wantPlay) {
+        NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+        SetTimelinePosition(gNowPlaying.progressMs);
+        SyncLocalAudioWithSpeaker();
+        PollDirectTimeline();
+    } else {
+        SyncLocalAudioWithSpeaker();
+        NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
+        PollDirectTimeline();
+        gPauseSynced = true;
+    }
+
+    ResetPollTimersAfterAction();
+    RenderCanvas();
 }
 
 /* ============================================================================
@@ -2820,17 +3117,43 @@ static void HandleCanvasClick(Point pt)
 
                 if (isDblClick && gLeftItems[clickedRow].uri[0] != '\0') {
                     char encUri[128], path[256];
-                    gTimelineFrozen = true;
-                    gNowPlaying.isPlaying  = true;
-                    gNowPlaying.progressMs = 0;
-                    FormatMmSs(0, gNowPlaying.progressMmSs);
+                    Boolean lockedFirstTrack = false;
+                    if (gRightCount > 0 &&
+                        strcmp(gRightItems[0].kind, "TRACK") == 0 &&
+                        strcmp(gNowPlaying.shuffleMode, "off") == 0) {
+                        gRightSelected = 0;
+                        LockOptimisticTrackSelection(
+                            gRightItems[0].id,
+                            gRightItems[0].name,
+                            gRightItems[0].artist,
+                            gRightItems[0].durationMs
+                        );
+                        lockedFirstTrack = true;
+                    } else {
+                        gTimelineFrozen       = true;
+                        gPauseSynced          = false;
+                        gSeekLockUntilTicks   = 0;
+                        gNowPlaying.isPlaying = true;
+                        SetTimelinePosition(0);
+                    }
                     RenderCanvas();
 
                     UrlEncode(gLeftItems[clickedRow].uri, encUri, sizeof(encUri));
                     sprintf(path, "/api/spotify/play?context_uri=%s", encUri);
                     NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+                    SetTimelinePosition(0);
+                    SyncLocalAudioWithSpeaker();
+
+                    if (lockedFirstTrack) {
+                        if (!gVisualizerOpen) {
+                            FetchCurrentArtwork();
+                            RenderCanvas();
+                        }
+                        FetchTrackLikedStatus(gNowPlaying.trackId);
+                    } else {
+                        RefreshNowPlaying(true);
+                    }
                     ResetPollTimersAfterAction();
-                    RefreshNowPlaying(true);
                     RenderCanvas();
                 }
             }
@@ -2873,7 +3196,7 @@ static void HandleCanvasClick(Point pt)
             }
             return;
         }
-        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset (1..10) */
+        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset (1..7) */
         if (gVisualizerOpen && pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235) {
             gVizMode = (gVizMode + 1) % VIZ_MODE_COUNT;
             SaveServerPrefs(NetGetServerIP());
@@ -2940,37 +3263,21 @@ static void HandleCanvasClick(Point pt)
             }
             /* Previous (216..238) */
             if (pt.h >= 216 && pt.h <= 238) {
-                gTimelineFrozen        = true;
-                gNowPlaying.progressMs = 0;
-                FormatMmSs(0, gNowPlaying.progressMmSs);
+                gTimelineFrozen = true;
+                SetTimelinePosition(0);
                 TrackTransportButtonPress(BTN_PREV);
                 TriggerPreviousTrack();
                 return;
             }
             /* Play / Pause Circle (242..270) */
             if (pt.h >= 242 && pt.h <= 270) {
-                Boolean wantPlay = !gNowPlaying.isPlaying;
-                /* Lock new Play/Pause state immediately on mouseDown (never reverts!) */
-                gNowPlaying.isPlaying = wantPlay;
-                gTimelineFrozen       = !wantPlay;
-                TrackTransportButtonPress(BTN_PLAY);
-
-                if (wantPlay) {
-                    NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
-                    SyncLocalAudioWithSpeaker();
-                } else {
-                    SyncLocalAudioWithSpeaker();
-                    NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
-                }
-                ResetPollTimersAfterAction();
-                RenderCanvas();
+                PerformTogglePlayPause(true);
                 return;
             }
             /* Next (273..295) */
             if (pt.h >= 273 && pt.h <= 295) {
-                gTimelineFrozen        = true;
-                gNowPlaying.progressMs = 0;
-                FormatMmSs(0, gNowPlaying.progressMmSs);
+                gTimelineFrozen = true;
+                SetTimelinePosition(0);
                 TrackTransportButtonPress(BTN_NEXT);
                 TriggerNextTrack();
                 return;
@@ -3024,6 +3331,7 @@ static void HandleCanvasClick(Point pt)
             if (pt.h >= 140 && pt.h <= 372) {
                 char path[96];
                 short pct = 0;
+                long targetMs;
                 Point curPt = pt;
                 gPressedBtn     = BTN_TIMELINE;
                 gTimelineFrozen = true;
@@ -3046,12 +3354,24 @@ static void HandleCanvasClick(Point pt)
                     GetMouse(&curPt);
                 } while (StillDown());
                 gPressedBtn = BTN_NONE;
+                targetMs    = gNowPlaying.progressMs;
+
+                /*
+                 * 1. Keep timeline frozen on the clicked/dragged target position and lock
+                 *    15s seek authority so background polls never bounce back to pre-seek time.
+                 */
+                SetTimelinePosition(targetMs);
+                gSeekLockUntilTicks = TickCount() + 900; /* 15-second client seek authority */
                 RenderCanvas();
 
-                /* Send seek and keep timeline locked at the new position without jumping back */
-                sprintf(path, "/api/spotify/seek?position_ms=%ld", gNowPlaying.progressMs);
+                /* 2. Request audio seek directly */
+                sprintf(path, "/api/spotify/seek?position_ms=%ld", targetMs);
                 NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
-                gTimelineFrozen = false;
+
+                /* 3. Re-anchor timeline right when seek finishes & directly poll timecode */
+                SetTimelinePosition(targetMs);
+                gTimelineFrozen = !gNowPlaying.isPlaying;
+                PollDirectTimeline();
                 ResetPollTimersAfterAction();
                 RenderCanvas();
                 return;
@@ -3162,20 +3482,7 @@ static void HandleKeyPress(char ch)
     }
 
     if (ch == ' ') {
-        Boolean wantPlay = !gNowPlaying.isPlaying;
-        gNowPlaying.isPlaying = wantPlay;
-        gTimelineFrozen       = !wantPlay;
-        RenderCanvas();
-
-        if (wantPlay) {
-            NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
-            SyncLocalAudioWithSpeaker();
-        } else {
-            SyncLocalAudioWithSpeaker();
-            NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
-        }
-        ResetPollTimersAfterAction();
-        RenderCanvas();
+        PerformTogglePlayPause(false);
     } else if (ch == '\r' || ch == 3) {
         if (gSearchViewOpen && gSearchHoverRow >= 0 && gSearchHoverRow < gSearchCount) {
             ActivateSearchResultRow(gSearchHoverRow);
@@ -3248,19 +3555,7 @@ static void HandleMenuChoice(long menuChoice)
         case mPlayback:
             if (gConnState != CONN_READY) break;
             if (itemID == iPlayPause) {
-                Boolean wantPlay = !gNowPlaying.isPlaying;
-                gNowPlaying.isPlaying = wantPlay;
-                gTimelineFrozen       = !wantPlay;
-                RenderCanvas();
-                if (wantPlay) {
-                    NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
-                    SyncLocalAudioWithSpeaker();
-                } else {
-                    SyncLocalAudioWithSpeaker();
-                    NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
-                }
-                ResetPollTimersAfterAction();
-                RenderCanvas();
+                PerformTogglePlayPause(false);
             } else if (itemID == iNextTrack) {
                 TriggerNextTrack();
             } else if (itemID == iPrevTrack) {
@@ -3305,33 +3600,19 @@ static void HandleMiniPlayerClick(EventRecord *ev, Point pt)
         return;
     }
     if (btn == BTN_PREV) {
-        gTimelineFrozen        = true;
-        gNowPlaying.progressMs = 0;
-        FormatMmSs(0, gNowPlaying.progressMmSs);
+        gTimelineFrozen = true;
+        SetTimelinePosition(0);
         TrackTransportButtonPress(BTN_PREV);
         TriggerPreviousTrack();
         return;
     }
     if (btn == BTN_PLAY) {
-        Boolean wantPlay = !gNowPlaying.isPlaying;
-        gNowPlaying.isPlaying = wantPlay;
-        gTimelineFrozen       = !wantPlay;
-        TrackTransportButtonPress(BTN_PLAY);
-        if (wantPlay) {
-            NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
-            SyncLocalAudioWithSpeaker();
-        } else {
-            SyncLocalAudioWithSpeaker();
-            NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
-        }
-        ResetPollTimersAfterAction();
-        RenderMiniPlayer();
+        PerformTogglePlayPause(true);
         return;
     }
     if (btn == BTN_NEXT) {
-        gTimelineFrozen        = true;
-        gNowPlaying.progressMs = 0;
-        FormatMmSs(0, gNowPlaying.progressMmSs);
+        gTimelineFrozen = true;
+        SetTimelinePosition(0);
         TrackTransportButtonPress(BTN_NEXT);
         TriggerNextTrack();
         return;
@@ -3486,6 +3767,7 @@ int main(void)
     SafeCopy(gNowPlaying.shuffleMode,  "off",   sizeof(gNowPlaying.shuffleMode));
     SafeCopy(gNowPlaying.repeatState,  "off",   sizeof(gNowPlaying.repeatState));
     gNowPlaying.volumePct = 70;
+    gTimelineAnchorTicks  = TickCount();
 
     InitOffscreenCanvas();
 
@@ -3562,8 +3844,7 @@ int main(void)
         }
     }
 
-    gLastPollTicks   = TickCount();
-    gLastSecondTicks = TickCount();
+    gLastPollTicks = TickCount();
 
     while (gRunning) {
         unsigned long nowTicks;
@@ -3645,14 +3926,19 @@ int main(void)
             RenderVisualizerFastFrame();
         }
 
-        /* Local 1-second timeline progression while playing and not frozen */
-        if (gNowPlaying.isPlaying && !gTimelineFrozen && (nowTicks - gLastSecondTicks) >= 60) {
-            gLastSecondTicks = nowTicks;
-            if (gNowPlaying.progressMs + 1000 <= gNowPlaying.durationMs) {
-                gNowPlaying.progressMs += 1000;
+        /* Tick-anchored local timeline progression (drift-free 60.15 Hz hardware tick clock) */
+        if (gNowPlaying.isPlaying && !gTimelineFrozen) {
+            long curMs = GetCurrentInterpolatedProgressMs();
+            if ((curMs / 1000L) != (gNowPlaying.progressMs / 1000L)) {
+                gNowPlaying.progressMs = curMs;
                 FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
                 if (!gSpeakerPopupOpen && !gAboutModalOpen) {
                     RenderCanvas();
+                }
+                /* If a playing track reaches its end, trigger an immediate poll so the next track loads fast */
+                if (gNowPlaying.durationMs > 0 && curMs >= gNowPlaying.durationMs &&
+                    (nowTicks - gLastPollTicks) >= 60) {
+                    gLastPollTicks = nowTicks - 240;
                 }
             }
         }
@@ -3660,8 +3946,7 @@ int main(void)
         /* Poll /api/spotify/now-playing every ~4 seconds (240 ticks) */
         if (NetHasServer() && !gAboutModalOpen && (nowTicks - gLastPollTicks) >= 240) {
             NowPlayingState prevState = gNowPlaying;
-            gLastPollTicks   = nowTicks;
-            gLastSecondTicks = nowTicks;
+            gLastPollTicks = nowTicks;
             RefreshNowPlaying(true);
             if (!gVisualizerOpen ||
                 prevState.isPlaying != gNowPlaying.isPlaying ||
