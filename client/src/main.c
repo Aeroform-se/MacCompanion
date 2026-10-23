@@ -95,6 +95,9 @@
 #define BTN_VIZ_5           16
 #define BTN_VIZ_6           17
 #define BTN_VIZ_7           18
+#define BTN_VIZ_8           19
+#define BTN_VIZ_9           20
+#define BTN_VIZ_10          21
 
 #define MINI_W              192
 #define MINI_H              68
@@ -252,7 +255,8 @@ typedef struct {
     unsigned long magic;
     ip_addr       serverIp;
     unsigned char seenServerScreen;
-    unsigned char reserved[3];
+    unsigned char lastVizMode;
+    unsigned char reserved[2];
 } SpotiMacPrefs;
 
 static Boolean GetPrefsFileSpec(FSSpec *outSpec, Boolean legacyName)
@@ -295,6 +299,9 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
                     prefs.seenServerScreen != 0 &&
                     prefs.serverIp != 0) {
                     *outServerIp = prefs.serverIp;
+                    if (prefs.lastVizMode < VIZ_MODE_COUNT) {
+                        gVizMode = prefs.lastVizMode;
+                    }
                     return true;
                 }
             }
@@ -312,6 +319,9 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
             prefs.serverIp != 0) {
             fclose(fp);
             *outServerIp = prefs.serverIp;
+            if (prefs.lastVizMode < VIZ_MODE_COUNT) {
+                gVizMode = prefs.lastVizMode;
+            }
             return true;
         }
         fclose(fp);
@@ -334,6 +344,7 @@ static void SaveServerPrefs(ip_addr serverIp)
     prefs.magic            = PREFS_MAGIC;
     prefs.serverIp         = serverIp;
     prefs.seenServerScreen = 1;
+    prefs.lastVizMode      = (unsigned char)(gVizMode % VIZ_MODE_COUNT);
 
     if (GetPrefsFileSpec(&spec, false)) {
         FSpCreate(&spec, 'MCSP', 'pref', smSystemScript);
@@ -1071,10 +1082,13 @@ static void RenderMiniPlayer(void)
         Boolean prs = (gPressedBtn == BTN_PLAY);
         const unsigned char *iconBits;
         if (prs) {
-            iconBits = gNowPlaying.isPlaying ? gIconPauseCircleInv22 : gIconPlayCircleInv22;
+            /* Mouse down: gNowPlaying.isPlaying was toggled to next state; show next state in filled black circle */
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
         } else if (hov) {
-            iconBits = gNowPlaying.isPlaying ? gIconPlayCircle22 : gIconPauseCircle22;
+            /* Hover: show current state in inverted circle with black icon */
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircleInv22 : gIconPlayCircleInv22;
         } else {
+            /* Normal: show current state in filled black circle */
             iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
         }
         BlitIcon1Bit(iconBits, 22, 22, 85, 24, srcCopy);
@@ -1394,9 +1408,9 @@ static void RenderCanvas(void)
         DrawButtonHoverDots(40, 298, hov);
     }
 
-    /* Visualizer 1..7 Selector Row (19, 305) 49x6 + 3x2 Active Indicator (visuals-toggle-select-updated.png) */
+    /* Visualizer 1..7 Selector Row (19, 305) 49x6 + 3x2 Active Indicator */
     if (gVisualizerOpen) {
-        static const short kVizIndX[7] = { 21, 28, 35, 42, 49, 56, 63 };
+        static const short kVizIndX[VIZ_MODE_COUNT] = { 21, 28, 35, 42, 49, 56, 63 };
         short modeIdx = gVizMode % VIZ_MODE_COUNT;
         short indX = kVizIndX[modeIdx];
         SetRect(&r, indX, 301, indX + 3, 303);
@@ -1443,13 +1457,13 @@ static void RenderCanvas(void)
         Boolean prs = (gPressedBtn == BTN_PLAY);
         const unsigned char *iconBits;
         if (prs) {
-            /* Mouse down: gNowPlaying.isPlaying was already toggled to the next state, so show inverted next state */
-            iconBits = gNowPlaying.isPlaying ? gIconPauseCircleInv22 : gIconPlayCircleInv22;
+            /* Mouse down: gNowPlaying.isPlaying was toggled to next state; show next state in filled black circle */
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
         } else if (hov) {
-            /* Hover: preview next state in filled black circle */
-            iconBits = gNowPlaying.isPlaying ? gIconPlayCircle22 : gIconPauseCircle22;
+            /* Hover: show current state in inverted circle with black icon */
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircleInv22 : gIconPlayCircleInv22;
         } else {
-            /* Normal: current state in filled black circle */
+            /* Normal: show current state in filled black circle */
             iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
         }
         BlitIcon1Bit(iconBits, 22, 22, 245, 278, srcCopy);
@@ -2500,10 +2514,10 @@ static short HitTestTransportHover(Point pt)
         if (pt.h >= 478 && pt.h <= 498) return BTN_COLLAPSE;
     }
     if (pt.v >= 300 && pt.v <= 318) {
-        if (gVisualizerOpen && pt.h >= 18 && pt.h <= 69) {
-            short idx = (pt.h - 19) / 7;
+        if (gVisualizerOpen && pt.h >= 18 && pt.h <= 91) {
+            short idx = (pt.h >= 82) ? 9 : (pt.h - 19) / 7;
             if (idx < 0) idx = 0;
-            if (idx > 6) idx = 6;
+            if (idx > 9) idx = 9;
             return (short)(BTN_VIZ_1 + idx);
         }
         if (pt.h >= 140 && pt.h <= 372) return BTN_TIMELINE;
@@ -2859,9 +2873,10 @@ static void HandleCanvasClick(Point pt)
             }
             return;
         }
-        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset (1..7) */
+        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset (1..10) */
         if (gVisualizerOpen && pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235) {
             gVizMode = (gVizMode + 1) % VIZ_MODE_COUNT;
+            SaveServerPrefs(NetGetServerIP());
             VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
             RenderCanvas();
             return;
@@ -2992,12 +3007,13 @@ static void HandleCanvasClick(Point pt)
 
         /* Visualizer 1..7 Selector + Draggable Timeline & Volume Row (y = 300..320) */
         if (pt.v >= 300 && pt.v <= 320) {
-            /* Visualizer Preset Selector 1 2 3 4 5 6 7 (18..69, 7px per digit) */
+            /* Visualizer Preset Selector 1 2 3 4 5 6 7 (18..69) */
             if (gVisualizerOpen && pt.h >= 18 && pt.h <= 69) {
                 short clickedMode = (pt.h - 19) / 7;
                 if (clickedMode < 0) clickedMode = 0;
                 if (clickedMode >= VIZ_MODE_COUNT) clickedMode = VIZ_MODE_COUNT - 1;
                 gVizMode = clickedMode;
+                SaveServerPrefs(NetGetServerIP());
 
                 VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
                 gLastVizTicks = TickCount();
@@ -3173,6 +3189,7 @@ static void HandleKeyPress(char ch)
     } else if (ch >= '1' && ch <= '7') {
         gVisualizerOpen = true;
         gVizMode = (short)(ch - '1');
+        SaveServerPrefs(NetGetServerIP());
         VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
         gLastVizTicks = TickCount();
         RenderCanvas();
@@ -3223,6 +3240,7 @@ static void HandleMenuChoice(long menuChoice)
                     RenderCanvas();
                 }
             } else if (itemID == iQuit) {
+                SaveServerPrefs(NetGetServerIP());
                 gRunning = false;
             }
             break;

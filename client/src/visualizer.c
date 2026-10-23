@@ -93,11 +93,10 @@ static unsigned char *gSphereEnvU = NULL;  /* 64 * 64: spherical u coordinate */
 static unsigned char *gSphereEnvV = NULL;  /* 64 * 64: spherical v coordinate */
 static unsigned char *gSphereSpec = NULL;  /* 64 * 64: Phong specular highlight (0..48) */
 
-/* Mode 7 (68040): 64x64 Rolling 3D Voxel Audio Heightmap, Shade Map & 100x100 Screen Buffer */
+/* Mode 7 (68040): 64x64 Rolling 3D Voxel Audio Heightmap & Shade Map */
 #define VOXEL_MAP_DIM 64
 static unsigned char *gVoxelHeight = NULL; /* 64 * 64 = 4,096 bytes */
 static unsigned char *gVoxelShade  = NULL; /* 64 * 64 = 4,096 bytes */
-static unsigned char *gVoxelScreen = NULL; /* 100 * 100 = 10,000 bytes (heap, never on 68k stack!) */
 static unsigned char  gVoxelWriteRow = 0;
 
 /* ============================================================================
@@ -128,12 +127,22 @@ typedef struct {
 } Star3D;
 
 static Star3D gStars[NUM_STARS];
+
+#if 0 /* Archived Mode 8 Hyperspace 3D Warp Stars */
+#define NUM_WARP_STARS 128
+typedef struct {
+    short x, y; /* -160..+160 */
+    short z;    /* 12..255 */
+} WarpStar3D;
+static WarpStar3D gWarpStars[NUM_WARP_STARS];
+static short      gWarpBoostSmooth = 0;
+#endif
+
 static unsigned char gAngleX = 20;
 static unsigned char gAngleY = 0;
 static unsigned char gAngleZ = 10;
 static short         gTorusZoomSmooth = 0;
 static short         gTorusTwistPhase = 0;
-static short         gTorusSpinDir    = 1;
 
 #define TORUS_RINGS  8
 #define TORUS_SEGS   6
@@ -278,6 +287,26 @@ static void DrawLineWhite(unsigned char *bits, short x0, short y0, short x1, sho
         if (e2 <= dx) { err += dx; y0 += sy; }
     }
 }
+
+#if 0 /* Used by Archived Visualizer Modes 8, 9, 10 */
+/* Fast Bresenham line drawer in black (sets bits to 1) */
+static void DrawLineBlack(unsigned char *bits, short x0, short y0, short x1, short y1)
+{
+    short dx = abs(x1 - x0), sx = (x0 < x1) ? 1 : -1;
+    short dy = -abs(y1 - y0), sy = (y0 < y1) ? 1 : -1;
+    short err = dx + dy, e2;
+
+    for (;;) {
+        if ((unsigned short)x0 < VIZ_W && (unsigned short)y0 < VIZ_H) {
+            bits[y0 * VIZ_ROWBYTES + (x0 >> 3)] |= (unsigned char)(0x80 >> (x0 & 7));
+        }
+        if (x0 == x1 && y0 == y1) break;
+        e2 = err << 1;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+#endif
 
 /* Fast horizontal span fill using a pre-dithered byte pattern (`patByte`, 0=white, 1=black) */
 static void FillSpanPattern(unsigned char *rowPtr, short xLeft, short xRight, unsigned char patByte)
@@ -475,10 +504,9 @@ void VisualizerInit(void)
         }
     }
 
-    /* 8. Mode 7 (68040): Allocate & seed 64x64 Voxel Canyon Heightmap & 100x100 Screen Buffer */
+    /* 8. Mode 7 (68040): Allocate & seed 64x64 Voxel Canyon Heightmap */
     gVoxelHeight = (unsigned char *)NewPtrClear(VOXEL_MAP_DIM * VOXEL_MAP_DIM);
     gVoxelShade  = (unsigned char *)NewPtrClear(VOXEL_MAP_DIM * VOXEL_MAP_DIM);
-    gVoxelScreen = (unsigned char *)NewPtrClear(100 * 100);
     if (gVoxelHeight && gVoxelShade) {
         for (y = 0; y < VOXEL_MAP_DIM; y++) {
             for (x = 0; x < VOXEL_MAP_DIM; x++) {
@@ -922,28 +950,21 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
         }
     }
 
-    /* 3. Dynamic Beat-Driven Rotation, Spin-Reversal on Big Kicks & Bass Zoom Pump */
+    /* 3. Smooth Audio-Driven Rotation & Balanced Bass Zoom */
     if (gBeatHit) {
-        gAngleX = (unsigned char)(gAngleX + 9);
-        gAngleZ = (unsigned char)(gAngleZ + 7 * gTorusSpinDir);
-        if (gBassPulse > 45 && ((gFrameCount & 3) == 0)) {
-            gTorusSpinDir = -gTorusSpinDir;
-        }
+        gAngleX = (unsigned char)(gAngleX + 2);
+        gAngleY = (unsigned char)(gAngleY + 3);
     }
-    gAngleX = (unsigned char)(gAngleX + 1 + (gBassPulse >> 3) + (gAudioEnergy >> 5));
-    gAngleY = (unsigned char)(gAngleY + (2 + (gAudioEnergy >> 4) + (gBassPulse >> 3)) * gTorusSpinDir);
-    gAngleZ = (unsigned char)(gAngleZ + 1 + (gTreblePulse >> 4));
-    gTorusTwistPhase += 4 + (gAudioEnergy >> 3);
+    gAngleX = (unsigned char)(gAngleX + 1 + (gBassPulse >> 4));
+    gAngleY = (unsigned char)(gAngleY + 2 + (gAudioEnergy >> 5));
+    gAngleZ = (unsigned char)(gAngleZ + 1 + (gTreblePulse >> 5));
+    gTorusTwistPhase += 3 + (gAudioEnergy >> 4);
 
-    targetZoom = (gBassPulse * 3 >> 1) + (gAudioEnergy >> 1);
-    if (targetZoom > gTorusZoomSmooth) {
-        gTorusZoomSmooth = (gTorusZoomSmooth + targetZoom * 3) >> 2;
-    } else {
-        gTorusZoomSmooth = (gTorusZoomSmooth * 3 + targetZoom) >> 2;
-    }
+    targetZoom = (gBassPulse >> 1) + (gAudioEnergy >> 2);
+    gTorusZoomSmooth = (gTorusZoomSmooth * 3 + targetZoom) >> 2;
 
-    fovScale   = 155 + gTorusZoomSmooth; /* Pumps from 155 (idle) up to ~250 on heavy bass! */
-    baseMajorR = 36 + (gTorusZoomSmooth >> 2);
+    fovScale   = 165 + (gTorusZoomSmooth >> 1); /* Gentle, pleasing ~165..185 zoom on bass hits */
+    baseMajorR = 38 + (gTorusZoomSmooth >> 3);
 
     sxA = FAST_SIN(gAngleX); cxA = FAST_COS(gAngleX);
     syA = FAST_SIN(gAngleY); cyA = FAST_COS(gAngleY);
@@ -956,19 +977,19 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
         short sinU = FAST_SIN(uAngle);
         short bandLow  = gEqBands[r * 2];
         short bandHigh = gEqBands[r * 2 + 1];
-        /* Tube radius swells dramatically from 11 up to 46 with the music */
-        short minorR = 11 + ((bandLow * 3) >> 3);
-        /* Per-ring radial pulse & Z-wave */
-        short ringMajorR = baseMajorR + ((bandHigh - 20) >> 2);
-        short ringWaveZ  = ((bandLow - 24) * FAST_SIN((unsigned char)(uAngle * 2 + gTorusTwistPhase))) >> 7;
+        /* Balanced tube radius: swells smoothly from 12 up to 28 */
+        short minorR = 12 + (bandLow >> 2);
+        /* Subtle per-ring radial pulse & Z-wave */
+        short ringMajorR = baseMajorR + ((bandHigh - 24) >> 3);
+        short ringWaveZ  = ((bandLow - 20) * FAST_SIN((unsigned char)(uAngle * 2 + gTorusTwistPhase))) >> 8;
 
         for (s = 0; s < TORUS_SEGS; s++) {
             short idx = r * TORUS_SEGS + s;
             /* Audio-driven torsional twist around the tube cross-section */
-            unsigned char vAngle = (unsigned char)(s * (256 / TORUS_SEGS) + ((bandHigh * (r & 1 ? 1 : -1)) >> 1));
+            unsigned char vAngle = (unsigned char)(s * (256 / TORUS_SEGS) + (bandHigh >> 2));
             short cosV = FAST_COS(vAngle);
             short sinV = FAST_SIN(vAngle);
-            short segBump = (s & 1) ? (gBassPulse >> 3) : -(gTreblePulse >> 4);
+            short segBump = (s & 1) ? (gBassPulse >> 4) : -(gTreblePulse >> 5);
             short curMinor = minorR + segBump;
             short ringR = ringMajorR + ((curMinor * cosV) >> 7);
 
@@ -1359,7 +1380,7 @@ static void RenderMode7VoxelCanyon(unsigned char *bits)
 {
     short x, y, b, step;
     unsigned char yBuf[100];      /* Front-to-back vertical horizon occlusion buffer (0..99) */
-    unsigned char *colBuf = gVoxelScreen; /* 100x100 64-shade heap screen buffer (never on 68k stack!) */
+    unsigned char *colBuf = gFireBuf; /* Share 10,200-byte heap buffer (never on 68k stack!) */
     short bankTilt;
     short camX, camY, camHeight;
     short sunRadius;
@@ -1492,6 +1513,495 @@ static void RenderMode7VoxelCanyon(unsigned char *bits)
         DrawLineWhite(bits, hx, 12, hx, 12 - hh);
     }
 }
+
+#if 0 /* Archived Visualizer Modes 8, 9, 10 */
+/* ============================================================================
+ * MODE 8: 3D Millennium Falcon Hyperdrive Jump & Space Trench Run
+ * - 64-shade dithered volumetric slipstream nebula tunnel
+ * - 3D banking/rolling cockpit camera with swaying vanishing point
+ * - 5 3D octagonal space-gate frames flying out of deep space past the camera
+ * - 128 3D stars stretching into multi-width hyperdrive streaks + comet flares
+ * ============================================================================ */
+
+static void RenderMode8Hyperspace(unsigned char *bits)
+{
+    short i, x, y, g;
+    unsigned char rowVals[100];
+    short targetBoost, warpSpeed, tailStretch;
+    unsigned char rollAng;
+    short sinR, cosR;
+    short vpX, vpY, lutOx, lutOy;
+    unsigned char slipScroll;
+
+    /* Smoothly ramp hyperdrive boost on bass kicks & audio energy */
+    targetBoost = (gBassPulse >> 1) + (gAudioEnergy >> 2) + (gBeatHit ? 22 : 0);
+    if (targetBoost > gWarpBoostSmooth) {
+        gWarpBoostSmooth = (gWarpBoostSmooth + targetBoost * 3) >> 2;
+    } else {
+        gWarpBoostSmooth = (gWarpBoostSmooth * 7 + targetBoost) >> 3;
+    }
+
+    warpSpeed   = 4 + (gWarpBoostSmooth >> 1);
+    tailStretch = 8 + (gWarpBoostSmooth * 2);
+
+    /* 3D Cockpit Roll & Pitch/Yaw Vanishing Point Sway */
+    rollAng = (unsigned char)((FAST_SIN((unsigned char)(gFrameCount * 2)) >> 2) + (gFrameCount >> 1));
+    sinR    = FAST_SIN(rollAng);
+    cosR    = FAST_COS(rollAng);
+    vpX     = 100 + ((FAST_SIN((unsigned char)(gFrameCount * 2)) * 22) >> 7);
+    vpY     = 100 + ((FAST_COS((unsigned char)(gFrameCount * 3)) * 18) >> 7);
+
+    /* 1. Render 64-Shade Dithered Volumetric Hyperspace Slipstream Background */
+    if (gTunnelAngle && gTunnelDepth && gTunnelFog) {
+        lutOx = 64 - (vpX >> 1);
+        lutOy = 64 - (vpY >> 1);
+        if (lutOx < 0) lutOx = 0;
+        if (lutOx > 27) lutOx = 27;
+        if (lutOy < 0) lutOy = 0;
+        if (lutOy > 27) lutOy = 27;
+        slipScroll = (unsigned char)(gFrameCount * 7 + gWarpBoostSmooth);
+
+        for (y = 0; y < VIZ_H; y++) {
+            unsigned char *dstRow = bits + y * VIZ_ROWBYTES;
+            unsigned short rowBase = (unsigned short)(((y >> 1) + lutOy) * TUNNEL_LUT_W + lutOx);
+            const unsigned char *angPtr = gTunnelAngle + rowBase;
+            const unsigned char *depPtr = gTunnelDepth + rowBase;
+            const unsigned char *fogPtr = gTunnelFog   + rowBase;
+            short ry = y & 7;
+
+            for (x = 0; x < 100; x++) {
+                unsigned char ang = (unsigned char)(angPtr[x] + rollAng);
+                unsigned char dep = depPtr[x];
+                unsigned char fog = fogPtr[x];
+                /* Radial slipstream streaks along `ang * 8` rushing outward with `dep + slipScroll` */
+                short ray = FAST_SIN((unsigned char)(ang * 8)) + FAST_COS((unsigned char)(ang * 13 - (dep >> 1)));
+                short wave = gPlasmaLut[(unsigned char)(dep + slipScroll)];
+                short val = ((ray + 256) * wave) >> 10;
+                /* Brighten slipstream walls when hyperdrive boost kicks in */
+                val = (val * (10 + (gWarpBoostSmooth >> 1)) * fog) >> 11;
+                if (val > 36) val = 36;
+                rowVals[x] = (unsigned char)val;
+            }
+
+            AsmPackDitherRow25(
+                dstRow,
+                rowVals,
+                gDitherP0[ry],
+                gDitherP1[ry],
+                gDitherP2[ry],
+                gDitherP3[ry]
+            );
+            dstRow[25] = 0xFF;
+        }
+    } else {
+        AsmClearBlack5200(bits);
+    }
+
+    /* 2. Render 5 3D Octagonal Space-Gate / Hyper-Corridor Frames Flying Past Camera */
+    for (g = 0; g < 5; g++) {
+        short zGate = 220 - (((short)(gFrameCount * 5 + (gWarpBoostSmooth >> 1) + g * 44)) % 200);
+        if (zGate > 18 && zGate < 210) {
+            short gateCx = vpX + (((100 - vpX) * (220 - zGate)) >> 7);
+            short gateCy = vpY + (((100 - vpY) * (220 - zGate)) >> 7);
+            short eqBand = gEqBands[(g * 3) & 15] >> 2;
+            short rad    = (short)(((long)(58 + eqBand) * 128L) / zGate);
+            if (rad > 6 && rad < 135) {
+                short prevX = 0, prevY = 0, firstX = 0, firstY = 0;
+                short p;
+                unsigned char gateSpin = (unsigned char)(rollAng + g * 12);
+                for (p = 0; p < 8; p++) {
+                    unsigned char a = (unsigned char)(p * 32 + gateSpin);
+                    short gx = gateCx + ((FAST_COS(a) * rad) >> 7);
+                    short gy = gateCy + ((FAST_SIN(a) * rad) >> 7);
+                    if (p > 0) {
+                        DrawLineWhite(bits, prevX, prevY, gx, gy);
+                        if (zGate < 85) {
+                            DrawLineBlack(bits, prevX + 1, prevY + 1, gx + 1, gy + 1);
+                        }
+                    } else {
+                        firstX = gx;
+                        firstY = gy;
+                    }
+                    prevX = gx;
+                    prevY = gy;
+                }
+                DrawLineWhite(bits, prevX, prevY, firstX, firstY);
+            }
+        }
+    }
+
+    /* 3. Render 128 3D Roll-Rotated Stars with Multi-Width Hyperdrive Streaks & Flares */
+    for (i = 0; i < NUM_WARP_STARS; i++) {
+        short curZ = gWarpStars[i].z - warpSpeed;
+        short tailZ;
+        short rx, ry;
+        short x0, y0, x1, y1;
+
+        if (curZ <= 12) {
+            curZ = 220 + ((short)(gFrameCount + i * 19) & 31);
+            gWarpStars[i].x = ((short)((i * 97 + gFrameCount * 13) % 280)) - 140;
+            gWarpStars[i].y = ((short)((i * 151 + gFrameCount * 17) % 280)) - 140;
+            /* Keep a clear central flight tunnel so stars wrap around the cockpit */
+            if (abs(gWarpStars[i].x) < 14 && abs(gWarpStars[i].y) < 14) {
+                gWarpStars[i].x += (i & 1) ? 28 : -28;
+            }
+        }
+        gWarpStars[i].z = curZ;
+        tailZ = curZ + tailStretch;
+
+        /* Apply 3D cockpit roll rotation to star coordinates */
+        rx = (gWarpStars[i].x * cosR - gWarpStars[i].y * sinR) >> 7;
+        ry = (gWarpStars[i].x * sinR + gWarpStars[i].y * cosR) >> 7;
+
+        x0 = vpX + (short)(((long)rx * 136L) / tailZ);
+        y0 = vpY + (short)(((long)ry * 136L) / tailZ);
+        x1 = vpX + (short)(((long)rx * 136L) / curZ);
+        y1 = vpY + (short)(((long)ry * 136L) / curZ);
+
+        DrawLineWhite(bits, x0, y0, x1, y1);
+
+        /* Close stars become thick 2px-3px blazing hyper-streaks with diamond flares */
+        if (curZ < 95) {
+            DrawLineWhite(bits, x0 + 1, y0, x1 + 1, y1);
+            if (curZ < 55 && (unsigned short)x1 < (VIZ_W - 2) && (unsigned short)y1 < (VIZ_H - 2) && x1 >= 2 && y1 >= 2) {
+                DrawLineWhite(bits, x0, y0 + 1, x1, y1 + 1);
+                /* 5x5 Diamond Star-Flare Head */
+                SetPixelWhite(bits, x1 - 2, y1);
+                SetPixelWhite(bits, x1 + 2, y1);
+                SetPixelWhite(bits, x1, y1 - 2);
+                SetPixelWhite(bits, x1, y1 + 2);
+                SetPixelWhite(bits, x1 - 1, y1 - 1);
+                SetPixelWhite(bits, x1 + 1, y1 + 1);
+            }
+        }
+    }
+}
+
+/* ============================================================================
+ * MODE 9: 3D Snaking Organic Vortex Wormhole & Braided Spiral Web
+ * (Inspired by the top reference image: a deep curving 3D fibrous spiral tunnel
+ * plunging into a pitch-black abyss with a pinpoint core and 3D braided ribs)
+ * ============================================================================ */
+
+static void RenderMode9SpiralVortex(unsigned char *bits)
+{
+    short x, y, r, p;
+    unsigned char rowVals[100];
+    unsigned char rot1 = (unsigned char)(gFrameCount * 4 + (gAudioEnergy >> 3));
+    unsigned char rot2 = (unsigned char)(-gFrameCount * 5 - (gBassPulse >> 2));
+    unsigned char depthScroll = (unsigned char)(gFrameCount * 6 + (gBassPulse >> 1));
+    short coreScreenX, coreScreenY;
+    short lutOx, lutOy;
+    short prevRingX[12], prevRingY[12];
+    Boolean hasPrevRing = false;
+
+    if (!gTunnelAngle || !gTunnelDepth || !gTunnelFog) {
+        RenderMode4Tunnel(bits);
+        return;
+    }
+
+    /* 3D Snaking Wormhole Singularity Center */
+    coreScreenX = 100 + ((FAST_SIN((unsigned char)(gFrameCount * 2)) * 22) >> 7);
+    coreScreenY = 100 + ((FAST_COS((unsigned char)(gFrameCount * 3)) * 18) >> 7);
+    lutOx = 64 - (coreScreenX >> 1);
+    lutOy = 64 - (coreScreenY >> 1);
+    if (lutOx < 0) lutOx = 0;
+    if (lutOx > 27) lutOx = 27;
+    if (lutOy < 0) lutOy = 0;
+    if (lutOy > 27) lutOy = 27;
+
+    /* 1. Raycast 64-Shade Organic Fibrous Vortex Tunnel with Pitch-Black Central Abyss */
+    for (y = 0; y < VIZ_H; y++) {
+        unsigned char *dstRow = bits + y * VIZ_ROWBYTES;
+        short lutY = (y >> 1) + lutOy;
+        unsigned short rowBase = (unsigned short)(lutY * TUNNEL_LUT_W + lutOx);
+        const unsigned char *angPtr = gTunnelAngle + rowBase;
+        const unsigned char *depPtr = gTunnelDepth + rowBase;
+        const unsigned char *fogPtr = gTunnelFog   + rowBase;
+        short ry = y & 7;
+
+        /* Per-scanline 3D S-curve warp so the vortex visibly bends in 3D space */
+        short scanCurve = (FAST_SIN((unsigned char)((y >> 1) * 3 + gFrameCount * 3)) * 6) >> 7;
+
+        for (x = 0; x < 100; x++) {
+            unsigned char dep = depPtr[x];
+            unsigned char fog = fogPtr[x];
+            /* Depth-dependent 3D helical torsion */
+            unsigned char twist = (unsigned char)((dep * 3 >> 1) + scanCurve);
+            unsigned char ang   = (unsigned char)(angPtr[x] + twist);
+            short bandVal       = gEqBands[(ang >> 4) & 15] >> 2;
+
+            /* Interlocking fibrous spiral tendrils (matching the veined green/dark vortex!) */
+            short arm1    = FAST_SIN((unsigned char)(ang * 6 + dep * 2 - rot1));
+            short arm2    = FAST_SIN((unsigned char)(ang * 9 - dep * 3 + rot2));
+            short fiber   = abs(arm1 - arm2); /* Sharp organic fibrous ridges (0..254) */
+            short pulse   = FAST_COS((unsigned char)(ang * 2 + dep * 4 - depthScroll));
+
+            short val = (fiber >> 2) + ((pulse + 128) >> 4) + bandVal;
+
+            /* Deep pitch-black funnel in the center (dep > 96 fades smoothly into the abyss) */
+            if (dep > 96) {
+                short abyssAtten = 230 - dep;
+                if (abyssAtten < 0) abyssAtten = 0;
+                val = (val * abyssAtten) >> 7;
+            }
+            val = (val * fog) >> 5;
+            if (val > 63) val = 63;
+            rowVals[x] = (unsigned char)val;
+        }
+
+        AsmPackDitherRow25(
+            dstRow,
+            rowVals,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+        dstRow[25] = 0xFF;
+    }
+
+    /* 2. Project 11 3D Braided Spiral Polygon Web Rings Flying Out of the Abyss */
+    {
+        short zSub = (short)((gFrameCount * 4 + (gBassPulse >> 1)) & 15);
+        for (r = 10; r >= 0; r--) {
+            short z = 24 + r * 16 - zSub;
+            if (z >= 14 && z <= 190) {
+                /* Each ring follows a curving 3D helical spine from (coreScreenX, coreScreenY) to camera */
+                unsigned char spinePhase = (unsigned char)((z >> 1) + gFrameCount * 3);
+                short curveWeight = 190 - z;
+                short ringCx = coreScreenX + (((100 - coreScreenX) * curveWeight) >> 7) +
+                               (((FAST_SIN(spinePhase) * curveWeight) >> 7) >> 2);
+                short ringCy = coreScreenY + (((100 - coreScreenY) * curveWeight) >> 7) +
+                               (((FAST_COS(spinePhase) * curveWeight) >> 7) >> 2);
+                short curRingX[12], curRingY[12];
+                unsigned char ringTwist = (unsigned char)(z * 2 - gFrameCount * 4);
+
+                for (p = 0; p < 12; p++) {
+                    unsigned char vAng = (unsigned char)(p * 21 + ringTwist);
+                    short eqBump = gEqBands[(p + r) & 15] >> 2;
+                    short rad3D  = 52 + eqBump + ((p & 1) ? (gBassPulse >> 2) : -(gBassPulse >> 3));
+                    short rad2D  = (short)(((long)rad3D * 116L) / z);
+                    curRingX[p] = ringCx + ((FAST_COS(vAng) * rad2D) >> 7);
+                    curRingY[p] = ringCy + ((FAST_SIN(vAng) * rad2D) >> 7);
+                }
+
+                /* Draw 3D polygon ring & diagonal braided spiral web struts to previous ring */
+                for (p = 0; p < 12; p++) {
+                    short nextP = (p + 1 == 12) ? 0 : (p + 1);
+                    if (z < 125) {
+                        /* Shadow + Highlight double-contour rib for strong 3D relief */
+                        DrawLineBlack(bits, curRingX[p] + 1, curRingY[p] + 1, curRingX[nextP] + 1, curRingY[nextP] + 1);
+                        DrawLineWhite(bits, curRingX[p], curRingY[p], curRingX[nextP], curRingY[nextP]);
+                    }
+                    if (hasPrevRing) {
+                        /* Braided spiral tendon connecting ring `r+1` to ring `r` */
+                        DrawLineBlack(bits, prevRingX[p] + 1, prevRingY[p], curRingX[nextP] + 1, curRingY[nextP]);
+                        DrawLineWhite(bits, prevRingX[p], prevRingY[p], curRingX[nextP], curRingY[nextP]);
+                    }
+                    prevRingX[p] = curRingX[p];
+                    prevRingY[p] = curRingY[p];
+                }
+                hasPrevRing = true;
+            }
+        }
+    }
+
+    /* 3. Pinpoint Glowing Singularity Core Deep Inside the Black Abyss (like the red dot in image 1!) */
+    for (y = -1; y <= 1; y++) {
+        for (x = -1; x <= 1; x++) {
+            SetPixelWhite(bits, coreScreenX + x, coreScreenY + y);
+        }
+    }
+}
+
+/* ============================================================================
+ * MODE 10: 3D Psychedelic Ribbon Canyon & Contour Portal
+ * (Inspired by the bottom reference image: flying through a curving 3D canyon
+ * made of 30+ densely stacked undulating liquid contour slices opening into a
+ * warped psychedelic portal in the distance)
+ * ============================================================================ */
+
+static void RenderMode10LiquidRibbons(unsigned char *bits)
+{
+    short x, y, step;
+    unsigned char yTopBuf[100]; /* Front-to-back top ceiling occlusion horizon (0..100) */
+    unsigned char yBotBuf[100]; /* Front-to-back bottom floor occlusion horizon (0..100) */
+    unsigned char *colBuf = gVoxelScreen; /* 100x100 64-shade heap buffer */
+    short scrollZ, bankTilt;
+    short portalCx, portalCy;
+
+    if (!colBuf) {
+        RenderMode2Plasma(bits);
+        return;
+    }
+
+    for (x = 0; x < 100; x++) {
+        yTopBuf[x] = 0;
+        yBotBuf[x] = 100;
+    }
+
+    scrollZ  = (short)(gFrameCount * 2 + (gBassPulse >> 2));
+    bankTilt = (FAST_SIN((unsigned char)(gFrameCount * 2)) * 14) >> 7;
+    portalCx = 50 + ((FAST_SIN((unsigned char)(gFrameCount * 3)) * 16) >> 7);
+    portalCy = 50 + ((FAST_COS((unsigned char)(gFrameCount * 2)) * 10) >> 7);
+
+    /*
+     * 1. Front-to-Back 3D Curving Ribbon Slice Raycaster (30 Depth Slices):
+     *    Each slice `step = 1..30` is a 3D cross-section of a warping liquid tube/canyon.
+     *    Because we march front-to-back with `yTopBuf[x]` and `yBotBuf[x]` occlusion,
+     *    near slices naturally overlap far slices with crisp 3D topological contour lines!
+     */
+    for (step = 1; step <= 30; step++) {
+        short zWorld   = step + scrollZ;
+        short invZ     = (short)(240 / (step + 3)); /* Perspective scale */
+        /* 3D S-curve spine of the ribbon canyon */
+        short sliceCx  = 50 + (((portalCx - 50) * step) >> 5) +
+                         ((FAST_SIN((unsigned char)(zWorld * 9)) * step) >> 6);
+        short sliceCy  = 50 + (((portalCy - 50) * step) >> 5) +
+                         ((FAST_COS((unsigned char)(zWorld * 7)) * step) >> 6);
+
+        unsigned char wavePhase1 = (unsigned char)(zWorld * 13 - gFrameCount * 4);
+        unsigned char wavePhase2 = (unsigned char)(zWorld * 7  + gFrameCount * 3);
+        short eqBand   = gEqBands[step & 15];
+        short waveAmp  = 10 + (eqBand >> 2) + (gBassPulse >> 2);
+        /* Base psychedelic shade of this depth slice (cycles smoothly with depth) */
+        short baseShade = gPlasmaLut[(unsigned char)(zWorld * 18 - gFrameCount * 5)];
+        /* Alternating high-contrast contour rim shade for the topological slice edge */
+        unsigned char rimShade = ((zWorld & 1) != 0) ? 63 : 4;
+
+        for (x = 0; x < 100; x++) {
+            if (yTopBuf[x] < yBotBuf[x]) {
+                short dx = x - sliceCx;
+                short tilt = (dx * bankTilt) >> 5;
+                /* Parabolic side-wall wrap so ribbons curve up the left & right canyon walls! */
+                short wallWrap = (dx * dx) >> 6;
+                short undulTop = ((FAST_SIN((unsigned char)(x * 5 + wavePhase1)) +
+                                   FAST_COS((unsigned char)(x * 3 - wavePhase2))) * waveAmp) >> 8;
+                short undulBot = ((FAST_COS((unsigned char)(x * 4 - wavePhase1)) +
+                                   FAST_SIN((unsigned char)(x * 6 + wavePhase2))) * waveAmp) >> 8;
+
+                /* Project 3D ceiling and floor ribbon heights at this depth slice */
+                short openTop = 34 - wallWrap + undulTop;
+                short openBot = 34 - wallWrap + undulBot;
+                short ceilY, floorY;
+                short sliceShade;
+
+                if (openTop < 4) openTop = 4;
+                if (openBot < 4) openBot = 4;
+
+                ceilY  = sliceCy + tilt - ((openTop * invZ) >> 5);
+                floorY = sliceCy + tilt + ((openBot * invZ) >> 5);
+
+                if (ceilY < 0)   ceilY = 0;
+                if (ceilY > 100) ceilY = 100;
+                if (floorY < 0)   floorY = 0;
+                if (floorY > 100) floorY = 100;
+
+                sliceShade = baseShade + ((dx + 50) >> 2);
+                if (sliceShade > 60) sliceShade = 60;
+                if (sliceShade < 8)  sliceShade = 8;
+
+                /* Fill visible Upper / Left-Right Ceiling Ribbon Terrace */
+                if (ceilY > yTopBuf[x]) {
+                    short yEnd = (ceilY > yBotBuf[x]) ? yBotBuf[x] : ceilY;
+                    unsigned char *pCol = colBuf + yTopBuf[x] * 100 + x;
+                    for (y = yTopBuf[x]; y < yEnd; y++) {
+                        *pCol = (y == ceilY - 1) ? rimShade : (unsigned char)sliceShade;
+                        pCol += 100;
+                    }
+                    yTopBuf[x] = (unsigned char)yEnd;
+                }
+
+                /* Fill visible Lower / Left-Right Floor Ribbon Terrace */
+                if (floorY < yBotBuf[x]) {
+                    short yStart = (floorY < yTopBuf[x]) ? yTopBuf[x] : floorY;
+                    unsigned char *pCol = colBuf + yStart * 100 + x;
+                    unsigned char botShade = (unsigned char)(63 - sliceShade + 6);
+                    if (botShade > 60) botShade = 60;
+                    for (y = yStart; y < yBotBuf[x]; y++) {
+                        *pCol = (y == floorY) ? rimShade : botShade;
+                        pCol += 100;
+                    }
+                    yBotBuf[x] = (unsigned char)yStart;
+                }
+            }
+        }
+    }
+
+    /*
+     * 2. Fill the Distant Portal Opening at the End of the Canyon with a Warped Chrome Plasma
+     */
+    for (x = 0; x < 100; x++) {
+        if (yTopBuf[x] < yBotBuf[x]) {
+            unsigned char *pCol = colBuf + yTopBuf[x] * 100 + x;
+            for (y = yTopBuf[x]; y < yBotBuf[x]; y++) {
+                unsigned char u = (unsigned char)((x - portalCx) * 6 + gFrameCount * 5);
+                unsigned char v = (unsigned char)((y - portalCy) * 6 - gFrameCount * 7);
+                *pCol = gPlasmaLut[(unsigned char)(u ^ v)];
+                pCol += 100;
+            }
+        }
+    }
+
+    /* 3. Pack 100x100 64-Shade Buffer into 200x200 8x8 Bayer Dithered Output */
+    for (y = 0; y < VIZ_H; y++) {
+        unsigned char *dstRow = bits + y * VIZ_ROWBYTES;
+        const unsigned char *srcRow = colBuf + (y >> 1) * 100;
+        short ry = y & 7;
+        AsmPackDitherRow25(
+            dstRow,
+            srcRow,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+        dstRow[25] = 0xFF;
+    }
+
+    /* 4. Render a Rotating 3D Crystal Octahedron Floating Inside the Distant Canyon Portal */
+    {
+        static const signed char kOctVerts[6][3] = {
+            {  0, -28,   0 },
+            {  0,  28,   0 },
+            { -24,  0, -24 },
+            {  24,  0, -24 },
+            {  24,  0,  24 },
+            { -24,  0,  24 }
+        };
+        static const unsigned char kOctEdges[12][2] = {
+            {0,2}, {0,3}, {0,4}, {0,5},
+            {1,2}, {1,3}, {1,4}, {1,5},
+            {2,3}, {3,4}, {4,5}, {5,2}
+        };
+        short vx[6], vy[6];
+        unsigned char ay = (unsigned char)(gFrameCount * 5);
+        unsigned char ax = (unsigned char)(gFrameCount * 3);
+        short syA = FAST_SIN(ay), cyA = FAST_COS(ay);
+        short sxA = FAST_SIN(ax), cxA = FAST_COS(ax);
+        short scale = 18 + (gBassPulse >> 2);
+        short i;
+
+        for (i = 0; i < 6; i++) {
+            short x0 = (kOctVerts[i][0] * scale) >> 4;
+            short y0 = (kOctVerts[i][1] * scale) >> 4;
+            short z0 = (kOctVerts[i][2] * scale) >> 4;
+            short x1 = (x0 * cyA + z0 * syA) >> 7;
+            short z1 = (-x0 * syA + z0 * cyA) >> 7;
+            short y2 = (y0 * cxA - z1 * sxA) >> 7;
+            vx[i] = (portalCx * 2) + x1;
+            vy[i] = (portalCy * 2) + y2;
+        }
+        for (i = 0; i < 12; i++) {
+            short a = kOctEdges[i][0];
+            short b = kOctEdges[i][1];
+            DrawLineBlack(bits, vx[a] + 1, vy[a] + 1, vx[b] + 1, vy[b] + 1);
+            DrawLineWhite(bits, vx[a], vy[a], vx[b], vy[b]);
+        }
+    }
+}
+#endif /* Archived Visualizer Modes 8, 9, 10 */
 
 /* ============================================================================
  * Public Entry Point Called by Main UI / Cooperative Loop

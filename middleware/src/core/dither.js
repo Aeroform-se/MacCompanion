@@ -372,10 +372,20 @@ async function processArtworkBuffer(inputBuffer, {
 }
 
 /**
- * Generates a classic 1-bit Macintosh musical note placeholder image when no artwork is available.
+ * Generates the default album placeholder artwork (using default-album-artwork.png or musical note fallback)
+ * when no artwork is available.
  */
 async function generatePlaceholderArtwork({ size = DEFAULT_ART_SIZE, dither = 'adaptive', format = 'raw' } = {}) {
   const s = Math.max(16, Math.min(512, parseInt(size || DEFAULT_ART_SIZE, 10)));
+  const defaultPngPath = require('path').join(__dirname, '../public/img/default-album-artwork.png');
+  try {
+    const fs = require('fs');
+    if (fs.existsSync(defaultPngPath)) {
+      const defaultBuf = fs.readFileSync(defaultPngPath);
+      return processArtworkBuffer(defaultBuf, { size: s, dither, format, contrast: 1.0 });
+    }
+  } catch (_) {}
+
   const svg = `
     <svg width="${s}" height="${s}" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
       <rect width="200" height="200" fill="#ffffff" stroke="#000000" stroke-width="6"/>

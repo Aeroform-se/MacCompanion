@@ -268,7 +268,9 @@ class RealTimePacer extends Transform {
   flush() {
     this.flushEpoch++;
     this.nextFrameTimeMs = 0;
-    this.alignRemainder = Buffer.alloc(0);
+    // NOTE: Never clear `this.alignRemainder` here — it holds the 1..3 byte sub-frame
+    // remainder from the last OS pipe read on `librespot.stdout` and is required to
+    // keep 4-byte S16_LE stereo sample alignment intact across pause/resume.
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;

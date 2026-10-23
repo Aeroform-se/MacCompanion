@@ -922,6 +922,7 @@ router.all('/play', async (req, res) => {
       query: deviceId ? { device_id: deviceId } : undefined,
       body,
     });
+    nowPlayingCache.fetchedAt = 0;
     const pipe = 'OK|PLAY\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -936,6 +937,7 @@ router.all('/pause', async (req, res) => {
     optimisticState.isPlayingTs = Date.now();
     audioEngine.onPause();
     await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+    nowPlayingCache.fetchedAt = 0;
     const pipe = 'OK|PAUSE\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -953,11 +955,13 @@ router.all('/toggle-play', async (req, res) => {
       optimisticState.isPlayingTs = Date.now();
       audioEngine.onPause();
       await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+      nowPlayingCache.fetchedAt = 0;
       return sendPipeResponse(req, res, 'OK|PAUSE\n');
     } else {
       optimisticState.isPlaying = true;
       optimisticState.isPlayingTs = Date.now();
       await callPlayerCommand('/me/player/play', { method: 'PUT' });
+      nowPlayingCache.fetchedAt = 0;
       return sendPipeResponse(req, res, 'OK|PLAY\n');
     }
   } catch (err) {
@@ -972,6 +976,7 @@ router.all('/next', async (req, res) => {
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
     await callPlayerCommand('/me/player/next', { method: 'POST' });
+    nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
       await new Promise((r) => setTimeout(r, 250));
     }
@@ -990,6 +995,7 @@ router.all('/previous', async (req, res) => {
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
     await callPlayerCommand('/me/player/previous', { method: 'POST' });
+    nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
       await new Promise((r) => setTimeout(r, 250));
     }
@@ -1570,6 +1576,7 @@ router.all('/transfer', async (req, res) => {
       method: 'PUT',
       body: { device_ids: [deviceId], play: true },
     });
+    nowPlayingCache.fetchedAt = 0;
     const pipe = formatPipeRow(['OK', 'TRANSFER', deviceId, deviceName || deviceId]) + '\n';
     if (req.query.format === 'json') return res.json({ ok: true, deviceId, deviceName, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);

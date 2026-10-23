@@ -10,7 +10,7 @@
 
 #define VIZ_MODE_EQ             0    /* 1: Winamp Classic 16-Band Spectrum + Scope + Reflection */
 #define VIZ_MODE_PLASMA         1    /* 2: Geiss / Amiga Demoscene 64-Shade Dithered Plasma & Metaballs */
-#define VIZ_MODE_3D             2    /* 3: Supercharged Audio-Morphing 3D Torus + Starfield + Cyber Grid */
+#define VIZ_MODE_3D             2    /* 3: Balanced Audio-Morphing 3D Torus + Starfield + Cyber Grid */
 #define VIZ_MODE_TUNNEL         3    /* 4: MilkDrop 3D Wormhole Vortex Tunnel + Radial Spectrum Burst */
 #define VIZ_MODE_FIRE_SCOPE     4    /* 5: Demoscene Cellular Fire/Smoke Diffusion + 3D Harmonograph */
 #define VIZ_MODE_CHROME_SPHERES 5    /* 6: [68040] Ray-Cast 3D Chrome Boing Spheres + Phong + Floor Shadows */
