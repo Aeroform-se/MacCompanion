@@ -24,6 +24,9 @@ ip_addr NetGetOurIP(void);
 unsigned short NetGetServerPort(void);
 Boolean NetHasServer(void);
 
+/* Register an idle callback invoked while waiting on async MacTCP HTTP calls */
+void NetSetIdleCallback(void (*callback)(void));
+
 /*
  * Broadcasts "MACCOMPANION_DISCOVER" over UDP port 6801 (to subnet broadcast,
  * global broadcast, and local gateway/host alias 10.0.2.2) and waits for

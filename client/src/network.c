@@ -15,6 +15,7 @@ static long           gOurNetMask     = (long)0xFFFFFF00;
 
 static ip_addr        gServerIP       = 0;
 static unsigned short gServerHttpPort = DEFAULT_HTTP_PORT;
+static void         (*gIdleCallback)(void) = NULL;
 
 /* ============================================================================
  * Native 68k Audio Streaming State (Double-Buffered Sound Manager)
@@ -157,9 +158,14 @@ Boolean NetHasServer(void)
     return (gServerIP != 0);
 }
 
+void NetSetIdleCallback(void (*callback)(void))
+{
+    gIdleCallback = callback;
+}
+
 /*
  * Wait for an asynchronous MacTCP PBControl call while keeping the audio stream
- * fed so playback never glitches during HTTP calls.
+ * and visualizer fed so playback and 30 FPS visuals never pause during HTTP calls.
  */
 static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
 {
@@ -176,6 +182,9 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
     while (pb->ioResult == inProgress) {
         if (pumpAudioWhileWaiting && gAudioRunning) {
             AudioStreamPump();
+        }
+        if (pumpAudioWhileWaiting && gIdleCallback) {
+            gIdleCallback();
         }
         /* Safety timeout (8 seconds) */
         if ((TickCount() - startTicks) > 480) {

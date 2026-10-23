@@ -7,13 +7,13 @@
  */
 #define APP_NAME_STR            "SpotiMac"
 #define APP_VERSION_MAJOR_BCD   0x00
-#define APP_VERSION_MINOR_BCD   0x37
+#define APP_VERSION_MINOR_BCD   0x38
 #define APP_VERSION_STAGE       final
 #define APP_VERSION_NONFINAL    0x00
 
-#define APP_VERSION_SHORT       "0.3.7"
-#define APP_VERSION_CODENAME    "Partylizer"
-#define APP_VERSION_LONG        "0.3.7 \"Partylizer\" (SpotiMac 68k)"
-#define APP_VERSION_SLUG        "v0.3.7"
+#define APP_VERSION_SHORT       "0.3.8"
+#define APP_VERSION_CODENAME    "Partylizer II"
+#define APP_VERSION_LONG        "0.3.8 \"Partylizer II\" (SpotiMac 68k)"
+#define APP_VERSION_SLUG        "v0.3.8"
 
 #endif /* VERSION_H */

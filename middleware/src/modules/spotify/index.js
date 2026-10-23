@@ -723,6 +723,33 @@ router.get('/audio-callback', async (req, res) => {
 // 1. NOW PLAYING & TIMELINE STATUS / SEEKING
 // ============================================================================
 
+// Non-blocking stale-while-revalidate cache for /now-playing so 68k Mac polls return in <1ms
+let nowPlayingCache = {
+  raw: null,
+  isLiked: false,
+  fetchedAt: 0,
+  refreshInFlight: false,
+};
+
+async function refreshNowPlayingCache() {
+  if (nowPlayingCache.refreshInFlight) return;
+  nowPlayingCache.refreshInFlight = true;
+  try {
+    const raw = await callSpotify('/me/player');
+    let isLiked = false;
+    if (raw && raw.item && raw.item.id) {
+      isLiked = await checkIsTrackLiked(raw.item.id);
+    }
+    nowPlayingCache.raw = raw || null;
+    nowPlayingCache.isLiked = isLiked;
+    nowPlayingCache.fetchedAt = Date.now();
+  } catch {
+    // Keep previous cached state on transient cloud error
+  } finally {
+    nowPlayingCache.refreshInFlight = false;
+  }
+}
+
 /**
  * GET /api/spotify/now-playing
  * Returns full playback status, timeline progress/duration (both ms & M:SS),
@@ -734,12 +761,34 @@ router.get('/audio-callback', async (req, res) => {
 router.get('/now-playing', async (req, res) => {
   try {
     registerMacFromRequest(req);
-    const raw = await callSpotify('/me/player');
-    const data = store.load();
+    let raw;
     let isLiked = false;
-    if (raw && raw.item && raw.item.id) {
-      isLiked = await checkIsTrackLiked(raw.item.id);
+
+    if (!customFetch && nowPlayingCache.fetchedAt > 0 && (Date.now() - nowPlayingCache.fetchedAt) < 30000) {
+      // Serve immediately (<1ms) from cache and trigger background refresh if >2.5s old
+      raw = nowPlayingCache.raw ? { ...nowPlayingCache.raw } : null;
+      if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
+        const elapsed = Math.max(0, Date.now() - nowPlayingCache.fetchedAt);
+        const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
+        raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
+      }
+      isLiked = nowPlayingCache.isLiked;
+      if ((Date.now() - nowPlayingCache.fetchedAt) > 2500) {
+        refreshNowPlayingCache();
+      }
+    } else {
+      raw = await callSpotify('/me/player');
+      if (raw && raw.item && raw.item.id) {
+        isLiked = await checkIsTrackLiked(raw.item.id);
+      }
+      if (!customFetch) {
+        nowPlayingCache.raw = raw || null;
+        nowPlayingCache.isLiked = isLiked;
+        nowPlayingCache.fetchedAt = Date.now();
+      }
     }
+
+    const data = store.load();
     const np = applyOptimisticOverrides(normalizeNowPlaying(raw, {
       isLiked,
       smartShuffleOverride: Boolean(data.smartShuffleActive && raw && raw.shuffle_state),

@@ -1,6 +1,6 @@
 /*
  * SpotiMac — Native 68k Macintosh Spotify Client
- * Version 0.3.7 ("Partylizer")
+ * Version 0.3.8 ("Partylizer II")
  * Compiled with Retro68 + Apple Universal Interfaces 3.4.2
  *
  * UI Design: 512 x 322 flush canvas below the 20px Mac OS menu bar
@@ -92,6 +92,9 @@
 #define BTN_VIZ_2           13
 #define BTN_VIZ_3           14
 #define BTN_VIZ_4           15
+#define BTN_VIZ_5           16
+#define BTN_VIZ_6           17
+#define BTN_VIZ_7           18
 
 #define MINI_W              192
 #define MINI_H              68
@@ -1384,20 +1387,21 @@ static void RenderCanvas(void)
     TextMode(srcOr);
     PenNormal();
 
-    /* Album Art / Visualizations Toggle (19, 285) 44x10 (visuals-toggle.png) */
+    /* Album Art / Visualizations Toggle (19, 285) 49x10 (visuals-toggle-select-updated.png) */
     {
         Boolean hov = (gHoverBtn == BTN_VIZ_TOGGLE) && (gPressedBtn != BTN_VIZ_TOGGLE);
-        BlitIcon1Bit(gVisualizerOpen ? gIconVizToggleOn : gIconVizToggleOff, 44, 10, 19, 285, srcCopy);
-        DrawButtonHoverDots(37, 298, hov);
+        BlitIcon1Bit(gVisualizerOpen ? gIconVizToggleOn : gIconVizToggleOff, 49, 10, 19, 285, srcCopy);
+        DrawButtonHoverDots(40, 298, hov);
     }
 
-    /* Visualizer 1..4 Selector Row (19, 305) 44x6 + 3x2 Active Indicator (visuals-toggle-select.png) */
+    /* Visualizer 1..7 Selector Row (19, 305) 49x6 + 3x2 Active Indicator (visuals-toggle-select-updated.png) */
     if (gVisualizerOpen) {
-        static const short kVizIndX[4] = { 21, 33, 45, 57 };
-        short indX = kVizIndX[gVizMode & 3];
-        SetRect(&r, indX, 300, indX + 3, 302);
+        static const short kVizIndX[7] = { 21, 28, 35, 42, 49, 56, 63 };
+        short modeIdx = gVizMode % VIZ_MODE_COUNT;
+        short indX = kVizIndX[modeIdx];
+        SetRect(&r, indX, 301, indX + 3, 303);
         PaintRect(&r);
-        BlitIcon1Bit(gIconVizNumbers, 44, 6, 19, 305, srcCopy);
+        BlitIcon1Bit(gIconVizNumbers, 49, 6, 19, 305, srcCopy);
     }
 
     /* Like / Save Heart button (155, 285) 11x10 + hover dots at (157, 298) */
@@ -1709,6 +1713,25 @@ static void RenderVisualizerFastFrame(void)
     SetPort(savePort);
 }
 
+/*
+ * Network Idle Callback:
+ * Invoked inside `RunTCPControl` while waiting for MacTCP HTTP requests
+ * (such as the periodic `/api/spotify/now-playing` poll every 4 seconds)
+ * so the 30 FPS visualizer never pauses or locks up during network I/O!
+ */
+static void VisualizerNetworkIdlePump(void)
+{
+    unsigned long nowTicks;
+    if (!gVisualizerOpen || gMiniPlayerMode || gSearchViewOpen || gAboutModalOpen || gConnState != CONN_READY) {
+        return;
+    }
+    nowTicks = TickCount();
+    if ((nowTicks - gLastVizTicks) >= 2) {
+        gLastVizTicks = nowTicks;
+        RenderVisualizerFastFrame();
+    }
+}
+
 /* ============================================================================
  * Middleware API Actions & Data Loading
  * ============================================================================ */
@@ -1947,7 +1970,7 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     if (gNowPlaying.trackId[0] == '\0') {
         memcpy(gCurrentArtworkBits, gInitialArtworkBits, 5200);
         gLoadedArtTrackId[0] = '\0';
-    } else if (fetchArtIfChanged && strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
+    } else if (fetchArtIfChanged && !gVisualizerOpen && strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
         FetchCurrentArtwork();
     }
 
@@ -2465,8 +2488,8 @@ static void RunInitialDiscovery(void)
 static short HitTestTransportHover(Point pt)
 {
     if (gConnState != CONN_READY || gAboutModalOpen) return BTN_NONE;
-    if (pt.v >= 278 && pt.v <= 301) {
-        if (pt.h >= 16 && pt.h <= 66) return BTN_VIZ_TOGGLE;
+    if (pt.v >= 278 && pt.v <= 300) {
+        if (pt.h >= 16 && pt.h <= 70) return BTN_VIZ_TOGGLE;
         if (pt.h >= 150 && pt.h <= 172) return BTN_LIKE;
         if (pt.h >= 191 && pt.h <= 213) return BTN_SHUFFLE;
         if (pt.h >= 216 && pt.h <= 238) return BTN_PREV;
@@ -2477,11 +2500,11 @@ static short HitTestTransportHover(Point pt)
         if (pt.h >= 478 && pt.h <= 498) return BTN_COLLAPSE;
     }
     if (pt.v >= 300 && pt.v <= 318) {
-        if (gVisualizerOpen && pt.h >= 16 && pt.h <= 66) {
-            if (pt.h < 29) return BTN_VIZ_1;
-            if (pt.h < 41) return BTN_VIZ_2;
-            if (pt.h < 53) return BTN_VIZ_3;
-            return BTN_VIZ_4;
+        if (gVisualizerOpen && pt.h >= 18 && pt.h <= 69) {
+            short idx = (pt.h - 19) / 7;
+            if (idx < 0) idx = 0;
+            if (idx > 6) idx = 6;
+            return (short)(BTN_VIZ_1 + idx);
         }
         if (pt.h >= 140 && pt.h <= 372) return BTN_TIMELINE;
         if (pt.h >= 435 && pt.h <= 496) return BTN_VOLUME;
@@ -2836,9 +2859,9 @@ static void HandleCanvasClick(Point pt)
             }
             return;
         }
-        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset */
+        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset (1..7) */
         if (gVisualizerOpen && pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235) {
-            gVizMode = (gVizMode + 1) & 3;
+            gVizMode = (gVizMode + 1) % VIZ_MODE_COUNT;
             VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
             RenderCanvas();
             return;
@@ -2848,13 +2871,13 @@ static void HandleCanvasClick(Point pt)
 
     /* 5. Bottom Play Bar (y = 273..322) */
     if (pt.v >= 273) {
-        /* Transport Row (y = 276..302) */
-        if (pt.v >= 276 && pt.v <= 302) {
-            /* Album Art / Visualizations Toggle (16..66) */
-            if (pt.h >= 16 && pt.h <= 66) {
-                if (pt.h <= 29 && gVisualizerOpen) {
+        /* Transport Row (y = 276..300) */
+        if (pt.v >= 276 && pt.v <= 300) {
+            /* Album Art / Visualizations Toggle (16..70) */
+            if (pt.h >= 16 && pt.h <= 70) {
+                if (pt.h <= 30 && gVisualizerOpen) {
                     gVisualizerOpen = false;
-                } else if (pt.h >= 50 && !gVisualizerOpen) {
+                } else if (pt.h >= 54 && !gVisualizerOpen) {
                     gVisualizerOpen = true;
                 } else {
                     gVisualizerOpen = !gVisualizerOpen;
@@ -2862,6 +2885,8 @@ static void HandleCanvasClick(Point pt)
                 if (gVisualizerOpen) {
                     VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
                     gLastVizTicks = TickCount();
+                } else if (gNowPlaying.trackId[0] != '\0' && strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
+                    FetchCurrentArtwork();
                 }
                 TrackTransportButtonPress(BTN_VIZ_TOGGLE);
                 return;
@@ -2965,14 +2990,14 @@ static void HandleCanvasClick(Point pt)
             }
         }
 
-        /* Visualizer 1..4 Selector + Draggable Timeline & Volume Row (y = 300..320) */
+        /* Visualizer 1..7 Selector + Draggable Timeline & Volume Row (y = 300..320) */
         if (pt.v >= 300 && pt.v <= 320) {
-            /* Visualizer Preset Selector 1 2 3 4 (16..66) */
-            if (gVisualizerOpen && pt.h >= 16 && pt.h <= 66) {
-                if (pt.h < 29) gVizMode = 0;
-                else if (pt.h < 41) gVizMode = 1;
-                else if (pt.h < 53) gVizMode = 2;
-                else gVizMode = 3;
+            /* Visualizer Preset Selector 1 2 3 4 5 6 7 (18..69, 7px per digit) */
+            if (gVisualizerOpen && pt.h >= 18 && pt.h <= 69) {
+                short clickedMode = (pt.h - 19) / 7;
+                if (clickedMode < 0) clickedMode = 0;
+                if (clickedMode >= VIZ_MODE_COUNT) clickedMode = VIZ_MODE_COUNT - 1;
+                gVizMode = clickedMode;
 
                 VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
                 gLastVizTicks = TickCount();
@@ -3145,7 +3170,7 @@ static void HandleKeyPress(char ch)
         TriggerPreviousTrack();
     } else if (ch == 31) { /* Down Arrow */
         TriggerNextTrack();
-    } else if (ch >= '1' && ch <= '4') {
+    } else if (ch >= '1' && ch <= '7') {
         gVisualizerOpen = true;
         gVizMode = (short)(ch - '1');
         VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
@@ -3156,6 +3181,8 @@ static void HandleKeyPress(char ch)
         if (gVisualizerOpen) {
             VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
             gLastVizTicks = TickCount();
+        } else if (gNowPlaying.trackId[0] != '\0' && strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
+            FetchCurrentArtwork();
         }
         RenderCanvas();
     }
@@ -3430,6 +3457,7 @@ int main(void)
     AudioStreamInit();
     VisualizerInit();
     memset(gVisualizerBits, 0xFF, sizeof(gVisualizerBits));
+    NetSetIdleCallback(VisualizerNetworkIdlePump);
 
     gHttpBuf = NewPtrClear(HTTP_BUF_SIZE);
     /* Start with initial.png placeholder graphic ("Party like it's 1984") */
@@ -3613,10 +3641,21 @@ int main(void)
 
         /* Poll /api/spotify/now-playing every ~4 seconds (240 ticks) */
         if (NetHasServer() && !gAboutModalOpen && (nowTicks - gLastPollTicks) >= 240) {
+            NowPlayingState prevState = gNowPlaying;
             gLastPollTicks   = nowTicks;
             gLastSecondTicks = nowTicks;
             RefreshNowPlaying(true);
-            RenderCanvas();
+            if (!gVisualizerOpen ||
+                prevState.isPlaying != gNowPlaying.isPlaying ||
+                prevState.isLiked != gNowPlaying.isLiked ||
+                prevState.volumePct != gNowPlaying.volumePct ||
+                strcmp(prevState.trackId, gNowPlaying.trackId) != 0 ||
+                strcmp(prevState.progressMmSs, gNowPlaying.progressMmSs) != 0 ||
+                strcmp(prevState.shuffleMode, gNowPlaying.shuffleMode) != 0 ||
+                strcmp(prevState.repeatState, gNowPlaying.repeatState) != 0 ||
+                strcmp(prevState.deviceName, gNowPlaying.deviceName) != 0) {
+                RenderCanvas();
+            }
         }
     }
 

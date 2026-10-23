@@ -1,7 +1,8 @@
 /*
- * SpotiMac "Partylizer" — 68000 Assembly & Demoscene Visualizer Engine
- * Renders 200x200 1-bit dithered Winamp & Amiga/Mac demoscene visualizations
- * at 25-30+ FPS on a stock 16 MHz 68030 Macintosh SE/30.
+ * SpotiMac "Partylizer II" — 68000/68040 Assembly & Demoscene Visualizer Engine
+ * Renders 7 Winamp & Amiga/Mac demoscene visualizations in 200x200 1-bit dithered
+ * graphics, including two 40 MHz 68040 showcase engines (3D Ray-Cast Chrome Boing
+ * Spheres and 3D Voxel Space Audio Canyon Flyover).
  */
 
 #include "visualizer.h"
@@ -15,7 +16,7 @@
  * Precomputed Lookup Tables (Sine, 8x8 Bayer Dither, 4x4 Shade, Polar Tunnel)
  * ============================================================================ */
 
-static Boolean       gVizInited = false;
+static Boolean gVizInited = false;
 
 /* 256-entry signed 8.8 fixed-point sine table (-127..+127) */
 static const short gSinTbl[256] = {
@@ -56,11 +57,6 @@ static const unsigned char gBayer8x8[8][8] = {
 
 /*
  * Pre-shifted 2-pixel Bayer dither tables for 68000 assembly byte packing:
- * For row y_mod_8 (0..7) and intensity v (0..63):
- *   gDitherP0[y][v] holds bits 7..6 (1 = black, 0 = white)
- *   gDitherP1[y][v] holds bits 5..4
- *   gDitherP2[y][v] holds bits 3..2
- *   gDitherP3[y][v] holds bits 1..0
  * Combining `p0[v0] | p1[v1] | p2[v2] | p3[v3]` produces 8 individually
  * 1x1 Bayer-dithered pixels in a single byte with zero branches!
  */
@@ -70,8 +66,7 @@ static unsigned char gDitherP2[8][64];
 static unsigned char gDitherP3[8][64];
 
 /*
- * 17-level (0..16) 4x4 Ordered Dither Full-Byte Table for fast 3D polygon scanline fills:
- * `gShadeByte[shade][y & 3]` gives the 8-pixel byte (1 = black, 0 = white).
+ * 17-level (0..16) 4x4 Ordered Dither Full-Byte Table for fast 3D polygon scanline fills
  */
 static unsigned char gShadeByte[17][4];
 
@@ -81,30 +76,48 @@ static unsigned char gPlasmaLut[256];
 /* Radial distance table for 100x100 delta (dx=0..99, dy=0..99) */
 static unsigned char *gRadialDist = NULL; /* 100 * 100 = 10,000 bytes */
 
-/* Polar coordinate tables for 100x100 Tunnel (centered at 50,50, padded to 128x128 for offset sway) */
+/* Polar coordinate tables for 128x128 Wormhole Tunnel */
 #define TUNNEL_LUT_W 128
 #define TUNNEL_LUT_H 128
-static unsigned char *gTunnelAngle = NULL; /* 128 * 128 = 16,384 bytes */
-static unsigned char *gTunnelDepth = NULL; /* 128 * 128 = 16,384 bytes */
-static unsigned char *gTunnelFog   = NULL; /* 128 * 128 = 16,384 bytes */
+static unsigned char *gTunnelAngle = NULL; /* 16,384 bytes */
+static unsigned char *gTunnelDepth = NULL; /* 16,384 bytes */
+static unsigned char *gTunnelFog   = NULL; /* 16,384 bytes */
+
+/* Mode 5: Persistent 100x100 Cellular Fire / Smoke Diffusion Field (0..63) */
+static unsigned char *gFireBuf = NULL;     /* 100 * 102 = 10,200 bytes */
+
+/* Mode 6 (68040): Precomputed 64x64 Sphere Normal / Specular / Lat-Lon Map */
+#define SPHERE_LUT_DIM 64 /* Covers radius R=32 (-32..+31) */
+static signed char   *gSphereNz   = NULL;  /* 64 * 64: >0 inside sphere (0..63), 0 outside */
+static unsigned char *gSphereEnvU = NULL;  /* 64 * 64: spherical u coordinate */
+static unsigned char *gSphereEnvV = NULL;  /* 64 * 64: spherical v coordinate */
+static unsigned char *gSphereSpec = NULL;  /* 64 * 64: Phong specular highlight (0..48) */
+
+/* Mode 7 (68040): 64x64 Rolling 3D Voxel Audio Heightmap, Shade Map & 100x100 Screen Buffer */
+#define VOXEL_MAP_DIM 64
+static unsigned char *gVoxelHeight = NULL; /* 64 * 64 = 4,096 bytes */
+static unsigned char *gVoxelShade  = NULL; /* 64 * 64 = 4,096 bytes */
+static unsigned char *gVoxelScreen = NULL; /* 100 * 100 = 10,000 bytes (heap, never on 68k stack!) */
+static unsigned char  gVoxelWriteRow = 0;
 
 /* ============================================================================
  * Audio Spectrum, Waveform & Beat State
  * ============================================================================ */
 
 static unsigned char gRawPcm[256];
-static signed char   gWave200[VIZ_W];     /* -20..+20 vertical scope offset */
+static signed char   gWave200[VIZ_W];     /* -21..+21 vertical scope offset */
 static short         gEqBands[16];        /* 0..96 smoothed bar heights */
 static short         gEqPeaks[16];        /* 0..96 peak hold positions */
 static short         gEqPeakVel[16];      /* falling velocity of peak caps */
 static short         gAudioEnergy = 0;    /* 0..100 overall energy */
 static short         gBassPulse   = 0;    /* 0..64 bass kick envelope */
 static short         gTreblePulse = 0;    /* 0..64 treble envelope */
-static short         gAvgBass     = 24;
+static short         gAvgBass     = 20;
+static Boolean       gBeatHit     = false;
 static unsigned long gFrameCount  = 0;
 
 /* ============================================================================
- * 3D Scene State (Mode 3: 3D Torus + Starfield)
+ * 3D Scene State (Mode 3: Supercharged Audio-Reactive Torus + Starfield)
  * ============================================================================ */
 
 #define NUM_STARS    48
@@ -118,6 +131,9 @@ static Star3D gStars[NUM_STARS];
 static unsigned char gAngleX = 20;
 static unsigned char gAngleY = 0;
 static unsigned char gAngleZ = 10;
+static short         gTorusZoomSmooth = 0;
+static short         gTorusTwistPhase = 0;
+static short         gTorusSpinDir    = 1;
 
 #define TORUS_RINGS  8
 #define TORUS_SEGS   6
@@ -177,11 +193,7 @@ static void AsmPackDitherRow25(
         "1:\n\t"
         "moveq #0, %2\n\t"
         "move.b (%1)+, %2\n\t"
-        "move.b 0(%4, %2.l), %3\n\t"
-
-        "moveq #0, %2\n\t"
-        "move.b (%1)+, %2\n\t"
-        "or.b 0(%5, %2.l), %3\n\t"
+        "move.b 0(%5, %2.l), %3\n\t"
 
         "moveq #0, %2\n\t"
         "move.b (%1)+, %2\n\t"
@@ -191,10 +203,45 @@ static void AsmPackDitherRow25(
         "move.b (%1)+, %2\n\t"
         "or.b 0(%7, %2.l), %3\n\t"
 
+        "moveq #0, %2\n\t"
+        "move.b (%1)+, %2\n\t"
+        "or.b 0(%8, %2.l), %3\n\t"
+
         "move.b %3, (%0)+\n\t"
-        "dbf %8, 1b\n\t"
-        : "+a"(dstRow), "+a"(rowVals), "=&d"(d0_tmp), "=&d"(d1_tmp)
-        : "a"(p0), "a"(p1), "a"(p2), "a"(p3), "d"(count)
+        "dbf %4, 1b\n\t"
+        : "+a"(dstRow), "+a"(rowVals), "=&d"(d0_tmp), "=&d"(d1_tmp), "+d"(count)
+        : "a"(p0), "a"(p1), "a"(p2), "a"(p3)
+        : "cc", "memory"
+    );
+}
+
+/*
+ * 68000 assembly cellular fire/smoke upward diffusion pass on a 98-pixel row:
+ * dst[x] = max(0, ((srcBelow[x-1] + srcBelow[x]*2 + srcBelow[x+1]) >> 2) - 1)
+ */
+static void AsmDiffuseFireRow98(unsigned char *dst, const unsigned char *srcBelow)
+{
+    short count = 98 - 1;
+    long d0, d1;
+    __asm__ volatile (
+        "1:\n\t"
+        "moveq #0, %2\n\t"
+        "move.b (%1)+, %2\n\t"
+        "moveq #0, %3\n\t"
+        "move.b (%1), %3\n\t"
+        "add.w %3, %3\n\t"
+        "add.w %3, %2\n\t"
+        "moveq #0, %3\n\t"
+        "move.b 1(%1), %3\n\t"
+        "add.w %3, %2\n\t"
+        "lsr.w #2, %2\n\t"
+        "beq.s 2f\n\t"
+        "subq.w #1, %2\n\t"
+        "2:\n\t"
+        "move.b %2, (%0)+\n\t"
+        "dbf %4, 1b\n\t"
+        : "+a"(dst), "+a"(srcBelow), "=&d"(d0), "=&d"(d1), "+d"(count)
+        :
         : "cc", "memory"
     );
 }
@@ -318,22 +365,18 @@ void VisualizerInit(void)
     for (y = 0; y < 8; y++) {
         for (v = 0; v < 64; v++) {
             unsigned char b0, b1;
-            /* Pair 0: pixels 0, 1 -> bits 7, 6 */
             b0 = (v > gBayer8x8[y][0]) ? 0 : 1;
             b1 = (v > gBayer8x8[y][1]) ? 0 : 1;
             gDitherP0[y][v] = (unsigned char)((b0 << 7) | (b1 << 6));
 
-            /* Pair 1: pixels 2, 3 -> bits 5, 4 */
             b0 = (v > gBayer8x8[y][2]) ? 0 : 1;
             b1 = (v > gBayer8x8[y][3]) ? 0 : 1;
             gDitherP1[y][v] = (unsigned char)((b0 << 5) | (b1 << 4));
 
-            /* Pair 2: pixels 4, 5 -> bits 3, 2 */
             b0 = (v > gBayer8x8[y][4]) ? 0 : 1;
             b1 = (v > gBayer8x8[y][5]) ? 0 : 1;
             gDitherP2[y][v] = (unsigned char)((b0 << 3) | (b1 << 2));
 
-            /* Pair 3: pixels 6, 7 -> bits 1, 0 */
             b0 = (v > gBayer8x8[y][6]) ? 0 : 1;
             b1 = (v > gBayer8x8[y][7]) ? 0 : 1;
             gDitherP3[y][v] = (unsigned char)((b0 << 1) | b1);
@@ -345,7 +388,6 @@ void VisualizerInit(void)
         for (y = 0; y < 4; y++) {
             unsigned char byteVal = 0;
             for (x = 0; x < 8; x++) {
-                /* 0 bit = white, 1 bit = black */
                 if (v <= bayer4x4[y][x & 3]) {
                     byteVal |= (unsigned char)(0x80 >> x);
                 }
@@ -356,8 +398,8 @@ void VisualizerInit(void)
 
     /* 3. Build smooth cosine palette LUT (0..255 -> 0..63) */
     for (i = 0; i < 256; i++) {
-        short s = gSinTbl[i]; /* -127..+127 */
-        short norm = (s + 128) >> 2; /* 0..63 */
+        short s = gSinTbl[i];
+        short norm = (s + 128) >> 2;
         if (norm < 0) norm = 0;
         if (norm > 63) norm = 63;
         gPlasmaLut[i] = (unsigned char)norm;
@@ -374,7 +416,7 @@ void VisualizerInit(void)
         }
     }
 
-    /* 5. Allocate & populate 128x128 Polar Wormhole Tunnel LUTs (centered at 64, 64) */
+    /* 5. Allocate & populate 128x128 Polar Wormhole Tunnel LUTs */
     gTunnelAngle = (unsigned char *)NewPtr(TUNNEL_LUT_W * TUNNEL_LUT_H);
     gTunnelDepth = (unsigned char *)NewPtr(TUNNEL_LUT_W * TUNNEL_LUT_H);
     gTunnelFog   = (unsigned char *)NewPtr(TUNNEL_LUT_W * TUNNEL_LUT_H);
@@ -393,7 +435,6 @@ void VisualizerInit(void)
                 depth = (unsigned short)(1600U / r);
                 gTunnelDepth[idx] = (unsigned char)(depth & 0xFF);
 
-                /* Distance fog: dark in the center (r < 8), bright toward outer walls */
                 fog = (short)r;
                 if (fog > 63) fog = 63;
                 gTunnelFog[idx] = (unsigned char)fog;
@@ -401,7 +442,56 @@ void VisualizerInit(void)
         }
     }
 
-    /* 6. Initialize 3D Starfield */
+    /* 6. Mode 5: Allocate 100x102 Fire/Smoke Diffusion Field */
+    gFireBuf = (unsigned char *)NewPtrClear(100 * 102);
+
+    /* 7. Mode 6 (68040): Precompute 64x64 3D Sphere Normal, Environment & Phong Specular LUTs */
+    gSphereNz   = (signed char *)NewPtrClear(SPHERE_LUT_DIM * SPHERE_LUT_DIM);
+    gSphereEnvU = (unsigned char *)NewPtrClear(SPHERE_LUT_DIM * SPHERE_LUT_DIM);
+    gSphereEnvV = (unsigned char *)NewPtrClear(SPHERE_LUT_DIM * SPHERE_LUT_DIM);
+    gSphereSpec = (unsigned char *)NewPtrClear(SPHERE_LUT_DIM * SPHERE_LUT_DIM);
+    if (gSphereNz && gSphereEnvU && gSphereEnvV && gSphereSpec) {
+        for (y = 0; y < SPHERE_LUT_DIM; y++) {
+            for (x = 0; x < SPHERE_LUT_DIM; x++) {
+                short dx = x - 32;
+                short dy = y - 32;
+                short r2 = dx * dx + dy * dy;
+                short idx = y * SPHERE_LUT_DIM + x;
+                if (r2 < 30 * 30) {
+                    unsigned short nz = IntSqrt((unsigned long)(30 * 30 - r2));
+                    /* Light direction from top-left-front: (-14, -14, +22) */
+                    long dot = (long)(-dx * 14 - dy * 14 + (short)nz * 22);
+                    short spec = 0;
+                    gSphereNz[idx]   = (signed char)(nz * 2); /* 1..60 */
+                    gSphereEnvU[idx] = (unsigned char)(128 + dx * 4 + ((dx * (32 - (short)nz)) >> 3));
+                    gSphereEnvV[idx] = (unsigned char)(128 + dy * 4 + ((dy * (32 - (short)nz)) >> 3));
+                    if (dot > 480) {
+                        spec = (short)((dot - 480) >> 3);
+                        if (spec > 52) spec = 52;
+                    }
+                    gSphereSpec[idx] = (unsigned char)spec;
+                }
+            }
+        }
+    }
+
+    /* 8. Mode 7 (68040): Allocate & seed 64x64 Voxel Canyon Heightmap & 100x100 Screen Buffer */
+    gVoxelHeight = (unsigned char *)NewPtrClear(VOXEL_MAP_DIM * VOXEL_MAP_DIM);
+    gVoxelShade  = (unsigned char *)NewPtrClear(VOXEL_MAP_DIM * VOXEL_MAP_DIM);
+    gVoxelScreen = (unsigned char *)NewPtrClear(100 * 100);
+    if (gVoxelHeight && gVoxelShade) {
+        for (y = 0; y < VOXEL_MAP_DIM; y++) {
+            for (x = 0; x < VOXEL_MAP_DIM; x++) {
+                short canyon = abs(x - 32);
+                short h = (canyon * 2) + ((FAST_SIN((unsigned char)(x * 8 + y * 6)) + 128) >> 4);
+                if (h > 63) h = 63;
+                gVoxelHeight[y * VOXEL_MAP_DIM + x] = (unsigned char)h;
+                gVoxelShade[y * VOXEL_MAP_DIM + x]  = (unsigned char)(16 + (h >> 1));
+            }
+        }
+    }
+
+    /* 9. Initialize 3D Starfield */
     for (i = 0; i < NUM_STARS; i++) {
         gStars[i].x = (short)((i * 73) % 220) - 110;
         gStars[i].y = (short)((i * 137) % 220) - 110;
@@ -422,19 +512,14 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
     Boolean gotLivePcm = false;
 
     gFrameCount++;
+    gBeatHit = false;
+    (void)progressMs;
 
     if (isPlaying && AudioStreamIsRunning()) {
         gotLivePcm = AudioGetLiveSamples(gRawPcm, 256);
     }
 
     if (gotLivePcm) {
-        /*
-         * Genuine Real-Time Time-Domain / Filterbank Analysis of 256 Live PCM Samples:
-         * - Convert unsigned 8-bit PCM (0..255) to signed (-128..+127)
-         * - Compute 200-pixel oscilloscope trace (`gWave200`)
-         * - Extract low-pass (bass), band-pass (mids), and high-pass difference (treble)
-         *   across 16 sub-windows + zero-crossing frequency buckets!
-         */
         long totalAbs = 0;
         long bassAcc  = 0;
         long trebAcc  = 0;
@@ -450,7 +535,7 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
         }
 
         for (b = 0; b < 16; b++) {
-            short base = b << 4; /* 16 samples per window */
+            short base = b << 4;
             short subLow = 0, subMid = 0, subHigh = 0;
             for (i = 0; i < 16; i++) {
                 short s = (short)gRawPcm[base + i] - 128;
@@ -462,7 +547,6 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
                 subHigh += abs(diff);
                 totalAbs += abs(s);
             }
-            /* Blend low, mid, and high energy according to band index b (0=sub-bass .. 15=air) */
             if (b < 4) {
                 rawBands[b] = (subLow * (6 - b)) >> 4;
                 bassAcc += rawBands[b];
@@ -472,7 +556,6 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
                 rawBands[b] = (subMid + subHigh * 2) >> 4;
                 trebAcc += rawBands[b];
             }
-            /* Add musical harmonic variation across neighboring bands */
             rawBands[b] = (rawBands[b] * (12 + ((b * 5) & 7))) >> 3;
             if (rawBands[b] > 94) rawBands[b] = 94;
         }
@@ -482,8 +565,9 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
 
         {
             short curBass = (short)(bassAcc >> 2);
-            if (curBass > (gAvgBass + 8) && curBass > 18) {
-                gBassPulse = 48;
+            if (curBass > (gAvgBass + 6) && curBass > 15) {
+                if (gBassPulse < 28) gBeatHit = true;
+                gBassPulse = 56;
             } else if (gBassPulse > 4) {
                 gBassPulse -= 4;
             } else {
@@ -495,11 +579,6 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
         if (gTreblePulse > 64) gTreblePulse = 64;
 
     } else if (isPlaying) {
-        /*
-         * Remote Spotify Connect Speaker Active:
-         * Synthesize track-seeded musical beat, bassline, and 16-band spectrum
-         * locked to `TickCount()` and `progressMs` so visuals dance vividly!
-         */
         unsigned long t = TickCount();
         unsigned char seed = 0x5A;
         unsigned char beatPhase;
@@ -507,9 +586,11 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
             const char *p = trackId;
             while (*p) { seed = (unsigned char)(seed * 33 + *p++); }
         }
-        /* ~122 BPM beat pulse (every ~29 ticks) */
         beatPhase = (unsigned char)((t * 9) & 0xFF);
-        gBassPulse = (beatPhase < 64) ? (short)((64 - beatPhase) >> 1) : 0;
+        if (beatPhase < 18 && gBassPulse < 30) {
+            gBeatHit = true;
+        }
+        gBassPulse = (beatPhase < 80) ? (short)((80 - beatPhase) * 3 >> 2) : 0;
         gAudioEnergy = 45 + (gBassPulse >> 1);
         gTreblePulse = 20 + ((FAST_SIN(t * 13 + seed) + 128) >> 3);
 
@@ -534,9 +615,8 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
             gWave200[i] = (signed char)(((w1 + (w2 >> 1)) * amp) >> 8);
         }
     } else {
-        /* Paused: decay spectrum and flatten waveform smoothly */
         gAudioEnergy = 0;
-        if (gBassPulse > 2) gBassPulse -= 2; else gBassPulse = 0;
+        if (gBassPulse > 3) gBassPulse -= 3; else gBassPulse = 0;
         gTreblePulse = 0;
         for (b = 0; b < 16; b++) {
             rawBands[b] = 2;
@@ -550,21 +630,18 @@ static void AnalyzeAudioFrame(Boolean isPlaying, long progressMs, const char *tr
     for (b = 0; b < 16; b++) {
         short target = rawBands[b];
         if (target >= gEqBands[b]) {
-            /* Fast attack */
             gEqBands[b] = (gEqBands[b] + target * 3) >> 2;
         } else {
-            /* Smooth Winamp decay */
             gEqBands[b] -= 4;
             if (gEqBands[b] < target) gEqBands[b] = target;
         }
         if (gEqBands[b] < 2)  gEqBands[b] = 2;
         if (gEqBands[b] > 94) gEqBands[b] = 94;
 
-        /* Peak-hold cap physics */
         if (gEqBands[b] >= gEqPeaks[b]) {
             gEqPeaks[b]   = gEqBands[b] + 2;
             if (gEqPeaks[b] > 96) gEqPeaks[b] = 96;
-            gEqPeakVel[b] = -2; /* Brief hang time at apex */
+            gEqPeakVel[b] = -2;
         } else {
             gEqPeakVel[b]++;
             if (gEqPeakVel[b] > 0) {
@@ -588,7 +665,6 @@ static void RenderMode1WinampEQ(unsigned char *bits)
 
     AsmClearBlack5200(bits);
 
-    /* 1. Top Oscilloscope Bay (y = 5..49, center axis at y = 27) */
     for (x = 6; x < 194; x += 4) {
         SetPixelWhite(bits, x, 27);
     }
@@ -601,11 +677,9 @@ static void RenderMode1WinampEQ(unsigned char *bits)
         if (yMin < 4)  yMin = 4;
         if (yMax > 50) yMax = 50;
 
-        /* Solid white vertical segment connecting sample x-1 to x */
         for (y = yMin; y <= yMax; y++) {
             SetPixelWhite(bits, x, y);
         }
-        /* Dithered phosphor glow trail above & below trace */
         if ((x & 1) == (short)(gFrameCount & 1)) {
             if (yMin > 5)  SetPixelWhite(bits, x, yMin - 2);
             if (yMax < 49) SetPixelWhite(bits, x, yMax + 2);
@@ -613,45 +687,37 @@ static void RenderMode1WinampEQ(unsigned char *bits)
         prevY = curY;
     }
 
-    /* 2. Middle 16-Band Segmented Spectrum Analyzer (y = 54..152, baseline = 152) */
     for (b = 0; b < 16; b++) {
-        short x0   = 5 + b * 12; /* 10px wide bar: x0 .. x0+9, 2px gap */
+        short x0   = 5 + b * 12;
         short x1   = x0 + 9;
         short barH = gEqBands[b];
         short peakY = 152 - gEqPeaks[b];
         short dy;
 
-        /* Draw segmented 2px LED blocks with 4-zone dithered gradient */
         for (dy = 0; dy < barH; dy++) {
             unsigned char *rowPtr;
             unsigned char pat;
-            if ((dy % 3) == 2) continue; /* 1px black LED separator gap every 3px */
+            if ((dy % 3) == 2) continue;
 
             y = 152 - dy;
             if (y < 54) break;
             rowPtr = bits + y * VIZ_ROWBYTES;
 
             if (dy >= 66) {
-                /* Top peak zone: 100% solid white */
                 pat = 0x00;
             } else if (dy >= 42) {
-                /* Upper-mid zone: 75% bright dither */
                 pat = (y & 1) ? 0x22 : 0x88;
             } else if (dy >= 18) {
-                /* Mid zone: 50% checkerboard dither */
                 pat = (y & 1) ? 0x55 : 0xAA;
             } else {
-                /* Base zone: 37.5% warm dither */
                 pat = (y & 1) ? 0x77 : 0xDD;
             }
 
             FillSpanPattern(rowPtr, x0, x1, pat);
-            /* Crisp 1px white left & right rim on every LED block so bars pop sharply */
             SetPixelWhite(bits, x0, y);
             SetPixelWhite(bits, x1, y);
         }
 
-        /* Draw 2px-tall solid white floating Peak-Hold Cap */
         if (peakY >= 54 && peakY <= 151) {
             FillSpanPattern(bits + peakY * VIZ_ROWBYTES, x0, x1, 0x00);
             if (peakY > 54) {
@@ -659,7 +725,6 @@ static void RenderMode1WinampEQ(unsigned char *bits)
             }
         }
 
-        /* 3. Bottom Rippling Water Reflection (y = 156..195, 40px tall) */
         {
             short refH = (barH * 2) / 5;
             if (refH > 38) refH = 38;
@@ -676,7 +741,6 @@ static void RenderMode1WinampEQ(unsigned char *bits)
         }
     }
 
-    /* Horizon separator line at y = 154 */
     FillSpanPattern(bits + 154 * VIZ_ROWBYTES, 2, 197, 0x55);
 }
 
@@ -694,7 +758,6 @@ static void RenderMode2Plasma(unsigned char *bits)
     unsigned char t3 = (unsigned char)(gFrameCount * 2);
     unsigned char beatShift = (unsigned char)(gBassPulse << 1);
 
-    /* Two orbiting metaball attractors in 100x200 space */
     short bx0 = 50 + ((FAST_SIN(t1) * 32) >> 7);
     short by0 = 100 + ((FAST_COS(t2) * 64) >> 7);
     short bx1 = 50 + ((FAST_COS((unsigned char)(t3 + 80)) * 34) >> 7);
@@ -709,7 +772,7 @@ static void RenderMode2Plasma(unsigned char *bits)
 
     for (y = 0; y < VIZ_H; y++) {
         unsigned char *dstRow = bits + y * VIZ_ROWBYTES;
-        short yHalf = y >> 1; /* 0..99 */
+        short yHalf = y >> 1;
         short dy0 = abs(yHalf - (by0 >> 1));
         short dy1 = abs(yHalf - (by1 >> 1));
         const unsigned char *rRow0 = gRadialDist ? (gRadialDist + dy0 * 100) : NULL;
@@ -735,7 +798,6 @@ static void RenderMode2Plasma(unsigned char *bits)
             }
         }
 
-        /* Pack 100 64-level intensities into 25 1x1 Bayer-dithered bytes via 68000 assembly! */
         AsmPackDitherRow25(
             dstRow,
             rowVals,
@@ -747,7 +809,6 @@ static void RenderMode2Plasma(unsigned char *bits)
         dstRow[25] = 0xFF;
     }
 
-    /* Carve high-contrast 3px live oscilloscope ribbon through the plasma center */
     {
         short prevY = 100 + (gWave200[0] * 2);
         for (x = 0; x < VIZ_W; x++) {
@@ -757,13 +818,11 @@ static void RenderMode2Plasma(unsigned char *bits)
             if (yMin < 4)   yMin = 4;
             if (yMax > 195) yMax = 195;
 
-            /* Black halo border above & below ribbon for maximum contrast on bright plasma */
             SetPixelBlack(bits, x, yMin - 2);
             SetPixelBlack(bits, x, yMin - 1);
             SetPixelBlack(bits, x, yMax + 1);
             SetPixelBlack(bits, x, yMax + 2);
 
-            /* Bright white 2px core ribbon */
             for (y = yMin; y <= yMax + 1; y++) {
                 SetPixelWhite(bits, x, y);
             }
@@ -773,10 +832,9 @@ static void RenderMode2Plasma(unsigned char *bits)
 }
 
 /* ============================================================================
- * MODE 3: Demoscene 3D Shaded Torus + Warp Starfield + Cyber Grid
+ * MODE 3: Supercharged Audio-Reactive 3D Shaded Torus + Starfield + Cyber Grid
  * ============================================================================ */
 
-/* Scanline-fills a convex 2D quad with a 4x4 ordered dither shade (1..16) */
 static void FillQuadDithered(unsigned char *bits, const FaceQuad2D *q)
 {
     short yMin = 199, yMax = 0;
@@ -824,11 +882,12 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
     short visCount = 0;
     short sxA, cxA, syA, cyA, szA, czA;
     short starSpeed;
+    short targetZoom, fovScale, baseMajorR;
 
     AsmClearBlack5200(bits);
 
-    /* 1. 3D Warp Starfield */
-    starSpeed = 3 + (gAudioEnergy >> 4) + (gBassPulse >> 3);
+    /* 1. 3D Warp Starfield — accelerates dramatically with bass & energy */
+    starSpeed = 2 + (gAudioEnergy >> 3) + (gBassPulse >> 2);
     for (i = 0; i < NUM_STARS; i++) {
         short projX, projY;
         gStars[i].z -= starSpeed;
@@ -839,7 +898,7 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
         projY = 92  + (short)(((long)gStars[i].y * 128L) / gStars[i].z);
         if ((unsigned short)projX < VIZ_W && (unsigned short)projY < 162) {
             SetPixelWhite(bits, projX, projY);
-            if (gStars[i].z < 110 && projX + 1 < VIZ_W) {
+            if (gStars[i].z < 120 && projX + 1 < VIZ_W) {
                 SetPixelWhite(bits, projX + 1, projY);
             }
         }
@@ -847,8 +906,8 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
 
     /* 2. Perspective 3D Scrolling Cyber-Grid Floor (y = 164..198) */
     {
-        short scroll = (short)((gFrameCount * 2) & 7);
-        FillSpanPattern(bits + 164 * VIZ_ROWBYTES, 0, 199, (gBassPulse > 20) ? 0x00 : 0x55);
+        short scroll = (short)((gFrameCount * (1 + (gAudioEnergy >> 4))) & 7);
+        FillSpanPattern(bits + 164 * VIZ_ROWBYTES, 0, 199, (gBassPulse > 24) ? 0x00 : 0x55);
         for (i = 1; i <= 5; i++) {
             short gy = 164 + ((i * i * 28 + scroll * i) >> 2);
             if (gy > 164 && gy < 199) {
@@ -856,59 +915,82 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
             }
         }
         for (i = -5; i <= 5; i++) {
-            short topX = 100 + i * 10;
-            short botX = 100 + i * 34;
+            short sway = (FAST_SIN((unsigned char)(gFrameCount * 3)) * gBassPulse) >> 9;
+            short topX = 100 + i * 10 + sway;
+            short botX = 100 + i * 34 + (sway * 2);
             DrawLineWhite(bits, topX, 164, botX, 199);
         }
     }
 
-    /* 3. Advance 3D Torus Euler Angles (boosted by audio energy & bass hits) */
-    gAngleX = (unsigned char)(gAngleX + 2 + (gBassPulse >> 4));
-    gAngleY = (unsigned char)(gAngleY + 3 + (gAudioEnergy >> 5));
-    gAngleZ = (unsigned char)(gAngleZ + 1);
+    /* 3. Dynamic Beat-Driven Rotation, Spin-Reversal on Big Kicks & Bass Zoom Pump */
+    if (gBeatHit) {
+        gAngleX = (unsigned char)(gAngleX + 9);
+        gAngleZ = (unsigned char)(gAngleZ + 7 * gTorusSpinDir);
+        if (gBassPulse > 45 && ((gFrameCount & 3) == 0)) {
+            gTorusSpinDir = -gTorusSpinDir;
+        }
+    }
+    gAngleX = (unsigned char)(gAngleX + 1 + (gBassPulse >> 3) + (gAudioEnergy >> 5));
+    gAngleY = (unsigned char)(gAngleY + (2 + (gAudioEnergy >> 4) + (gBassPulse >> 3)) * gTorusSpinDir);
+    gAngleZ = (unsigned char)(gAngleZ + 1 + (gTreblePulse >> 4));
+    gTorusTwistPhase += 4 + (gAudioEnergy >> 3);
+
+    targetZoom = (gBassPulse * 3 >> 1) + (gAudioEnergy >> 1);
+    if (targetZoom > gTorusZoomSmooth) {
+        gTorusZoomSmooth = (gTorusZoomSmooth + targetZoom * 3) >> 2;
+    } else {
+        gTorusZoomSmooth = (gTorusZoomSmooth * 3 + targetZoom) >> 2;
+    }
+
+    fovScale   = 155 + gTorusZoomSmooth; /* Pumps from 155 (idle) up to ~250 on heavy bass! */
+    baseMajorR = 36 + (gTorusZoomSmooth >> 2);
 
     sxA = FAST_SIN(gAngleX); cxA = FAST_COS(gAngleX);
     syA = FAST_SIN(gAngleY); cyA = FAST_COS(gAngleY);
     szA = FAST_SIN(gAngleZ); czA = FAST_COS(gAngleZ);
 
-    /* 4. Generate & Transform 48 Audio-Morphing Torus Vertices */
+    /* 4. Generate & Transform 48 Audio-Sculpted Torus Vertices */
     for (r = 0; r < TORUS_RINGS; r++) {
         unsigned char uAngle = (unsigned char)(r * (256 / TORUS_RINGS));
         short cosU = FAST_COS(uAngle);
         short sinU = FAST_SIN(uAngle);
-        /* Audio-reactive minor radius per ring driven by EQ spectrum! */
-        short minorR = 17 + (gEqBands[r * 2] >> 3);
+        short bandLow  = gEqBands[r * 2];
+        short bandHigh = gEqBands[r * 2 + 1];
+        /* Tube radius swells dramatically from 11 up to 46 with the music */
+        short minorR = 11 + ((bandLow * 3) >> 3);
+        /* Per-ring radial pulse & Z-wave */
+        short ringMajorR = baseMajorR + ((bandHigh - 20) >> 2);
+        short ringWaveZ  = ((bandLow - 24) * FAST_SIN((unsigned char)(uAngle * 2 + gTorusTwistPhase))) >> 7;
 
         for (s = 0; s < TORUS_SEGS; s++) {
             short idx = r * TORUS_SEGS + s;
-            unsigned char vAngle = (unsigned char)(s * (256 / TORUS_SEGS));
+            /* Audio-driven torsional twist around the tube cross-section */
+            unsigned char vAngle = (unsigned char)(s * (256 / TORUS_SEGS) + ((bandHigh * (r & 1 ? 1 : -1)) >> 1));
             short cosV = FAST_COS(vAngle);
             short sinV = FAST_SIN(vAngle);
-            short ringR = 44 + ((minorR * cosV) >> 7);
+            short segBump = (s & 1) ? (gBassPulse >> 3) : -(gTreblePulse >> 4);
+            short curMinor = minorR + segBump;
+            short ringR = ringMajorR + ((curMinor * cosV) >> 7);
 
-            /* Model-space coordinates (-70..+70) */
             short mx = (ringR * cosU) >> 7;
             short my = (ringR * sinU) >> 7;
-            short mz = (minorR * sinV) >> 7;
+            short mz = ((curMinor * sinV) >> 7) + ringWaveZ;
 
-            /* Rotate around X */
             short y1 = (my * cxA - mz * sxA) >> 7;
             short z1 = (my * sxA + mz * cxA) >> 7;
 
-            /* Rotate around Y */
             short x2 = (mx * cyA + z1 * syA) >> 7;
             short z2 = (-mx * syA + z1 * cyA) >> 7;
 
-            /* Rotate around Z */
             short x3 = (x2 * czA - y1 * szA) >> 7;
             short y3 = (x2 * szA + y1 * czA) >> 7;
 
-            short dist = z2 + 210;
-            if (dist < 64) dist = 64;
+            short dist = z2 + 220;
+            if (dist < 70) dist = 70;
 
             vz[idx] = z2;
-            px[idx] = 100 + (short)(((long)x3 * 185L) / dist);
-            py[idx] = 88  + (short)(((long)y3 * 185L) / dist);
+            px[idx] = 100 + (short)(((long)x3 * (long)fovScale) / dist);
+            py[idx] = 86  + (short)(((long)y3 * (long)fovScale) / dist);
         }
     }
 
@@ -922,7 +1004,6 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
             short i2 = nextR * TORUS_SEGS + nextS;
             short i3 = r * TORUS_SEGS + nextS;
 
-            /* 2D screen-space cross product for backface culling */
             long dx1 = px[i1] - px[i0];
             long dy1 = py[i1] - py[i0];
             long dx2 = px[i3] - px[i0];
@@ -938,8 +1019,7 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
                 f->sx[3] = px[i3]; f->sy[3] = py[i3];
                 f->avgZ  = (vz[i0] + vz[i1] + vz[i2] + vz[i3]) >> 2;
 
-                /* Lighting from normal facing + depth + beat specular boost */
-                shade = (short)(crossZ >> 4) + ((40 - f->avgZ) >> 3) + (gBassPulse >> 4);
+                shade = (short)(crossZ >> 4) + ((44 - f->avgZ) >> 3) + (gBassPulse >> 3);
                 if (shade < 2)  shade = 2;
                 if (shade > 16) shade = 16;
                 f->shade = (unsigned char)shade;
@@ -947,7 +1027,7 @@ static void RenderMode3Demoscene3D(unsigned char *bits)
         }
     }
 
-    /* 6. Painter's Algorithm Depth Sort (back-to-front: largest avgZ first) */
+    /* 6. Painter's Algorithm Depth Sort */
     for (i = 1; i < visCount; i++) {
         FaceQuad2D key = gVisibleFaces[i];
         short j = i - 1;
@@ -981,7 +1061,6 @@ static void RenderMode4Tunnel(unsigned char *bits)
     unsigned char depthScroll = (unsigned char)(gFrameCount * 5 + (gBassPulse >> 1));
     unsigned char twistScroll = (unsigned char)(gFrameCount * 2);
 
-    /* Swaying camera offset in the 128x128 tunnel LUT (window is 100x100, so offset in 0..27) */
     short camOx = 14 + ((FAST_SIN((unsigned char)(gFrameCount * 2)) * 12) >> 7);
     short camOy = 14 + ((FAST_COS((unsigned char)(gFrameCount * 3)) * 12) >> 7);
 
@@ -1009,7 +1088,6 @@ static void RenderMode4Tunnel(unsigned char *bits)
             unsigned char fog = fogPtr[x];
             unsigned char bandVal = eqMod[(ang >> 4) & 15];
 
-            /* Spiral wormhole coordinates warped by live frequency spectrum */
             unsigned char u = (unsigned char)(ang * 2 + (dep >> 1) + twistScroll);
             unsigned char v = (unsigned char)(dep + depthScroll - bandVal);
             unsigned char tex = gPlasmaLut[(unsigned char)(u ^ v)] + (bandVal >> 1);
@@ -1019,7 +1097,6 @@ static void RenderMode4Tunnel(unsigned char *bits)
             rowVals[x] = (unsigned char)lit;
         }
 
-        /* Pack 100 64-level tunnel intensities into 25 1x1 Bayer-dithered bytes via 68000 assembly! */
         AsmPackDitherRow25(
             dstRow,
             rowVals,
@@ -1031,7 +1108,6 @@ static void RenderMode4Tunnel(unsigned char *bits)
         dstRow[25] = 0xFF;
     }
 
-    /* Superimpose 16-Ray Radial Spectrum Starburst from the moving vortex eye */
     {
         short eyeX = (64 - camOx) * 2;
         short eyeY = (64 - camOy) * 2;
@@ -1047,6 +1123,373 @@ static void RenderMode4Tunnel(unsigned char *bits)
             short y1 = eyeY + ((rOuter * sn) >> 7);
             DrawLineWhite(bits, x0, y0, x1, y1);
         }
+    }
+}
+
+/* ============================================================================
+ * MODE 5: Demoscene Cellular Fire & Smoke Diffusion + 3D Harmonograph Ribbon
+ * ============================================================================ */
+
+static void RenderMode5FireScope(unsigned char *bits)
+{
+    short x, y, i;
+
+    if (!gFireBuf) {
+        RenderMode2Plasma(bits);
+        return;
+    }
+
+    /* 1. Inject 16-Band EQ Fire Coal Intensity along the bottom rows (y = 98..100) */
+    for (x = 1; x < 99; x++) {
+        short b = (x * 16) / 100;
+        short coal = (gEqBands[b] * 5) >> 3;
+        short noise = (FAST_SIN((unsigned char)(x * 29 + gFrameCount * 17)) + 128) >> 4;
+        short val = coal + noise + (gBassPulse >> 1);
+        if (val > 63) val = 63;
+        gFireBuf[99 * 100 + x]  = (unsigned char)val;
+        gFireBuf[100 * 100 + x] = (unsigned char)val;
+    }
+
+    /* 2. Inject Glowing 3D Rotating Lissajous Harmonograph Figure into the Fire Field */
+    {
+        unsigned char pA = (unsigned char)(gFrameCount * 4);
+        unsigned char pB = (unsigned char)(gFrameCount * 7 + 40);
+        short radX = 24 + (gBassPulse >> 2);
+        short radY = 22 + (gAudioEnergy >> 3);
+
+        for (i = 0; i < 64; i++) {
+            unsigned char t = (unsigned char)(i * 4);
+            short waveMod = gWave200[(i * 3) % VIZ_W];
+            short lx = 50 + ((FAST_SIN((unsigned char)(t * 2 + pA)) * radX) >> 7) + (waveMod >> 2);
+            short ly = 54 + ((FAST_COS((unsigned char)(t * 3 + pB)) * radY) >> 7) + (waveMod >> 2);
+            if (lx >= 2 && lx < 98 && ly >= 4 && ly < 96) {
+                gFireBuf[ly * 100 + lx]       = 63;
+                gFireBuf[ly * 100 + lx + 1]   = 58;
+                gFireBuf[(ly + 1) * 100 + lx] = 58;
+            }
+        }
+    }
+
+    /* 3. Run 68000 Assembly Cellular Upward Diffusion & Cooling Pass */
+    for (y = 0; y < 99; y++) {
+        AsmDiffuseFireRow98(gFireBuf + y * 100 + 1, gFireBuf + (y + 1) * 100);
+    }
+
+    /* 4. Pack 100x100 Fire Field into 200x200 64-Shade 8x8 Bayer Dithered Output */
+    for (y = 0; y < VIZ_H; y++) {
+        unsigned char *dstRow = bits + y * VIZ_ROWBYTES;
+        const unsigned char *fireRow = gFireBuf + (y >> 1) * 100;
+        short ry = y & 7;
+        AsmPackDitherRow25(
+            dstRow,
+            fireRow,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+        dstRow[25] = 0xFF;
+    }
+}
+
+/* ============================================================================
+ * MODE 6 (40 MHz 68040 Showcase #1):
+ * Real-Time Ray-Cast 3D Reflective Chrome Boing Spheres + Phong Specular +
+ * Infinite Perspective Checkered Floor with Real-Time Soft Drop Shadows
+ * ============================================================================ */
+
+typedef struct {
+    short cx, cy, cz; /* Center in 100x100xZ space */
+    short scaleInv;   /* 64 = full R=30, 96 = R=20, 128 = R=15 */
+    short radiusPx;   /* Screen radius in 100x100 space */
+    unsigned char spin;
+} ChromeSphere;
+
+static void RenderMode6ChromeSpheres(unsigned char *bits)
+{
+    short x, y, i;
+    unsigned char rowVals[100];
+    ChromeSphere spheres[3];
+    short bounce = abs(FAST_SIN((unsigned char)(gFrameCount * 5))) >> 2; /* 0..31 */
+    short floorScrollZ = (short)(gFrameCount * 4 + (gAudioEnergy >> 3));
+    short floorScrollX = (FAST_SIN((unsigned char)(gFrameCount * 2)) * 24) >> 7;
+    unsigned char orbitAng = (unsigned char)(gFrameCount * 4);
+
+    if (!gSphereNz || !gSphereEnvU || !gSphereEnvV || !gSphereSpec) {
+        RenderMode3Demoscene3D(bits);
+        return;
+    }
+
+    /*
+     * Configure 3 3D Chrome Spheres:
+     * - Sphere 0: Giant Central Boing/Chrome Sphere that bounces & swells with bass
+     * - Sphere 1 & 2: Two orbiting satellite spheres that circle in 3D depth (in front & behind!)
+     */
+    spheres[0].cx       = 50 + ((FAST_SIN((unsigned char)(gFrameCount * 2)) * 10) >> 7);
+    spheres[0].cy       = 48 - (bounce >> 1) - (gBassPulse >> 2);
+    spheres[0].cz       = 100;
+    spheres[0].radiusPx = 22 + (gBassPulse >> 3) + (gAudioEnergy >> 4);
+    if (spheres[0].radiusPx > 30) spheres[0].radiusPx = 30;
+    spheres[0].scaleInv = (short)((30 * 64) / spheres[0].radiusPx);
+    spheres[0].spin     = (unsigned char)(gFrameCount * 3);
+
+    spheres[1].cx       = 50 + ((FAST_COS(orbitAng) * 34) >> 7);
+    spheres[1].cz       = 100 + ((FAST_SIN(orbitAng) * 40) >> 7);
+    spheres[1].cy       = 46 + ((FAST_SIN((unsigned char)(orbitAng * 2)) * 12) >> 7) - (gEqBands[2] >> 3);
+    spheres[1].radiusPx = (spheres[1].cz < 100) ? 16 : 11;
+    spheres[1].scaleInv = (short)((30 * 64) / spheres[1].radiusPx);
+    spheres[1].spin     = (unsigned char)(-gFrameCount * 5);
+
+    spheres[2].cx       = 50 - ((FAST_COS(orbitAng) * 34) >> 7);
+    spheres[2].cz       = 100 - ((FAST_SIN(orbitAng) * 40) >> 7);
+    spheres[2].cy       = 46 - ((FAST_SIN((unsigned char)(orbitAng * 2)) * 12) >> 7) - (gEqBands[11] >> 3);
+    spheres[2].radiusPx = (spheres[2].cz < 100) ? 16 : 11;
+    spheres[2].scaleInv = (short)((30 * 64) / spheres[2].radiusPx);
+    spheres[2].spin     = (unsigned char)(gFrameCount * 6);
+
+    /* Depth-sort the 3 spheres back-to-front (largest cz drawn first, smallest cz on top) */
+    for (i = 0; i < 2; i++) {
+        short j;
+        for (j = i + 1; j < 3; j++) {
+            if (spheres[i].cz < spheres[j].cz) {
+                ChromeSphere tmp = spheres[i];
+                spheres[i] = spheres[j];
+                spheres[j] = tmp;
+            }
+        }
+    }
+
+    for (y = 0; y < VIZ_H; y++) {
+        unsigned char *dstRow = bits + y * VIZ_ROWBYTES;
+        short yh = y >> 1; /* 0..99 */
+        short ry = y & 7;
+
+        /* 1. Render Background: Audio Horizon Sky (yh < 56) or 3D Ray-Cast Checkered Floor (yh >= 56) */
+        if (yh < 56) {
+            /* Starry / Nebula gradient sky with EQ horizon aurora at yh = 36..55 */
+            short skyBase = (yh > 36) ? ((yh - 36) * 2) : (yh >> 2);
+            for (x = 0; x < 100; x++) {
+                short b = (x * 16) / 100;
+                short eqGlow = (yh > (54 - (gEqBands[b] >> 2))) ? 26 : 0;
+                short val = skyBase + eqGlow;
+                if (val > 52) val = 52;
+                rowVals[x] = (unsigned char)val;
+            }
+        } else {
+            /* Ray-cast 3D perspective floor plane: z = 512 / (yh - 54) */
+            short dyFloor = yh - 54;
+            short zDist   = (short)(640 / dyFloor);
+            short zTile   = (zDist + floorScrollZ) >> 4;
+            short fogAtten = (dyFloor > 32) ? 64 : (dyFloor * 2);
+
+            for (x = 0; x < 100; x++) {
+                short xWorld = (((x - 50) * zDist) >> 5) + floorScrollX;
+                short xTile  = xWorld >> 4;
+                Boolean isWhiteTile = ((xTile ^ zTile) & 1) != 0;
+                short shade = isWhiteTile ? ((50 * fogAtten) >> 6) : ((12 * fogAtten) >> 6);
+
+                /* Cast soft 3D drop shadows under each of the 3 spheres onto the floor! */
+                for (i = 0; i < 3; i++) {
+                    short sdx = abs(x - spheres[i].cx);
+                    short sdy = abs(yh - (72 + ((120 - spheres[i].cz) >> 2)));
+                    if (sdx < spheres[i].radiusPx && sdy < (spheres[i].radiusPx >> 1)) {
+                        shade >>= 2; /* Deep shadow umbra */
+                    }
+                }
+                rowVals[x] = (unsigned char)shade;
+            }
+        }
+
+        /* 2. Ray-Cast & Environment-Map the 3 3D Chrome Boing Spheres (Back-to-Front) */
+        for (i = 0; i < 3; i++) {
+            short dy = yh - spheres[i].cy;
+            short rPx = spheres[i].radiusPx;
+            if (abs(dy) < rPx) {
+                short lutY = 32 + ((dy * spheres[i].scaleInv) >> 6);
+                if ((unsigned short)lutY < SPHERE_LUT_DIM) {
+                    short rowOff = lutY * SPHERE_LUT_DIM;
+                    short xStart = spheres[i].cx - rPx;
+                    short xEnd   = spheres[i].cx + rPx;
+                    if (xStart < 0) xStart = 0;
+                    if (xEnd > 99)  xEnd = 99;
+
+                    for (x = xStart; x <= xEnd; x++) {
+                        short dx = x - spheres[i].cx;
+                        short lutX = 32 + ((dx * spheres[i].scaleInv) >> 6);
+                        if ((unsigned short)lutX < SPHERE_LUT_DIM) {
+                            short sIdx = rowOff + lutX;
+                            signed char nz = gSphereNz[sIdx];
+                            if (nz > 0) {
+                                /* Environment-mapped reflection + Amiga Boing facets + Phong Specular! */
+                                unsigned char u = (unsigned char)(gSphereEnvU[sIdx] + spheres[i].spin);
+                                unsigned char v = (unsigned char)(gSphereEnvV[sIdx] + (gBassPulse >> 1));
+                                Boolean boingFacet = (((u >> 5) ^ (v >> 5)) & 1) != 0;
+                                short chromeRefl = gPlasmaLut[(unsigned char)(u * 2 + v + floorScrollZ)] >> 1;
+                                short shade = (boingFacet ? 26 : 6) + chromeRefl + gSphereSpec[sIdx];
+                                /* Crisp Fresnel rim highlight around the sphere silhouette */
+                                if (nz < 18) shade += 18;
+                                if (shade > 63) shade = 63;
+                                rowVals[x] = (unsigned char)shade;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        AsmPackDitherRow25(
+            dstRow,
+            rowVals,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+        dstRow[25] = 0xFF;
+    }
+}
+
+/* ============================================================================
+ * MODE 7 (40 MHz 68040 Showcase #2):
+ * Comanche / Demoscene 3D Voxel Space Audio Canyon Flyover +
+ * Banking Camera + Directional Sunlight Shading + Pulsing Synthwave Sun
+ * ============================================================================ */
+
+static void RenderMode7VoxelCanyon(unsigned char *bits)
+{
+    short x, y, b, step;
+    unsigned char yBuf[100];      /* Front-to-back vertical horizon occlusion buffer (0..99) */
+    unsigned char *colBuf = gVoxelScreen; /* 100x100 64-shade heap screen buffer (never on 68k stack!) */
+    short bankTilt;
+    short camX, camY, camHeight;
+    short sunRadius;
+
+    if (!gVoxelHeight || !gVoxelShade || !colBuf) {
+        RenderMode4Tunnel(bits);
+        return;
+    }
+
+    /*
+     * 1. Stream the latest 16-band EQ spectrum into the advancing Voxel Horizon Row!
+     *    Creates a living 3D mountain canyon where every beat and melody note becomes
+     *    physical 3D terrain you fly over!
+     */
+    gVoxelWriteRow = (unsigned char)((gVoxelWriteRow + 1) & (VOXEL_MAP_DIM - 1));
+    {
+        unsigned char *hRow = gVoxelHeight + gVoxelWriteRow * VOXEL_MAP_DIM;
+        unsigned char *sRow = gVoxelShade  + gVoxelWriteRow * VOXEL_MAP_DIM;
+        unsigned char prevRowIdx = (unsigned char)((gVoxelWriteRow - 1) & (VOXEL_MAP_DIM - 1));
+        const unsigned char *prevH = gVoxelHeight + prevRowIdx * VOXEL_MAP_DIM;
+
+        for (x = 0; x < VOXEL_MAP_DIM; x++) {
+            /* Canyon profile: lower valley in center (x=22..42), high EQ peaks on ridges & walls */
+            short distCenter = abs(x - 32);
+            short bandIdx = (x >> 2) & 15;
+            short eqH = (gEqBands[bandIdx] * 3) >> 3;
+            short ridge = (distCenter > 8) ? ((distCenter - 8) * 2) : 0;
+            short wave  = (FAST_SIN((unsigned char)(x * 11 + gFrameCount * 7)) + 128) >> 4;
+            short h = (prevH[x] + ridge + eqH + wave) >> 1;
+            short slope;
+            short shade;
+
+            if (h > 62) h = 62;
+            hRow[x] = (unsigned char)h;
+
+            /* Directional sunlight shading from left-to-right terrain slope + altitude */
+            slope = (x > 0) ? (h - hRow[x - 1]) : 0;
+            shade = 18 + (h >> 1) + (slope * 3);
+            /* Add glowing grid lines every 4 voxel cells */
+            if ((x & 3) == 0 || (gVoxelWriteRow & 3) == 0) {
+                shade += 12;
+            }
+            if (shade < 4)  shade = 4;
+            if (shade > 63) shade = 63;
+            sRow[x] = (unsigned char)shade;
+        }
+    }
+
+    /* 2. Fill Sky & Pulsing Synthwave Sun into `colBuf` (100x100) */
+    sunRadius = 16 + (gBassPulse >> 3);
+    for (y = 0; y < 100; y++) {
+        unsigned char *row = colBuf + y * 100;
+        short dySun = y - 24;
+        short skyShade = (y < 48) ? (y >> 2) : 12;
+        memset(row, skyShade, 100);
+
+        /* Draw sliced Synthwave Sun centered at (50, 24) */
+        if (abs(dySun) < sunRadius && (dySun < 2 || (y & 1) == 0)) {
+            for (x = 50 - sunRadius; x <= 50 + sunRadius; x++) {
+                short dxSun = x - 50;
+                if (dxSun * dxSun + dySun * dySun < sunRadius * sunRadius) {
+                    row[x] = (unsigned char)(58 - (dySun > 0 ? dySun : 0));
+                }
+            }
+        }
+    }
+
+    /* 3. Front-to-Back Voxel Ray-Casting with Camera Banking & Occlusion Culling */
+    for (x = 0; x < 100; x++) {
+        yBuf[x] = 100;
+    }
+
+    camX      = (32 << 8) + (FAST_SIN((unsigned char)(gFrameCount * 2)) * 18);
+    camY      = ((short)gVoxelWriteRow - 34) & (VOXEL_MAP_DIM - 1);
+    camHeight = 52 + (gBassPulse >> 2);
+    bankTilt  = (FAST_COS((unsigned char)(gFrameCount * 3)) * 14) >> 7; /* Camera roll */
+
+    for (step = 3; step < 34; step++) {
+        short mapY = (camY + step) & (VOXEL_MAP_DIM - 1);
+        const unsigned char *hRow = gVoxelHeight + mapY * VOXEL_MAP_DIM;
+        const unsigned char *sRow = gVoxelShade  + mapY * VOXEL_MAP_DIM;
+        short invZ = (short)(280 / step);
+        short fog  = (step > 20) ? (36 - step) : 16; /* Distance fog attenuation */
+
+        /* Perspective horizontal step across the 100 screen columns */
+        long worldX = ((long)camX - ((long)step * 38L)) & 0xFFFF;
+        long stepX  = ((long)step * 76L) / 100L;
+
+        for (x = 0; x < 100; x++) {
+            short mx = (short)((worldX >> 8) & (VOXEL_MAP_DIM - 1));
+            short terrainH = hRow[mx];
+            short tiltOffset = ((x - 50) * bankTilt) >> 5;
+            short projY = 44 + tiltOffset + (short)(((long)(camHeight - terrainH) * invZ) >> 5);
+
+            if (projY < 0) projY = 0;
+            if (projY < yBuf[x]) {
+                unsigned char shade = (unsigned char)(((unsigned short)sRow[mx] * (unsigned short)fog) >> 4);
+                unsigned char *pCol = colBuf + projY * 100 + x;
+                short span = yBuf[x] - projY;
+                while (span-- > 0) {
+                    *pCol = shade;
+                    pCol += 100;
+                }
+                yBuf[x] = (unsigned char)projY;
+            }
+            worldX += stepX;
+        }
+    }
+
+    /* 4. Pack 100x100 Voxel Frame into 200x200 64-Shade 8x8 Bayer Dithered Output */
+    for (y = 0; y < VIZ_H; y++) {
+        unsigned char *dstRow = bits + y * VIZ_ROWBYTES;
+        const unsigned char *srcRow = colBuf + (y >> 1) * 100;
+        short ry = y & 7;
+        AsmPackDitherRow25(
+            dstRow,
+            srcRow,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+        dstRow[25] = 0xFF;
+    }
+
+    /* 5. Cockpit HUD Waveform Overlay in Top Sky */
+    for (b = 0; b < 16; b++) {
+        short hx = 22 + b * 10;
+        short hh = gEqBands[b] >> 3;
+        DrawLineWhite(bits, hx, 12, hx, 12 - hh);
     }
 }
 
@@ -1069,7 +1512,7 @@ void VisualizerRenderFrame(
 
     AnalyzeAudioFrame(isPlaying, progressMs, trackId);
 
-    switch (mode & 3) {
+    switch (mode % VIZ_MODE_COUNT) {
         case VIZ_MODE_EQ:
             RenderMode1WinampEQ(outBits);
             break;
@@ -1080,8 +1523,17 @@ void VisualizerRenderFrame(
             RenderMode3Demoscene3D(outBits);
             break;
         case VIZ_MODE_TUNNEL:
-        default:
             RenderMode4Tunnel(outBits);
+            break;
+        case VIZ_MODE_FIRE_SCOPE:
+            RenderMode5FireScope(outBits);
+            break;
+        case VIZ_MODE_CHROME_SPHERES:
+            RenderMode6ChromeSpheres(outBits);
+            break;
+        case VIZ_MODE_VOXEL_CANYON:
+        default:
+            RenderMode7VoxelCanyon(outBits);
             break;
     }
 }
