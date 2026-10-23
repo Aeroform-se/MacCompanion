@@ -25,8 +25,8 @@ Spotify for your 68k Mac. Supports local playback and multitasking so you can ge
    ```bash
    docker-compose up -d --build
    ```
-2. **Link Spotify:** Open `http://<your-server-ip>:6800` in a modern browser, enter your Spotify Client ID, and click **Connect with Spotify**.
-3. **Run SpotiMac on your Mac:** Mount `SpotiMac.dsk` (or open `SpotiMac.bin` with StuffIt Expander) and launch **SpotiMac** — it will find your MacCompanion server automatically.
+2. **Configure your settings:** Open `http://<your-server-ip>:6800` in a modern browser to configure your client services.
+3. **Compute!** Simply drag, drop and launch any client app you wish to use from the .dsk or .bin release files.
 
 ---
 
@@ -39,3 +39,10 @@ This project is built with the help of the following open-source projects and li
 - **[librespot](https://github.com/librespot-org/librespot)** — Open-source Spotify Connect client library ([MIT License](https://github.com/librespot-org/librespot/blob/dev/LICENSE))
 - **[FFmpeg](https://ffmpeg.org/)** — Multimedia framework used for real-time 8-bit PCM downsampling ([LGPLv2.1+ / GPLv2+](https://ffmpeg.org/legal.html))
 - **[Retro68](https://github.com/autc04/Retro68)** by Wolfgang Thaller — GCC-based cross-compiler toolchain targeting 68k and PowerPC Macintosh systems ([GPLv3 with GCC Runtime Library Exception](https://github.com/autc04/Retro68/blob/master/COPYING))
+
+---
+
+## Support
+
+**Do you love MacCompanion?**
+Support this project by [Buying me a coffe](https://buymeacoffee.com/MacCompanion)
