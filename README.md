@@ -14,8 +14,8 @@ Spotify for your 68k Mac. Supports local playback and multitasking so you can ge
 
 **Requirements:**
 - **Account:** Spotify Premium + a free Spotify Developer Client ID.
-- **Minimum:** Macintosh Plus (2 MB+ RAM) or SE / Classic (68000 @ 8 MHz), System 6.0.8, Sound Manager 2.0+, and **MacTCP** (via Ethernet card, LocalTalk-to-Ethernet bridge, or BlueSCSI v2 Wi-Fi).
-- **Recommended:** Macintosh SE/30, Classic II, LC, Mac II, or Quadra (68020/030/040) — or Basilisk II — running System 7.1 or 7.5.5. Supports both 9" Compact Mac (`512×342`) and larger displays.
+- **Minimum:** Macintosh Plus or SE / Classic, System 6.0.8 with a network connection.
+- **Recommended:** Macintosh SE/30, Classic II, LC, Mac II, or Quadra running System 7.1-7.5.5. Supports 9" Compact Mac (512×342) and larger displays.
 
 ---
 
@@ -26,7 +26,7 @@ Spotify for your 68k Mac. Supports local playback and multitasking so you can ge
    docker-compose up -d --build
    ```
 2. **Link Spotify:** Open `http://<your-server-ip>:6800` in a modern browser, enter your Spotify Client ID, and click **Connect with Spotify**.
-3. **Run SpotiMac on your Mac:** Mount `SpotiMac.dsk` (or decode `SpotiMac.bin` with StuffIt Expander) and launch **SpotiMac** — it will find your MacCompanion server automatically.
+3. **Run SpotiMac on your Mac:** Mount `SpotiMac.dsk` (or open `SpotiMac.bin` with StuffIt Expander) and launch **SpotiMac** — it will find your MacCompanion server automatically.
 
 ---
 
