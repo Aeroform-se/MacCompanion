@@ -29,4 +29,21 @@ void VisualizerRenderFrame(
     unsigned char *outBits /* 5200-byte buffer (200x200, rowBytes=26) */
 );
 
+/*
+ * Fullscreen Visualizer Mode (Option B):
+ * Renders internally at 256x161 (32 bytes/row) and 2x pixel-doubles via a 68000 assembly
+ * LUT expander to fill the entire 512x322 offscreen canvas (64 bytes/row * 322 rows),
+ * leaving the standard 200x200 VisualizerRenderFrame path 100% untouched.
+ */
+void VisualizerRenderFrameFullscreen(
+    short mode,
+    Boolean isPlaying,
+    long progressMs,
+    const char *trackId,
+    unsigned char *outCanvasBits /* 512x322 buffer (rowBytes=64, 20608 bytes) */
+);
+
+/* Fast (<0.4ms) re-expansion of the latest 256x161 fullscreen frame into 512x322 without re-running shaders */
+void VisualizerBlitFullscreenCached(unsigned char *outCanvasBits);
+
 #endif /* VISUALIZER_H */

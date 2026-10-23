@@ -2047,3 +2047,1039 @@ void VisualizerRenderFrame(
             break;
     }
 }
+
+/* ============================================================================
+ * FULLSCREEN VISUALIZER ENGINE (256x161 Internal -> 2x LUT Doubled to 512x322)
+ * Keeps the standard 200x200 VisualizerRenderFrame path 100% untouched.
+ * ============================================================================ */
+
+#define FS_W            256
+#define FS_H            161
+#define FS_ROWBYTES     32   /* 256 / 8 = 32 bytes per row (exact, zero padding) */
+#define FS_BITMAP_BYTES 5152 /* 32 * 161 */
+
+static unsigned char  gFsBits[FS_BITMAP_BYTES];
+static unsigned short gByteDoubleLut[256];
+static Boolean        gFsLutInited = false;
+
+static void InitFullscreenLut(void)
+{
+    short b, i;
+    if (gFsLutInited) return;
+    for (b = 0; b < 256; b++) {
+        unsigned short w = 0;
+        for (i = 0; i < 8; i++) {
+            if (b & (1 << i)) {
+                w |= (unsigned short)(3U << (i * 2));
+            }
+        }
+        gByteDoubleLut[b] = w;
+    }
+    gFsLutInited = true;
+}
+
+/* 68000 assembly clear of 5,152-byte (256x161) buffer to 0xFF (pure black) */
+static void AsmClearBlack5152(unsigned char *dst)
+{
+    unsigned long fill = 0xFFFFFFFFUL;
+    short loops = (5152 / 16) - 1; /* 322 iterations of 16 bytes = 5152 bytes */
+    __asm__ volatile (
+        "1:\n\t"
+        "move.l %2, (%0)+\n\t"
+        "move.l %2, (%0)+\n\t"
+        "move.l %2, (%0)+\n\t"
+        "move.l %2, (%0)+\n\t"
+        "dbf %1, 1b\n\t"
+        : "+a"(dst), "+d"(loops)
+        : "d"(fill)
+        : "cc", "memory"
+    );
+}
+
+/*
+ * 68000 assembly converter: takes 128 brightness values (0..63) in `rowVals[0..127]`
+ * and packs them into 32 single-pixel-dithered bytes (256 horizontal pixels) in `dstRow`.
+ */
+static void AsmPackDitherRow32(
+    unsigned char *dstRow,
+    const unsigned char *rowVals,
+    const unsigned char *p0,
+    const unsigned char *p1,
+    const unsigned char *p2,
+    const unsigned char *p3
+)
+{
+    short count = 32 - 1; /* 32 bytes = 256 pixels */
+    long d0_tmp, d1_tmp;
+    __asm__ volatile (
+        "1:\n\t"
+        "moveq #0, %2\n\t"
+        "move.b (%1)+, %2\n\t"
+        "move.b 0(%5, %2.l), %3\n\t"
+
+        "moveq #0, %2\n\t"
+        "move.b (%1)+, %2\n\t"
+        "or.b 0(%6, %2.l), %3\n\t"
+
+        "moveq #0, %2\n\t"
+        "move.b (%1)+, %2\n\t"
+        "or.b 0(%7, %2.l), %3\n\t"
+
+        "moveq #0, %2\n\t"
+        "move.b (%1)+, %2\n\t"
+        "or.b 0(%8, %2.l), %3\n\t"
+
+        "move.b %3, (%0)+\n\t"
+        "dbf %4, 1b\n\t"
+        : "+a"(dstRow), "+a"(rowVals), "=&d"(d0_tmp), "=&d"(d1_tmp), "+d"(count)
+        : "a"(p0), "a"(p1), "a"(p2), "a"(p3)
+        : "cc", "memory"
+    );
+}
+
+/*
+ * 68000 assembly 2x LUT pixel-doubler:
+ * Expands 1 row of 32 bytes (256 pixels) into two 64-byte scanlines (512 pixels)
+ * using the 256-entry 16-bit lookup table `gByteDoubleLut`.
+ */
+static void AsmExpandRow32To64x2(
+    const unsigned char *srcRow,
+    unsigned char *dstRow0,
+    unsigned char *dstRow1,
+    const unsigned short *lut
+)
+{
+    short count = 8 - 1; /* 8 iterations * 4 bytes = 32 input bytes -> 64 output bytes x 2 rows */
+    long d0_tmp, d1_tmp;
+    __asm__ volatile (
+        "1:\n\t"
+        "moveq #0, %3\n\t"
+        "move.b (%0)+, %3\n\t"
+        "add.w %3, %3\n\t"
+        "move.w 0(%6, %3.l), %4\n\t"
+        "move.w %4, (%1)+\n\t"
+        "move.w %4, (%2)+\n\t"
+
+        "moveq #0, %3\n\t"
+        "move.b (%0)+, %3\n\t"
+        "add.w %3, %3\n\t"
+        "move.w 0(%6, %3.l), %4\n\t"
+        "move.w %4, (%1)+\n\t"
+        "move.w %4, (%2)+\n\t"
+
+        "moveq #0, %3\n\t"
+        "move.b (%0)+, %3\n\t"
+        "add.w %3, %3\n\t"
+        "move.w 0(%6, %3.l), %4\n\t"
+        "move.w %4, (%1)+\n\t"
+        "move.w %4, (%2)+\n\t"
+
+        "moveq #0, %3\n\t"
+        "move.b (%0)+, %3\n\t"
+        "add.w %3, %3\n\t"
+        "move.w 0(%6, %3.l), %4\n\t"
+        "move.w %4, (%1)+\n\t"
+        "move.w %4, (%2)+\n\t"
+
+        "dbf %5, 1b\n\t"
+        : "+a"(srcRow), "+a"(dstRow0), "+a"(dstRow1), "=&d"(d0_tmp), "=&d"(d1_tmp), "+d"(count)
+        : "a"(lut)
+        : "cc", "memory"
+    );
+}
+
+static inline void SetPixelWhiteFS(unsigned char *bits, short x, short y)
+{
+    if ((unsigned short)x < FS_W && (unsigned short)y < FS_H) {
+        bits[y * FS_ROWBYTES + (x >> 3)] &= (unsigned char)~(0x80 >> (x & 7));
+    }
+}
+
+static inline void SetPixelBlackFS(unsigned char *bits, short x, short y)
+{
+    if ((unsigned short)x < FS_W && (unsigned short)y < FS_H) {
+        bits[y * FS_ROWBYTES + (x >> 3)] |= (unsigned char)(0x80 >> (x & 7));
+    }
+}
+
+static void DrawLineWhiteFS(unsigned char *bits, short x0, short y0, short x1, short y1)
+{
+    short dx = abs(x1 - x0), sx = (x0 < x1) ? 1 : -1;
+    short dy = -abs(y1 - y0), sy = (y0 < y1) ? 1 : -1;
+    short err = dx + dy, e2;
+
+    for (;;) {
+        if ((unsigned short)x0 < FS_W && (unsigned short)y0 < FS_H) {
+            bits[y0 * FS_ROWBYTES + (x0 >> 3)] &= (unsigned char)~(0x80 >> (x0 & 7));
+        }
+        if (x0 == x1 && y0 == y1) break;
+        e2 = err << 1;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+static void FillSpanPatternFS(unsigned char *rowPtr, short xLeft, short xRight, unsigned char patByte)
+{
+    short bLeft, bRight, b;
+    unsigned char leftMask, rightMask;
+
+    if (xLeft < 0) xLeft = 0;
+    if (xRight >= FS_W) xRight = FS_W - 1;
+    if (xLeft > xRight) return;
+
+    bLeft  = xLeft >> 3;
+    bRight = xRight >> 3;
+    leftMask  = (unsigned char)(0xFF >> (xLeft & 7));
+    rightMask = (unsigned char)(0xFF << (7 - (xRight & 7)));
+
+    if (bLeft == bRight) {
+        unsigned char mask = leftMask & rightMask;
+        rowPtr[bLeft] = (rowPtr[bLeft] & ~mask) | (patByte & mask);
+    } else {
+        rowPtr[bLeft] = (rowPtr[bLeft] & ~leftMask) | (patByte & leftMask);
+        for (b = bLeft + 1; b < bRight; b++) {
+            rowPtr[b] = patByte;
+        }
+        rowPtr[bRight] = (rowPtr[bRight] & ~rightMask) | (patByte & rightMask);
+    }
+}
+
+/* Fullscreen Mode 1: Widescreen 256x161 Winamp 16-Band Spectrum + Scope + Reflection */
+static void RenderMode1WinampEQ_FS(unsigned char *bits)
+{
+    short x, y, b;
+    short prevY = 22 + gWave200[0];
+
+    AsmClearBlack5152(bits);
+
+    for (x = 6; x < 250; x += 4) {
+        SetPixelWhiteFS(bits, x, 22);
+    }
+
+    for (x = 4; x < 252; x++) {
+        short wIdx = (short)(((long)x * 199L) >> 8);
+        short curY = 22 + gWave200[wIdx];
+        short yMin = (curY < prevY) ? curY : prevY;
+        short yMax = (curY > prevY) ? curY : prevY;
+
+        if (yMin < 3)  yMin = 3;
+        if (yMax > 42) yMax = 42;
+
+        for (y = yMin; y <= yMax; y++) {
+            SetPixelWhiteFS(bits, x, y);
+        }
+        if ((x & 1) == (short)(gFrameCount & 1)) {
+            if (yMin > 4)  SetPixelWhiteFS(bits, x, yMin - 2);
+            if (yMax < 41) SetPixelWhiteFS(bits, x, yMax + 2);
+        }
+        prevY = curY;
+    }
+
+    for (b = 0; b < 16; b++) {
+        short x0    = 9 + b * 15;
+        short x1    = x0 + 11;
+        short barH  = (gEqBands[b] * 3) >> 2;
+        short peakH = (gEqPeaks[b] * 3) >> 2;
+        short peakY = 122 - peakH;
+        short dy;
+
+        for (dy = 0; dy < barH; dy++) {
+            unsigned char *rowPtr;
+            unsigned char pat;
+            if ((dy % 3) == 2) continue;
+
+            y = 122 - dy;
+            if (y < 44) break;
+            rowPtr = bits + y * FS_ROWBYTES;
+
+            if (dy >= 50) {
+                pat = 0x00;
+            } else if (dy >= 32) {
+                pat = (y & 1) ? 0x22 : 0x88;
+            } else if (dy >= 14) {
+                pat = (y & 1) ? 0x55 : 0xAA;
+            } else {
+                pat = (y & 1) ? 0x77 : 0xDD;
+            }
+
+            FillSpanPatternFS(rowPtr, x0, x1, pat);
+            SetPixelWhiteFS(bits, x0, y);
+            SetPixelWhiteFS(bits, x1, y);
+        }
+
+        if (peakY >= 44 && peakY <= 121) {
+            FillSpanPatternFS(bits + peakY * FS_ROWBYTES, x0, x1, 0x00);
+            if (peakY > 44) {
+                FillSpanPatternFS(bits + (peakY - 1) * FS_ROWBYTES, x0, x1, 0x00);
+            }
+        }
+
+        {
+            short refH = (barH * 2) / 5;
+            if (refH > 30) refH = 30;
+            for (dy = 1; dy <= refH; dy += 2) {
+                short ry = 125 + dy;
+                short ripple = FAST_SIN((unsigned char)(dy * 14 + gFrameCount * 12 + b * 19)) >> 6;
+                short rx0 = x0 + ripple;
+                short rx1 = x1 + ripple;
+                unsigned char refPat = (dy > (refH >> 1)) ? 0xEE : ((ry & 1) ? 0xAA : 0xCC);
+                if (ry < 158) {
+                    FillSpanPatternFS(bits + ry * FS_ROWBYTES, rx0, rx1, refPat);
+                }
+            }
+        }
+    }
+
+    FillSpanPatternFS(bits + 124 * FS_ROWBYTES, 2, 253, 0x55);
+}
+
+/* Fullscreen Mode 2: Widescreen 256x161 64-Shade Dithered Plasma & Metaballs */
+static void RenderMode2Plasma_FS(unsigned char *bits)
+{
+    short x, y;
+    unsigned char rowVals[128];
+    unsigned char waveX[128];
+    unsigned char t1 = (unsigned char)(gFrameCount * 3);
+    unsigned char t2 = (unsigned char)(gFrameCount * 5);
+    unsigned char t3 = (unsigned char)(gFrameCount * 2);
+    unsigned char beatShift = (unsigned char)(gBassPulse << 1);
+
+    short bx0 = 64 + ((FAST_SIN(t1) * 40) >> 7);
+    short by0 = 80 + ((FAST_COS(t2) * 52) >> 7);
+    short bx1 = 64 + ((FAST_COS((unsigned char)(t3 + 80)) * 42) >> 7);
+    short by1 = 80 + ((FAST_SIN((unsigned char)(t1 + 140)) * 54) >> 7);
+
+    for (x = 0; x < 128; x++) {
+        waveX[x] = (unsigned char)(
+            (FAST_SIN((unsigned char)(x * 4 + t1)) >> 1) +
+            (FAST_COS((unsigned char)(x * 7 - t2)) >> 2)
+        );
+    }
+
+    for (y = 0; y < FS_H; y++) {
+        unsigned char *dstRow = bits + y * FS_ROWBYTES;
+        short yHalf = y >> 1;
+        short dy0 = abs(yHalf - (by0 >> 1));
+        short dy1 = abs(yHalf - (by1 >> 1));
+        const unsigned char *rRow0;
+        const unsigned char *rRow1;
+        unsigned char wy = (unsigned char)(
+            (FAST_SIN((unsigned char)(y * 3 - t2)) >> 1) +
+            (FAST_COS((unsigned char)(y * 5 + t3)) >> 2) +
+            beatShift
+        );
+        short ry = y & 7;
+
+        if (dy0 > 99) dy0 = 99;
+        if (dy1 > 99) dy1 = 99;
+        rRow0 = gRadialDist ? (gRadialDist + dy0 * 100) : NULL;
+        rRow1 = gRadialDist ? (gRadialDist + dy1 * 100) : NULL;
+
+        if (rRow0 && rRow1) {
+            for (x = 0; x < 128; x++) {
+                short dx0 = abs(x - bx0);
+                short dx1 = abs(x - bx1);
+                if (dx0 > 99) dx0 = 99;
+                if (dx1 > 99) dx1 = 99;
+                rowVals[x] = gPlasmaLut[(unsigned char)(waveX[x] + wy + rRow0[dx0] - rRow1[dx1])];
+            }
+        } else {
+            for (x = 0; x < 128; x++) {
+                rowVals[x] = gPlasmaLut[(unsigned char)(waveX[x] + wy + x * 3)];
+            }
+        }
+
+        AsmPackDitherRow32(
+            dstRow,
+            rowVals,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+    }
+
+    {
+        short prevY = 80 + (gWave200[0] * 2);
+        for (x = 0; x < FS_W; x++) {
+            short wIdx = (short)(((long)x * 199L) >> 8);
+            short curY = 80 + (gWave200[wIdx] * 2);
+            short yMin = (curY < prevY) ? curY : prevY;
+            short yMax = (curY > prevY) ? curY : prevY;
+            if (yMin < 4)   yMin = 4;
+            if (yMax > 156) yMax = 156;
+
+            SetPixelBlackFS(bits, x, yMin - 2);
+            SetPixelBlackFS(bits, x, yMin - 1);
+            SetPixelBlackFS(bits, x, yMax + 1);
+            SetPixelBlackFS(bits, x, yMax + 2);
+
+            for (y = yMin; y <= yMax + 1; y++) {
+                SetPixelWhiteFS(bits, x, y);
+            }
+            prevY = curY;
+        }
+    }
+}
+
+/* Fullscreen Mode 3: Widescreen 256x161 Audio-Reactive 3D Shaded Torus + Starfield */
+static void FillQuadDitheredFS(unsigned char *bits, const FaceQuad2D *q)
+{
+    short yMin = FS_H - 1, yMax = 0;
+    short i, y;
+
+    for (i = 0; i < 4; i++) {
+        if (q->sy[i] < yMin) yMin = q->sy[i];
+        if (q->sy[i] > yMax) yMax = q->sy[i];
+    }
+    if (yMin < 1)        yMin = 1;
+    if (yMax > FS_H - 2) yMax = FS_H - 2;
+    if (yMin > yMax) return;
+
+    for (y = yMin; y <= yMax; y++) {
+        short xLeft = FS_W, xRight = -1;
+        for (i = 0; i < 4; i++) {
+            short j = (i + 1) & 3;
+            short y0 = q->sy[i], y1 = q->sy[j];
+            short x0 = q->sx[i], x1 = q->sx[j];
+            if ((y0 <= y && y1 >= y) || (y1 <= y && y0 >= y)) {
+                if (y0 == y1) {
+                    if (x0 < xLeft)  xLeft  = x0;
+                    if (x0 > xRight) xRight = x0;
+                    if (x1 < xLeft)  xLeft  = x1;
+                    if (x1 > xRight) xRight = x1;
+                } else {
+                    short xInt = x0 + (short)(((long)(y - y0) * (x1 - x0)) / (y1 - y0));
+                    if (xInt < xLeft)  xLeft  = xInt;
+                    if (xInt > xRight) xRight = xInt;
+                }
+            }
+        }
+        if (xLeft <= xRight) {
+            unsigned char pat = gShadeByte[q->shade][y & 3];
+            FillSpanPatternFS(bits + y * FS_ROWBYTES, xLeft, xRight, pat);
+        }
+    }
+}
+
+static void RenderMode3Demoscene3D_FS(unsigned char *bits)
+{
+    short i, r, s;
+    short vz[TORUS_VERTS];
+    short px[TORUS_VERTS], py[TORUS_VERTS];
+    short visCount = 0;
+    short sxA, cxA, syA, cyA, szA, czA;
+    short starSpeed;
+    short targetZoom, fovScale, baseMajorR;
+
+    AsmClearBlack5152(bits);
+
+    starSpeed = 2 + (gAudioEnergy >> 3) + (gBassPulse >> 2);
+    for (i = 0; i < NUM_STARS; i++) {
+        short projX, projY;
+        gStars[i].z -= starSpeed;
+        if (gStars[i].z <= 16) {
+            gStars[i].z += 220;
+        }
+        projX = 128 + (short)(((long)gStars[i].x * 150L) / gStars[i].z);
+        projY = 72  + (short)(((long)gStars[i].y * 120L) / gStars[i].z);
+        if ((unsigned short)projX < FS_W && (unsigned short)projY < 130) {
+            SetPixelWhiteFS(bits, projX, projY);
+            if (gStars[i].z < 120 && projX + 1 < FS_W) {
+                SetPixelWhiteFS(bits, projX + 1, projY);
+            }
+        }
+    }
+
+    {
+        short scroll = (short)((gFrameCount * (1 + (gAudioEnergy >> 4))) & 7);
+        FillSpanPatternFS(bits + 132 * FS_ROWBYTES, 0, 255, (gBassPulse > 24) ? 0x00 : 0x55);
+        for (i = 1; i <= 5; i++) {
+            short gy = 132 + ((i * i * 22 + scroll * i) >> 2);
+            if (gy > 132 && gy < 160) {
+                FillSpanPatternFS(bits + gy * FS_ROWBYTES, 0, 255, (i >= 4) ? 0x55 : 0xAA);
+            }
+        }
+        for (i = -6; i <= 6; i++) {
+            short sway = (FAST_SIN((unsigned char)(gFrameCount * 3)) * gBassPulse) >> 9;
+            short topX = 128 + i * 12 + sway;
+            short botX = 128 + i * 38 + (sway * 2);
+            DrawLineWhiteFS(bits, topX, 132, botX, 160);
+        }
+    }
+
+    if (gBeatHit) {
+        gAngleX = (unsigned char)(gAngleX + 2);
+        gAngleY = (unsigned char)(gAngleY + 3);
+    }
+    gAngleX = (unsigned char)(gAngleX + 1 + (gBassPulse >> 4));
+    gAngleY = (unsigned char)(gAngleY + 2 + (gAudioEnergy >> 5));
+    gAngleZ = (unsigned char)(gAngleZ + 1 + (gTreblePulse >> 5));
+    gTorusTwistPhase += 3 + (gAudioEnergy >> 4);
+
+    targetZoom = (gBassPulse >> 1) + (gAudioEnergy >> 2);
+    gTorusZoomSmooth = (gTorusZoomSmooth * 3 + targetZoom) >> 2;
+
+    fovScale   = 155 + (gTorusZoomSmooth >> 1);
+    baseMajorR = 38 + (gTorusZoomSmooth >> 3);
+
+    sxA = FAST_SIN(gAngleX); cxA = FAST_COS(gAngleX);
+    syA = FAST_SIN(gAngleY); cyA = FAST_COS(gAngleY);
+    szA = FAST_SIN(gAngleZ); czA = FAST_COS(gAngleZ);
+
+    for (r = 0; r < TORUS_RINGS; r++) {
+        unsigned char uAngle = (unsigned char)(r * (256 / TORUS_RINGS));
+        short cosU = FAST_COS(uAngle);
+        short sinU = FAST_SIN(uAngle);
+        short bandLow  = gEqBands[r * 2];
+        short bandHigh = gEqBands[r * 2 + 1];
+        short minorR = 12 + (bandLow >> 2);
+        short ringMajorR = baseMajorR + ((bandHigh - 24) >> 3);
+        short ringWaveZ  = ((bandLow - 20) * FAST_SIN((unsigned char)(uAngle * 2 + gTorusTwistPhase))) >> 8;
+
+        for (s = 0; s < TORUS_SEGS; s++) {
+            short idx = r * TORUS_SEGS + s;
+            unsigned char vAngle = (unsigned char)(s * (256 / TORUS_SEGS) + (bandHigh >> 2));
+            short cosV = FAST_COS(vAngle);
+            short sinV = FAST_SIN(vAngle);
+            short segBump = (s & 1) ? (gBassPulse >> 4) : -(gTreblePulse >> 5);
+            short curMinor = minorR + segBump;
+            short ringR = ringMajorR + ((curMinor * cosV) >> 7);
+
+            short mx = (ringR * cosU) >> 7;
+            short my = (ringR * sinU) >> 7;
+            short mz = ((curMinor * sinV) >> 7) + ringWaveZ;
+
+            short y1 = (my * cxA - mz * sxA) >> 7;
+            short z1 = (my * sxA + mz * cxA) >> 7;
+
+            short x2 = (mx * cyA + z1 * syA) >> 7;
+            short z2 = (-mx * syA + z1 * cyA) >> 7;
+
+            short x3 = (x2 * czA - y1 * szA) >> 7;
+            short y3 = (x2 * szA + y1 * czA) >> 7;
+
+            short dist = z2 + 220;
+            if (dist < 70) dist = 70;
+
+            vz[idx] = z2;
+            px[idx] = 128 + (short)(((long)x3 * (long)fovScale) / dist);
+            py[idx] = 66  + (short)(((long)y3 * (long)fovScale) / dist);
+        }
+    }
+
+    for (r = 0; r < TORUS_RINGS; r++) {
+        short nextR = (r + 1) & (TORUS_RINGS - 1);
+        for (s = 0; s < TORUS_SEGS; s++) {
+            short nextS = (s + 1) % TORUS_SEGS;
+            short i0 = r * TORUS_SEGS + s;
+            short i1 = nextR * TORUS_SEGS + s;
+            short i2 = nextR * TORUS_SEGS + nextS;
+            short i3 = r * TORUS_SEGS + nextS;
+
+            long dx1 = px[i1] - px[i0];
+            long dy1 = py[i1] - py[i0];
+            long dx2 = px[i3] - px[i0];
+            long dy2 = py[i3] - py[i0];
+            long crossZ = dx1 * dy2 - dy1 * dx2;
+
+            if (crossZ > 0) {
+                FaceQuad2D *f = &gVisibleFaces[visCount++];
+                short shade;
+                f->sx[0] = px[i0]; f->sy[0] = py[i0];
+                f->sx[1] = px[i1]; f->sy[1] = py[i1];
+                f->sx[2] = px[i2]; f->sy[2] = py[i2];
+                f->sx[3] = px[i3]; f->sy[3] = py[i3];
+                f->avgZ  = (vz[i0] + vz[i1] + vz[i2] + vz[i3]) >> 2;
+
+                shade = (short)(crossZ >> 4) + ((44 - f->avgZ) >> 3) + (gBassPulse >> 3);
+                if (shade < 2)  shade = 2;
+                if (shade > 16) shade = 16;
+                f->shade = (unsigned char)shade;
+            }
+        }
+    }
+
+    for (i = 1; i < visCount; i++) {
+        FaceQuad2D key = gVisibleFaces[i];
+        short j = i - 1;
+        while (j >= 0 && gVisibleFaces[j].avgZ < key.avgZ) {
+            gVisibleFaces[j + 1] = gVisibleFaces[j];
+            j--;
+        }
+        gVisibleFaces[j + 1] = key;
+    }
+
+    for (i = 0; i < visCount; i++) {
+        FaceQuad2D *f = &gVisibleFaces[i];
+        FillQuadDitheredFS(bits, f);
+        DrawLineWhiteFS(bits, f->sx[0], f->sy[0], f->sx[1], f->sy[1]);
+        DrawLineWhiteFS(bits, f->sx[1], f->sy[1], f->sx[2], f->sy[2]);
+        DrawLineWhiteFS(bits, f->sx[2], f->sy[2], f->sx[3], f->sy[3]);
+        DrawLineWhiteFS(bits, f->sx[3], f->sy[3], f->sx[0], f->sy[0]);
+    }
+}
+
+/* Fullscreen Mode 4: Widescreen 256x161 Wormhole Vortex Tunnel + Radial Burst */
+static void RenderMode4Tunnel_FS(unsigned char *bits)
+{
+    short x, y, b;
+    unsigned char rowVals[128];
+    unsigned char eqMod[16];
+    unsigned char depthScroll = (unsigned char)(gFrameCount * 5 + (gBassPulse >> 1));
+    unsigned char twistScroll = (unsigned char)(gFrameCount * 2);
+
+    short camOx = 16 + ((FAST_SIN((unsigned char)(gFrameCount * 2)) * 12) >> 7);
+    short camOy = 24 + ((FAST_COS((unsigned char)(gFrameCount * 3)) * 12) >> 7);
+
+    if (!gTunnelAngle || !gTunnelDepth || !gTunnelFog) {
+        RenderMode2Plasma_FS(bits);
+        return;
+    }
+
+    for (b = 0; b < 16; b++) {
+        eqMod[b] = (unsigned char)(gEqBands[b] >> 1);
+    }
+
+    for (y = 0; y < FS_H; y++) {
+        unsigned char *dstRow = bits + y * FS_ROWBYTES;
+        short lutY = (y >> 1) + camOy;
+        unsigned short rowBase = (unsigned short)(lutY * TUNNEL_LUT_W);
+        const unsigned char *angPtr = gTunnelAngle + rowBase;
+        const unsigned char *depPtr = gTunnelDepth + rowBase;
+        const unsigned char *fogPtr = gTunnelFog   + rowBase;
+        short ry = y & 7;
+
+        for (x = 0; x < 128; x++) {
+            short lutX = ((x * 3) >> 2) + camOx;
+            unsigned char ang = angPtr[lutX];
+            unsigned char dep = depPtr[lutX];
+            unsigned char fog = fogPtr[lutX];
+            unsigned char bandVal = eqMod[(ang >> 4) & 15];
+
+            unsigned char u = (unsigned char)(ang * 2 + (dep >> 1) + twistScroll);
+            unsigned char v = (unsigned char)(dep + depthScroll - bandVal);
+            unsigned char tex = gPlasmaLut[(unsigned char)(u ^ v)] + (bandVal >> 1);
+            unsigned short lit = (unsigned short)(tex * fog) >> 6;
+
+            if (lit > 63) lit = 63;
+            rowVals[x] = (unsigned char)lit;
+        }
+
+        AsmPackDitherRow32(
+            dstRow,
+            rowVals,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+    }
+
+    {
+        short eyeX = ((64 - camOx) * 8) / 3;
+        short eyeY = (64 - camOy) * 2;
+        for (b = 0; b < 16; b++) {
+            unsigned char rayAng = (unsigned char)(b * 16 + gFrameCount * 2);
+            short cs = FAST_COS(rayAng);
+            short sn = FAST_SIN(rayAng);
+            short rInner = 10;
+            short rOuter = 16 + (gEqBands[b] >> 1) + (gBassPulse >> 2);
+            short x0 = eyeX + ((rInner * cs) >> 7);
+            short y0 = eyeY + ((rInner * sn) >> 7);
+            short x1 = eyeX + ((rOuter * cs) >> 7);
+            short y1 = eyeY + ((rOuter * sn) >> 7);
+            DrawLineWhiteFS(bits, x0, y0, x1, y1);
+        }
+    }
+}
+
+/* Fullscreen Mode 5: Widescreen 256x161 Cellular Fire & 3D Harmonograph */
+static void RenderMode5FireScope_FS(unsigned char *bits)
+{
+    short x, y, i;
+    unsigned char rowVals[128];
+
+    if (!gFireBuf) {
+        RenderMode2Plasma_FS(bits);
+        return;
+    }
+
+    for (x = 1; x < 99; x++) {
+        short b = (x * 16) / 100;
+        short coal = (gEqBands[b] * 5) >> 3;
+        short noise = (FAST_SIN((unsigned char)(x * 29 + gFrameCount * 17)) + 128) >> 4;
+        short val = coal + noise + (gBassPulse >> 1);
+        if (val > 63) val = 63;
+        gFireBuf[99 * 100 + x]  = (unsigned char)val;
+        gFireBuf[100 * 100 + x] = (unsigned char)val;
+    }
+
+    {
+        unsigned char pA = (unsigned char)(gFrameCount * 4);
+        unsigned char pB = (unsigned char)(gFrameCount * 7 + 40);
+        short radX = 28 + (gBassPulse >> 2);
+        short radY = 22 + (gAudioEnergy >> 3);
+
+        for (i = 0; i < 64; i++) {
+            unsigned char t = (unsigned char)(i * 4);
+            short waveMod = gWave200[(i * 3) % VIZ_W];
+            short lx = 50 + ((FAST_SIN((unsigned char)(t * 2 + pA)) * radX) >> 7) + (waveMod >> 2);
+            short ly = 54 + ((FAST_COS((unsigned char)(t * 3 + pB)) * radY) >> 7) + (waveMod >> 2);
+            if (lx >= 2 && lx < 98 && ly >= 4 && ly < 96) {
+                gFireBuf[ly * 100 + lx]       = 63;
+                gFireBuf[ly * 100 + lx + 1]   = 58;
+                gFireBuf[(ly + 1) * 100 + lx] = 58;
+            }
+        }
+    }
+
+    for (y = 0; y < 99; y++) {
+        AsmDiffuseFireRow98(gFireBuf + y * 100 + 1, gFireBuf + (y + 1) * 100);
+    }
+
+    for (y = 0; y < FS_H; y++) {
+        unsigned char *dstRow = bits + y * FS_ROWBYTES;
+        short fireY = (short)(((long)y * 98L) / FS_H);
+        const unsigned char *fireRow = gFireBuf + fireY * 100;
+        short ry = y & 7;
+
+        for (x = 0; x < 128; x++) {
+            rowVals[x] = fireRow[(x * 98) >> 7];
+        }
+
+        AsmPackDitherRow32(
+            dstRow,
+            rowVals,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+    }
+}
+
+/* Fullscreen Mode 6: Widescreen 256x161 Ray-Cast 3D Chrome Boing Spheres */
+static void RenderMode6ChromeSpheres_FS(unsigned char *bits)
+{
+    short x, y, i;
+    unsigned char rowVals[128];
+    ChromeSphere spheres[3];
+    short bounce = abs(FAST_SIN((unsigned char)(gFrameCount * 5))) >> 2;
+    short floorScrollZ = (short)(gFrameCount * 4 + (gAudioEnergy >> 3));
+    short floorScrollX = (FAST_SIN((unsigned char)(gFrameCount * 2)) * 28) >> 7;
+    unsigned char orbitAng = (unsigned char)(gFrameCount * 4);
+
+    if (!gSphereNz || !gSphereEnvU || !gSphereEnvV || !gSphereSpec) {
+        RenderMode3Demoscene3D_FS(bits);
+        return;
+    }
+
+    spheres[0].cx       = 64 + ((FAST_SIN((unsigned char)(gFrameCount * 2)) * 12) >> 7);
+    spheres[0].cy       = 44 - (bounce >> 1) - (gBassPulse >> 2);
+    spheres[0].cz       = 100;
+    spheres[0].radiusPx = 22 + (gBassPulse >> 3) + (gAudioEnergy >> 4);
+    if (spheres[0].radiusPx > 30) spheres[0].radiusPx = 30;
+    spheres[0].scaleInv = (short)((30 * 64) / spheres[0].radiusPx);
+    spheres[0].spin     = (unsigned char)(gFrameCount * 3);
+
+    spheres[1].cx       = 64 + ((FAST_COS(orbitAng) * 44) >> 7);
+    spheres[1].cz       = 100 + ((FAST_SIN(orbitAng) * 40) >> 7);
+    spheres[1].cy       = 42 + ((FAST_SIN((unsigned char)(orbitAng * 2)) * 12) >> 7) - (gEqBands[2] >> 3);
+    spheres[1].radiusPx = (spheres[1].cz < 100) ? 16 : 11;
+    spheres[1].scaleInv = (short)((30 * 64) / spheres[1].radiusPx);
+    spheres[1].spin     = (unsigned char)(-gFrameCount * 5);
+
+    spheres[2].cx       = 64 - ((FAST_COS(orbitAng) * 44) >> 7);
+    spheres[2].cz       = 100 - ((FAST_SIN(orbitAng) * 40) >> 7);
+    spheres[2].cy       = 42 - ((FAST_SIN((unsigned char)(orbitAng * 2)) * 12) >> 7) - (gEqBands[11] >> 3);
+    spheres[2].radiusPx = (spheres[2].cz < 100) ? 16 : 11;
+    spheres[2].scaleInv = (short)((30 * 64) / spheres[2].radiusPx);
+    spheres[2].spin     = (unsigned char)(gFrameCount * 6);
+
+    for (i = 0; i < 2; i++) {
+        short j;
+        for (j = i + 1; j < 3; j++) {
+            if (spheres[i].cz < spheres[j].cz) {
+                ChromeSphere tmp = spheres[i];
+                spheres[i] = spheres[j];
+                spheres[j] = tmp;
+            }
+        }
+    }
+
+    for (y = 0; y < FS_H; y++) {
+        unsigned char *dstRow = bits + y * FS_ROWBYTES;
+        short yh = y >> 1; /* 0..80 */
+        short ry = y & 7;
+
+        if (yh < 46) {
+            short skyBase = (yh > 28) ? ((yh - 28) * 2) : (yh >> 2);
+            for (x = 0; x < 128; x++) {
+                short b = x >> 3;
+                short eqGlow = (yh > (44 - (gEqBands[b] >> 2))) ? 26 : 0;
+                short val = skyBase + eqGlow;
+                if (val > 52) val = 52;
+                rowVals[x] = (unsigned char)val;
+            }
+        } else {
+            short dyFloor = yh - 44;
+            short zDist   = (short)(560 / dyFloor);
+            short zTile   = (zDist + floorScrollZ) >> 4;
+            short fogAtten = (dyFloor > 32) ? 64 : (dyFloor * 2);
+
+            for (x = 0; x < 128; x++) {
+                short xWorld = (((x - 64) * zDist) >> 5) + floorScrollX;
+                short xTile  = xWorld >> 4;
+                Boolean isWhiteTile = ((xTile ^ zTile) & 1) != 0;
+                short shade = isWhiteTile ? ((50 * fogAtten) >> 6) : ((12 * fogAtten) >> 6);
+
+                for (i = 0; i < 3; i++) {
+                    short sdx = abs(x - spheres[i].cx);
+                    short sdy = abs(yh - (60 + ((120 - spheres[i].cz) >> 2)));
+                    if (sdx < spheres[i].radiusPx && sdy < (spheres[i].radiusPx >> 1)) {
+                        shade >>= 2;
+                    }
+                }
+                rowVals[x] = (unsigned char)shade;
+            }
+        }
+
+        for (i = 0; i < 3; i++) {
+            short dy = yh - spheres[i].cy;
+            short rPx = spheres[i].radiusPx;
+            if (abs(dy) < rPx) {
+                short lutY = 32 + ((dy * spheres[i].scaleInv) >> 6);
+                if ((unsigned short)lutY < SPHERE_LUT_DIM) {
+                    short rowOff = lutY * SPHERE_LUT_DIM;
+                    short xStart = spheres[i].cx - rPx;
+                    short xEnd   = spheres[i].cx + rPx;
+                    if (xStart < 0)   xStart = 0;
+                    if (xEnd > 127)   xEnd = 127;
+
+                    for (x = xStart; x <= xEnd; x++) {
+                        short dx = x - spheres[i].cx;
+                        short lutX = 32 + ((dx * spheres[i].scaleInv) >> 6);
+                        if ((unsigned short)lutX < SPHERE_LUT_DIM) {
+                            short sIdx = rowOff + lutX;
+                            signed char nz = gSphereNz[sIdx];
+                            if (nz > 0) {
+                                unsigned char u = (unsigned char)(gSphereEnvU[sIdx] + spheres[i].spin);
+                                unsigned char v = (unsigned char)(gSphereEnvV[sIdx] + (gBassPulse >> 1));
+                                Boolean boingFacet = (((u >> 5) ^ (v >> 5)) & 1) != 0;
+                                short chromeRefl = gPlasmaLut[(unsigned char)(u * 2 + v + floorScrollZ)] >> 1;
+                                short shade = (boingFacet ? 26 : 6) + chromeRefl + gSphereSpec[sIdx];
+                                if (nz < 18) shade += 18;
+                                if (shade > 63) shade = 63;
+                                rowVals[x] = (unsigned char)shade;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        AsmPackDitherRow32(
+            dstRow,
+            rowVals,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+    }
+}
+
+/* Fullscreen Mode 7: Widescreen 256x161 3D Voxel Space Canyon + Synthwave Sun */
+static void RenderMode7VoxelCanyon_FS(unsigned char *bits)
+{
+    short x, y, b, step;
+    unsigned char yBuf[100];
+    unsigned char rowVals[128];
+    unsigned char *colBuf = gFireBuf;
+    short bankTilt;
+    short camX, camY, camHeight;
+    short sunRadius;
+
+    if (!gVoxelHeight || !gVoxelShade || !colBuf) {
+        RenderMode4Tunnel_FS(bits);
+        return;
+    }
+
+    gVoxelWriteRow = (unsigned char)((gVoxelWriteRow + 1) & (VOXEL_MAP_DIM - 1));
+    {
+        unsigned char *hRow = gVoxelHeight + gVoxelWriteRow * VOXEL_MAP_DIM;
+        unsigned char *sRow = gVoxelShade  + gVoxelWriteRow * VOXEL_MAP_DIM;
+        unsigned char prevRowIdx = (unsigned char)((gVoxelWriteRow - 1) & (VOXEL_MAP_DIM - 1));
+        const unsigned char *prevH = gVoxelHeight + prevRowIdx * VOXEL_MAP_DIM;
+
+        for (x = 0; x < VOXEL_MAP_DIM; x++) {
+            short distCenter = abs(x - 32);
+            short bandIdx = (x >> 2) & 15;
+            short eqH = (gEqBands[bandIdx] * 3) >> 3;
+            short ridge = (distCenter > 8) ? ((distCenter - 8) * 2) : 0;
+            short wave  = (FAST_SIN((unsigned char)(x * 11 + gFrameCount * 7)) + 128) >> 4;
+            short h = (prevH[x] + ridge + eqH + wave) >> 1;
+            short slope;
+            short shade;
+
+            if (h > 62) h = 62;
+            hRow[x] = (unsigned char)h;
+
+            slope = (x > 0) ? (h - hRow[x - 1]) : 0;
+            shade = 18 + (h >> 1) + (slope * 3);
+            if ((x & 3) == 0 || (gVoxelWriteRow & 3) == 0) {
+                shade += 12;
+            }
+            if (shade < 4)  shade = 4;
+            if (shade > 63) shade = 63;
+            sRow[x] = (unsigned char)shade;
+        }
+    }
+
+    sunRadius = 16 + (gBassPulse >> 3);
+    for (y = 0; y < 100; y++) {
+        unsigned char *row = colBuf + y * 100;
+        short dySun = y - 24;
+        short skyShade = (y < 48) ? (y >> 2) : 12;
+        memset(row, skyShade, 100);
+
+        if (abs(dySun) < sunRadius && (dySun < 2 || (y & 1) == 0)) {
+            for (x = 50 - sunRadius; x <= 50 + sunRadius; x++) {
+                short dxSun = x - 50;
+                if (dxSun * dxSun + dySun * dySun < sunRadius * sunRadius) {
+                    row[x] = (unsigned char)(58 - (dySun > 0 ? dySun : 0));
+                }
+            }
+        }
+    }
+
+    for (x = 0; x < 100; x++) {
+        yBuf[x] = 100;
+    }
+
+    camX      = (32 << 8) + (FAST_SIN((unsigned char)(gFrameCount * 2)) * 18);
+    camY      = ((short)gVoxelWriteRow - 34) & (VOXEL_MAP_DIM - 1);
+    camHeight = 52 + (gBassPulse >> 2);
+    bankTilt  = (FAST_COS((unsigned char)(gFrameCount * 3)) * 14) >> 7;
+
+    for (step = 3; step < 34; step++) {
+        short mapY = (camY + step) & (VOXEL_MAP_DIM - 1);
+        const unsigned char *hRow = gVoxelHeight + mapY * VOXEL_MAP_DIM;
+        const unsigned char *sRow = gVoxelShade  + mapY * VOXEL_MAP_DIM;
+        short invZ = (short)(280 / step);
+        short fog  = (step > 20) ? (36 - step) : 16;
+
+        long worldX = ((long)camX - ((long)step * 38L)) & 0xFFFF;
+        long stepX  = ((long)step * 76L) / 100L;
+
+        for (x = 0; x < 100; x++) {
+            short mx = (short)((worldX >> 8) & (VOXEL_MAP_DIM - 1));
+            short terrainH = hRow[mx];
+            short tiltOffset = ((x - 50) * bankTilt) >> 5;
+            short projY = 44 + tiltOffset + (short)(((long)(camHeight - terrainH) * invZ) >> 5);
+
+            if (projY < 0) projY = 0;
+            if (projY < yBuf[x]) {
+                unsigned char shade = (unsigned char)(((unsigned short)sRow[mx] * (unsigned short)fog) >> 4);
+                unsigned char *pCol = colBuf + projY * 100 + x;
+                short span = yBuf[x] - projY;
+                while (span-- > 0) {
+                    *pCol = shade;
+                    pCol += 100;
+                }
+                yBuf[x] = (unsigned char)projY;
+            }
+            worldX += stepX;
+        }
+    }
+
+    for (y = 0; y < FS_H; y++) {
+        unsigned char *dstRow = bits + y * FS_ROWBYTES;
+        short srcY = (short)(((long)y * 99L) / FS_H);
+        const unsigned char *srcRow = colBuf + srcY * 100;
+        short ry = y & 7;
+
+        for (x = 0; x < 128; x++) {
+            rowVals[x] = srcRow[(x * 99) >> 7];
+        }
+
+        AsmPackDitherRow32(
+            dstRow,
+            rowVals,
+            gDitherP0[ry],
+            gDitherP1[ry],
+            gDitherP2[ry],
+            gDitherP3[ry]
+        );
+    }
+
+    for (b = 0; b < 16; b++) {
+        short hx = 36 + b * 12;
+        short hh = gEqBands[b] >> 3;
+        DrawLineWhiteFS(bits, hx, 12, hx, 12 - hh);
+    }
+}
+
+void VisualizerBlitFullscreenCached(unsigned char *outCanvasBits)
+{
+    short y;
+    if (!outCanvasBits) return;
+    if (!gFsLutInited) {
+        InitFullscreenLut();
+    }
+    for (y = 0; y < FS_H; y++) {
+        const unsigned char *srcRow = gFsBits + y * FS_ROWBYTES;
+        unsigned char *dstRow0 = outCanvasBits + (y * 2) * 64;
+        unsigned char *dstRow1 = dstRow0 + 64;
+        AsmExpandRow32To64x2(srcRow, dstRow0, dstRow1, gByteDoubleLut);
+    }
+}
+
+void VisualizerRenderFrameFullscreen(
+    short mode,
+    Boolean isPlaying,
+    long progressMs,
+    const char *trackId,
+    unsigned char *outCanvasBits
+)
+{
+    if (!gVizInited) {
+        VisualizerInit();
+    }
+    if (!gFsLutInited) {
+        InitFullscreenLut();
+    }
+
+    AnalyzeAudioFrame(isPlaying, progressMs, trackId);
+
+    switch (mode % VIZ_MODE_COUNT) {
+        case VIZ_MODE_EQ:
+            RenderMode1WinampEQ_FS(gFsBits);
+            break;
+        case VIZ_MODE_PLASMA:
+            RenderMode2Plasma_FS(gFsBits);
+            break;
+        case VIZ_MODE_3D:
+            RenderMode3Demoscene3D_FS(gFsBits);
+            break;
+        case VIZ_MODE_TUNNEL:
+            RenderMode4Tunnel_FS(gFsBits);
+            break;
+        case VIZ_MODE_FIRE_SCOPE:
+            RenderMode5FireScope_FS(gFsBits);
+            break;
+        case VIZ_MODE_CHROME_SPHERES:
+            RenderMode6ChromeSpheres_FS(gFsBits);
+            break;
+        case VIZ_MODE_VOXEL_CANYON:
+        default:
+            RenderMode7VoxelCanyon_FS(gFsBits);
+            break;
+    }
+
+    if (outCanvasBits) {
+        VisualizerBlitFullscreenCached(outCanvasBits);
+    }
+}

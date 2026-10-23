@@ -101,6 +101,8 @@
 
 #define MINI_W              192
 #define MINI_H              68
+#define MINI_FS_X           160  /* (512 - 192) / 2: centered horizontally in fullscreen */
+#define MINI_FS_Y           239  /* 322 - 15 - 68: 15px from bottom in fullscreen */
 
 /* ============================================================================
  * Data Structures
@@ -229,6 +231,8 @@ static char            gLoadedArtTrackId[64] = "";
 static unsigned char   gCurrentArtworkBits[5200];
 static unsigned char   gVisualizerBits[5200];
 static Boolean         gVisualizerOpen       = false;
+static Boolean         gVizFullscreen        = false;
+static Boolean         gVizHover             = false;
 static short           gVizMode              = VIZ_MODE_EQ;
 static unsigned long   gLastVizTicks         = 0;
 static unsigned short  gAudioSampleRateHz    = 22255;
@@ -995,23 +999,19 @@ static void DragWindowWithAudio(WindowPtr win, Point startGlobalPt)
     }
 }
 
-static void RenderMiniPlayer(void)
+static void DrawVizFullscreenHoverIcon(short x, short y, Boolean isShrinkIcon)
 {
-    GrafPtr savePort;
+    BlitIcon1Bit(gIconVizFullscreenMask, 12, 12, x, y, srcBic);
+    BlitIcon1Bit(isShrinkIcon ? gIconVizFullscreenDown : gIconVizFullscreen, 12, 12, x, y, srcOr);
+}
+
+static void DrawMiniPlayerContentsAt(short ox, short oy, Boolean drawOverlayFrame)
+{
     Rect r, barRect;
     char titleLine[160];
     char truncTitle[36];
     char timeLine[32];
     short len, w, startX;
-
-    if (!gMiniWindow) return;
-    GetPort(&savePort);
-
-    if (gOffscreenReady) {
-        SetPort(&gOffscreenPort);
-    } else {
-        SetPort(gMiniWindow);
-    }
 
     TextFont(kFontIDMonaco);
     TextSize(9);
@@ -1019,11 +1019,21 @@ static void RenderMiniPlayer(void)
     TextMode(srcOr);
     PenNormal();
 
-    /* 1. Pure white interior (192x68); rounded corners are masked by MiniPlayerWDEF */
-    SetRect(&r, 0, 0, MINI_W, MINI_H);
-    EraseRect(&r);
+    /* 1. Interior & Frame (192x68) */
+    if (drawOverlayFrame) {
+        /* 1px white outer halo + 2px black rounded border + white interior on top of visualizer */
+        SetRect(&r, ox - 1, oy - 1, ox + MINI_W + 1, oy + MINI_H + 1);
+        EraseRoundRect(&r, 12, 12);
+        SetRect(&r, ox, oy, ox + MINI_W, oy + MINI_H);
+        FrameRoundRect(&r, 10, 10);
+        InsetRect(&r, 1, 1);
+        FrameRoundRect(&r, 8, 8);
+    } else {
+        SetRect(&r, ox, oy, ox + MINI_W, oy + MINI_H);
+        EraseRect(&r);
+    }
 
-    /* 2. Centered "Artist - Song title" at top (baseline y = 15) */
+    /* 2. Centered "Artist - Song title" at top (baseline y = oy + 15) */
     if (gNowPlaying.trackName[0] != '\0') {
         if (gNowPlaying.artistName[0] != '\0') {
             sprintf(titleLine, "%s - %s", gNowPlaying.artistName, gNowPlaying.trackName);
@@ -1046,37 +1056,37 @@ static void RenderMiniPlayer(void)
     w = TextWidth(truncTitle, 0, len);
     startX = (MINI_W / 2) - (w / 2);
     if (startX < 6) startX = 6;
-    MoveTo(startX, 15);
+    MoveTo(ox + startX, oy + 15);
     DrawText(truncTitle, 0, len);
 
-    /* 3. Transport Row (Mini-player.psd exact coordinates) */
+    /* 3. Transport Row (Mini-player.psd exact coordinates offset by ox, oy) */
     /* Like / Save Heart (11, 31) 11x10 + hover dots at (13, 44) */
     {
         Boolean hov = (gHoverBtn == BTN_LIKE) && (gPressedBtn != BTN_LIKE);
-        BlitIcon1Bit(gNowPlaying.isLiked ? gIconHeartFilled : gIconHeartOutline, 11, 10, 11, 31, srcCopy);
-        DrawButtonHoverDots(13, 44, hov);
+        BlitIcon1Bit(gNowPlaying.isLiked ? gIconHeartFilled : gIconHeartOutline, 11, 10, ox + 11, oy + 31, srcCopy);
+        DrawButtonHoverDots(ox + 13, oy + 44, hov);
     }
-    DrawVerticalDottedLine(33, 28, 42, false);
+    DrawVerticalDottedLine(ox + 33, oy + 28, oy + 42, false);
 
     /* Shuffle (43, 30) 14x11 + hover dots at (46, 44) */
     {
         Boolean hov = (gHoverBtn == BTN_SHUFFLE) && (gPressedBtn != BTN_SHUFFLE);
         if (strcmp(gNowPlaying.shuffleMode, "smart") == 0) {
-            BlitIcon1Bit(gIconShuffleSmart, 14, 11, 43, 30, srcCopy);
+            BlitIcon1Bit(gIconShuffleSmart, 14, 11, ox + 43, oy + 30, srcCopy);
         } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
-            BlitIcon1Bit(gIconShuffleOn, 14, 11, 43, 30, srcCopy);
+            BlitIcon1Bit(gIconShuffleOn, 14, 11, ox + 43, oy + 30, srcCopy);
         } else {
-            BlitIcon1Bit(gIconShuffleOff, 14, 11, 43, 30, srcCopy);
+            BlitIcon1Bit(gIconShuffleOff, 14, 11, ox + 43, oy + 30, srcCopy);
         }
-        DrawButtonHoverDots(46, 44, hov);
+        DrawButtonHoverDots(ox + 46, oy + 44, hov);
     }
 
     /* Previous (68, 31) 6x9 + hover dots at (67, 44) */
     {
         Boolean hov = (gHoverBtn == BTN_PREV) && (gPressedBtn != BTN_PREV);
         Boolean prs = (gPressedBtn == BTN_PREV);
-        BlitIcon1Bit(prs ? gIconPrevClick : gIconPrev, 6, 9, 68, 31, srcCopy);
-        DrawButtonHoverDots(67, 44, hov);
+        BlitIcon1Bit(prs ? gIconPrevClick : gIconPrev, 6, 9, ox + 68, oy + 31, srcCopy);
+        DrawButtonHoverDots(ox + 67, oy + 44, hov);
     }
 
     /* Play / Pause Circle (85, 24) 22x22 */
@@ -1085,47 +1095,44 @@ static void RenderMiniPlayer(void)
         Boolean prs = (gPressedBtn == BTN_PLAY);
         const unsigned char *iconBits;
         if (prs) {
-            /* Mouse down: gNowPlaying.isPlaying was toggled to next state; show next state in filled black circle */
             iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
         } else if (hov) {
-            /* Hover: show current state in inverted circle with black icon */
             iconBits = gNowPlaying.isPlaying ? gIconPauseCircleInv22 : gIconPlayCircleInv22;
         } else {
-            /* Normal: show current state in filled black circle */
             iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
         }
-        BlitIcon1Bit(iconBits, 22, 22, 85, 24, srcCopy);
+        BlitIcon1Bit(iconBits, 22, 22, ox + 85, oy + 24, srcCopy);
     }
 
     /* Next (118, 31) 6x9 + hover dots at (118, 44) */
     {
         Boolean hov = (gHoverBtn == BTN_NEXT) && (gPressedBtn != BTN_NEXT);
         Boolean prs = (gPressedBtn == BTN_NEXT);
-        BlitIcon1Bit(prs ? gIconNextClick : gIconNext, 6, 9, 118, 31, srcCopy);
-        DrawButtonHoverDots(118, 44, hov);
+        BlitIcon1Bit(prs ? gIconNextClick : gIconNext, 6, 9, ox + 118, oy + 31, srcCopy);
+        DrawButtonHoverDots(ox + 118, oy + 44, hov);
     }
 
     /* Repeat (135, 30) 13x12 + hover dots at (138, 44) */
     {
         Boolean hov = (gHoverBtn == BTN_REPEAT) && (gPressedBtn != BTN_REPEAT);
         if (strcmp(gNowPlaying.repeatState, "track") == 0) {
-            BlitIcon1Bit(gIconRepeatTrack, 13, 12, 135, 30, srcCopy);
+            BlitIcon1Bit(gIconRepeatTrack, 13, 12, ox + 135, oy + 30, srcCopy);
         } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
-            BlitIcon1Bit(gIconRepeatAll, 13, 12, 135, 30, srcCopy);
+            BlitIcon1Bit(gIconRepeatAll, 13, 12, ox + 135, oy + 30, srcCopy);
         } else {
-            BlitIcon1Bit(gIconRepeatOff, 13, 12, 135, 30, srcCopy);
+            BlitIcon1Bit(gIconRepeatOff, 13, 12, ox + 135, oy + 30, srcCopy);
         }
-        DrawButtonHoverDots(138, 44, hov);
+        DrawButtonHoverDots(ox + 138, oy + 44, hov);
     }
 
-    DrawVerticalDottedLine(158, 28, 42, false);
+    DrawVerticalDottedLine(ox + 158, oy + 28, oy + 42, false);
 
     /* Enlarge / Expand Button (169, 30) 11x11 + hover dots at (172, 44) */
     {
         Boolean hov = (gHoverBtn == BTN_COLLAPSE) && (gPressedBtn != BTN_COLLAPSE);
         Boolean prs = (gPressedBtn == BTN_COLLAPSE);
-        BlitIcon1Bit(prs ? gIconEnlargeClick : gIconEnlargeNormal, 11, 11, 169, 30, srcCopy);
-        DrawButtonHoverDots(172, 44, hov);
+        BlitIcon1Bit(prs ? gIconEnlargeClick : gIconEnlargeNormal, 11, 11, ox + 169, oy + 30, srcCopy);
+        DrawButtonHoverDots(ox + 172, oy + 44, hov);
     }
 
     /* 4. Bottom Row: Timecode (12, 59) + Volume Icon (112, 52) + Volume Bar (126, 54)-(181, 57) */
@@ -1135,11 +1142,11 @@ static void RenderMiniPlayer(void)
         gNowPlaying.progressMmSs[0] ? gNowPlaying.progressMmSs : "00:00",
         gNowPlaying.durationMmSs[0] ? gNowPlaying.durationMmSs : "00:00"
     );
-    MoveTo(12, 59);
+    MoveTo(ox + 12, oy + 59);
     DrawCStringTruncated(timeLine, 11);
 
-    BlitIcon1Bit(gIconVolume, 10, 7, 112, 52, srcCopy);
-    SetRect(&barRect, 126, 54, 181, 57);
+    BlitIcon1Bit(gIconVolume, 10, 7, ox + 112, oy + 52, srcCopy);
+    SetRect(&barRect, ox + 126, oy + 54, ox + 181, oy + 57);
     FrameRect(&barRect);
     {
         short vol = gNowPlaying.volumePct;
@@ -1150,14 +1157,30 @@ static void RenderMiniPlayer(void)
         if (vol > 100) vol = 100;
         fillW = (short)((vol * 55L) / 100L);
         if (fillW > 0) {
-            SetRect(&r, 126, 54, 126 + fillW, 57);
+            SetRect(&r, ox + 126, oy + 54, ox + 126 + fillW, oy + 57);
             PaintRect(&r);
         }
-        dotX = 126 + fillW;
-        if (dotX < 130) dotX = 130;
-        if (dotX > 177) dotX = 177;
-        DrawSliderDot(dotX, 55, hollowDot);
+        dotX = ox + 126 + fillW;
+        if (dotX < ox + 130) dotX = ox + 130;
+        if (dotX > ox + 177) dotX = ox + 177;
+        DrawSliderDot(dotX, oy + 55, hollowDot);
     }
+}
+
+static void RenderMiniPlayer(void)
+{
+    GrafPtr savePort;
+
+    if (!gMiniWindow) return;
+    GetPort(&savePort);
+
+    if (gOffscreenReady) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMiniWindow);
+    }
+
+    DrawMiniPlayerContentsAt(0, 0, false);
 
     if (gOffscreenReady) {
         Rect miniRect;
@@ -1241,6 +1264,33 @@ static void RenderCanvas(void)
      * -------------------------------------------------------------------- */
     if (gConnState != CONN_READY) {
         RenderPreConnectionScreen();
+        if (gOffscreenReady) {
+            Rect fullRect;
+            SetRect(&fullRect, 0, 0, CANVAS_W, CANVAS_H);
+            SetPort(gMainWindow);
+            CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &fullRect, &fullRect, srcCopy, NULL);
+        }
+        SetPort(savePort);
+        return;
+    }
+
+    /* --------------------------------------------------------------------
+     * 0B. Fullscreen Visualizer Mode (512x322 + Locked Mini-Player Overlay)
+     * -------------------------------------------------------------------- */
+    if (gVisualizerOpen && gVizFullscreen && !gSearchViewOpen && !gAboutModalOpen) {
+        if (gOffscreenReady && gOffscreenBits) {
+            VisualizerBlitFullscreenCached((unsigned char *)gOffscreenBits);
+        } else {
+            SetRect(&r, 0, 0, CANVAS_W, CANVAS_H);
+            PaintRect(&r);
+        }
+
+        /* Locked Mini-Player overlay centered at bottom (15px from bottom: x=160, y=239) */
+        DrawMiniPlayerContentsAt(MINI_FS_X, MINI_FS_Y, true);
+
+        /* Shrink-down icon in top-right corner (8px from top and 8px from right: 492, 8) */
+        DrawVizFullscreenHoverIcon(CANVAS_W - 8 - 12, 8, true);
+
         if (gOffscreenReady) {
             Rect fullRect;
             SetRect(&fullRect, 0, 0, CANVAS_W, CANVAS_H);
@@ -1344,6 +1394,10 @@ static void RenderCanvas(void)
         /* 2B. Center Column: 200x200 1-Bit Album Artwork or Visualizer at (156, 35)-(356, 235) */
         if (gVisualizerOpen) {
             BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
+            if (gVizHover) {
+                /* Fullscreen icon on hover: 8px down from top (35+8=43) and 8px in from right (356-8-12=336) */
+                DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
+            }
         } else {
             BlitIcon1Bit(gCurrentArtworkBits, 200, 200, 156, 35, srcCopy);
         }
@@ -1707,6 +1761,23 @@ static void RenderVisualizerFastFrame(void)
     if (!gVisualizerOpen || gMiniPlayerMode || gSearchViewOpen || gConnState != CONN_READY) return;
     if (!gMainWindow) return;
 
+    if (gSpeakerPopupOpen || gAboutModalOpen) {
+        RenderCanvas();
+        return;
+    }
+
+    if (gVizFullscreen) {
+        VisualizerRenderFrameFullscreen(
+            gVizMode,
+            gNowPlaying.isPlaying,
+            gNowPlaying.progressMs,
+            gNowPlaying.trackId,
+            NULL
+        );
+        RenderCanvas();
+        return;
+    }
+
     VisualizerRenderFrame(
         gVizMode,
         gNowPlaying.isPlaying,
@@ -1715,18 +1786,24 @@ static void RenderVisualizerFastFrame(void)
         gVisualizerBits
     );
 
-    if (gSpeakerPopupOpen || gAboutModalOpen) {
-        RenderCanvas();
-        return;
-    }
-
     GetPort(&savePort);
     if (gOffscreenReady) {
+        Rect vizRect;
         SetPort(&gOffscreenPort);
         BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
+        if (gVizHover) {
+            DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
+        }
+        SetRect(&vizRect, 156, 35, 356, 235);
+        SetPort(gMainWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &vizRect, &vizRect, srcCopy, NULL);
+    } else {
+        SetPort(gMainWindow);
+        BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
+        if (gVizHover) {
+            DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
+        }
     }
-    SetPort(gMainWindow);
-    BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
     SetPort(savePort);
 }
 
@@ -2798,6 +2875,7 @@ static void UpdateHoverState(void)
     Point pt;
     short newBtn;
     short newSearchRow = -1;
+    Boolean newVizHover = false;
     Boolean changed = false;
 
     if (gConnState != CONN_READY) return;
@@ -2825,7 +2903,27 @@ static void UpdateHoverState(void)
     SetPort(gMainWindow);
     GetMouse(&pt);
 
-    newBtn = HitTestTransportHover(pt);
+    if (gVisualizerOpen && gVizFullscreen && !gSearchViewOpen && !gAboutModalOpen) {
+        Point miniPt;
+        miniPt.h = pt.h - MINI_FS_X;
+        miniPt.v = pt.v - MINI_FS_Y;
+        if (miniPt.h >= 0 && miniPt.h < MINI_W && miniPt.v >= 0 && miniPt.v < MINI_H) {
+            newBtn = HitTestMiniPlayerHover(miniPt);
+        } else {
+            newBtn = BTN_NONE;
+        }
+        newVizHover = (pt.h >= 0 && pt.h < CANVAS_W && pt.v >= 0 && pt.v < CANVAS_H);
+    } else {
+        newBtn = HitTestTransportHover(pt);
+        if (gVisualizerOpen && !gSearchViewOpen && !gAboutModalOpen) {
+            newVizHover = (pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235);
+        }
+    }
+
+    if (newVizHover != gVizHover) {
+        gVizHover = newVizHover;
+        changed = true;
+    }
     if (newBtn != BTN_PLAY && gSuppressPlayHover) {
         gSuppressPlayHover = false;
         changed = true;
@@ -2970,6 +3068,132 @@ static void HandleCanvasClick(Point pt)
             }
             return;
         }
+        return;
+    }
+
+    /* 1B. Fullscreen Visualizer Mode (512x322 + Locked Mini-Player Overlay) */
+    if (gVisualizerOpen && gVizFullscreen && !gSearchViewOpen && !gAboutModalOpen) {
+        /* Top-right shrink icon (fullscreen-vis-down.png at 492, 8; 12x12) */
+        if (pt.h >= (CANVAS_W - 8 - 12 - 6) && pt.h <= (CANVAS_W - 2) &&
+            pt.v >= 2 && pt.v <= (8 + 12 + 6)) {
+            gVizFullscreen = false;
+            gHoverBtn      = BTN_NONE;
+            VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+            gLastVizTicks  = TickCount();
+            RenderCanvas();
+            return;
+        }
+
+        /* Locked Mini-Player Overlay (160, 239)-(352, 307) */
+        if (pt.h >= MINI_FS_X && pt.h < (MINI_FS_X + MINI_W) &&
+            pt.v >= MINI_FS_Y && pt.v < (MINI_FS_Y + MINI_H)) {
+            Point miniPt;
+            short btn;
+            miniPt.h = pt.h - MINI_FS_X;
+            miniPt.v = pt.v - MINI_FS_Y;
+            btn = HitTestMiniPlayerHover(miniPt);
+
+            if (btn == BTN_LIKE) {
+                if (gNowPlaying.trackId[0] != '\0') {
+                    gNowPlaying.isLiked = !gNowPlaying.isLiked;
+                    TrackTransportButtonPress(BTN_LIKE);
+                    NetHttpGet("/api/spotify/toggle-like", gHttpBuf, HTTP_BUF_SIZE);
+                    ResetPollTimersAfterAction();
+                }
+                return;
+            }
+            if (btn == BTN_SHUFFLE) {
+                char path[96];
+                if (strcmp(gNowPlaying.shuffleMode, "off") == 0) {
+                    SafeCopy(gNowPlaying.shuffleMode, "on", sizeof(gNowPlaying.shuffleMode));
+                } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
+                    SafeCopy(gNowPlaying.shuffleMode, "smart", sizeof(gNowPlaying.shuffleMode));
+                } else {
+                    SafeCopy(gNowPlaying.shuffleMode, "off", sizeof(gNowPlaying.shuffleMode));
+                }
+                TrackTransportButtonPress(BTN_SHUFFLE);
+                sprintf(path, "/api/spotify/shuffle?mode=%s", gNowPlaying.shuffleMode);
+                NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+                ResetPollTimersAfterAction();
+                return;
+            }
+            if (btn == BTN_PREV) {
+                gTimelineFrozen = true;
+                SetTimelinePosition(0);
+                TrackTransportButtonPress(BTN_PREV);
+                TriggerPreviousTrack();
+                return;
+            }
+            if (btn == BTN_PLAY) {
+                PerformTogglePlayPause(true);
+                return;
+            }
+            if (btn == BTN_NEXT) {
+                gTimelineFrozen = true;
+                SetTimelinePosition(0);
+                TrackTransportButtonPress(BTN_NEXT);
+                TriggerNextTrack();
+                return;
+            }
+            if (btn == BTN_REPEAT) {
+                char path[96];
+                if (strcmp(gNowPlaying.repeatState, "off") == 0) {
+                    SafeCopy(gNowPlaying.repeatState, "context", sizeof(gNowPlaying.repeatState));
+                } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
+                    SafeCopy(gNowPlaying.repeatState, "track", sizeof(gNowPlaying.repeatState));
+                } else {
+                    SafeCopy(gNowPlaying.repeatState, "off", sizeof(gNowPlaying.repeatState));
+                }
+                TrackTransportButtonPress(BTN_REPEAT);
+                sprintf(path, "/api/spotify/repeat?state=%s", gNowPlaying.repeatState);
+                NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+                ResetPollTimersAfterAction();
+                return;
+            }
+            if (btn == BTN_COLLAPSE) {
+                TrackTransportButtonPress(BTN_COLLAPSE);
+                gVizFullscreen = false;
+                gHoverBtn      = BTN_NONE;
+                VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+                gLastVizTicks  = TickCount();
+                RenderCanvas();
+                return;
+            }
+            if (btn == BTN_VOLUME) {
+                char path[96];
+                short vol = gNowPlaying.volumePct;
+                Point curPt = pt;
+                gPressedBtn = BTN_VOLUME;
+                do {
+                    vol = (short)(((long)(curPt.h - (MINI_FS_X + 126)) * 100L) / 55L);
+                    if (vol < 0) vol = 0;
+                    if (vol > 100) vol = 100;
+                    if (vol != gNowPlaying.volumePct) {
+                        gNowPlaying.volumePct = vol;
+                        RenderCanvas();
+                    }
+                    if (AudioStreamIsRunning()) {
+                        AudioStreamPump();
+                    }
+                    GetMouse(&curPt);
+                } while (StillDown());
+                gPressedBtn = BTN_NONE;
+                RenderCanvas();
+
+                sprintf(path, "/api/spotify/volume?volume_percent=%d", vol);
+                NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+                ResetPollTimersAfterAction();
+                return;
+            }
+            /* Position is locked in fullscreen mode: clicking empty space in Mini-Player does not drag */
+            return;
+        }
+
+        /* Clicking anywhere else on the fullscreen visualizer cycles presets (1..7) */
+        gVizMode = (gVizMode + 1) % VIZ_MODE_COUNT;
+        SaveServerPrefs(NetGetServerIP());
+        VisualizerRenderFrameFullscreen(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, NULL);
+        RenderCanvas();
         return;
     }
 
@@ -3196,8 +3420,18 @@ static void HandleCanvasClick(Point pt)
             }
             return;
         }
-        /* Clicking inside the 200x200 Visualizer box cycles to the next visualizer preset (1..7) */
+        /* Clicking inside the 200x200 Visualizer box: top-right icon enters fullscreen, else cycles preset (1..7) */
         if (gVisualizerOpen && pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235) {
+            /* Top-right fullscreen icon at (336, 43) 12x12 (8px down from 35, 8px in from 356) */
+            if (pt.h >= (356 - 8 - 12 - 4) && pt.h <= 354 &&
+                pt.v >= (35 + 8 - 4) && pt.v <= (35 + 8 + 12 + 4)) {
+                gVizFullscreen = true;
+                gHoverBtn      = BTN_NONE;
+                gLastVizTicks  = TickCount();
+                VisualizerRenderFrameFullscreen(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, NULL);
+                RenderCanvas();
+                return;
+            }
             gVizMode = (gVizMode + 1) % VIZ_MODE_COUNT;
             SaveServerPrefs(NetGetServerIP());
             VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
@@ -3480,6 +3714,14 @@ static void HandleKeyPress(char ch)
         RenderCanvas();
         return;
     }
+    if (ch == 27 && gVisualizerOpen && gVizFullscreen) {
+        gVizFullscreen = false;
+        gHoverBtn      = BTN_NONE;
+        VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+        gLastVizTicks  = TickCount();
+        RenderCanvas();
+        return;
+    }
 
     if (ch == ' ') {
         PerformTogglePlayPause(false);
@@ -3497,11 +3739,30 @@ static void HandleKeyPress(char ch)
         gVisualizerOpen = true;
         gVizMode = (short)(ch - '1');
         SaveServerPrefs(NetGetServerIP());
-        VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+        if (gVizFullscreen) {
+            VisualizerRenderFrameFullscreen(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, NULL);
+        } else {
+            VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+        }
         gLastVizTicks = TickCount();
         RenderCanvas();
+    } else if (ch == 'f' || ch == 'F') {
+        if (gVisualizerOpen) {
+            gVizFullscreen = !gVizFullscreen;
+            gHoverBtn      = BTN_NONE;
+            if (gVizFullscreen) {
+                VisualizerRenderFrameFullscreen(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, NULL);
+            } else {
+                VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
+            }
+            gLastVizTicks = TickCount();
+            RenderCanvas();
+        }
     } else if (ch == 'v' || ch == 'V') {
         gVisualizerOpen = !gVisualizerOpen;
+        if (!gVisualizerOpen) {
+            gVizFullscreen = false;
+        }
         if (gVisualizerOpen) {
             VisualizerRenderFrame(gVizMode, gNowPlaying.isPlaying, gNowPlaying.progressMs, gNowPlaying.trackId, gVisualizerBits);
             gLastVizTicks = TickCount();
