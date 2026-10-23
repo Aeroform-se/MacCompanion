@@ -20,6 +20,7 @@ Boolean ParseIPAddress(const char *str, ip_addr *outAddr);
 /* Set or get the active MacCompanion server IP and HTTP port */
 void NetSetServer(ip_addr ip, unsigned short httpPort);
 ip_addr NetGetServerIP(void);
+ip_addr NetGetOurIP(void);
 unsigned short NetGetServerPort(void);
 Boolean NetHasServer(void);
 

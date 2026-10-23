@@ -9,6 +9,7 @@ const spotifyModule = require('./modules/spotify');
 
 const HTTP_PORT = parseInt(process.env.PORT || '6800', 10);
 const UDP_PORT = DEFAULT_UDP_PORT;
+const SERVER_VERSION = 'v0.3';
 
 function createApp() {
   ensureDataDir();
@@ -28,6 +29,7 @@ function createApp() {
     res.json({
       server: {
         name: 'MacCompanion',
+        version: SERVER_VERSION,
         ip: getLocalIpAddress(),
         httpPort: HTTP_PORT,
         udpPort: UDP_PORT,

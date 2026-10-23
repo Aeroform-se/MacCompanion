@@ -3,54 +3,240 @@ const sharp = require('sharp');
 const DEFAULT_ART_SIZE = 200;
 
 /**
- * Applies Bill Atkinson's classic Macintosh 1-bit error-diffusion dithering
- * (or Floyd-Steinberg dithering) to an 8-bit grayscale pixel buffer.
+ * Normalizes a grayscale buffer's dynamic range (2nd..98th percentile stretch +
+ * automatic midtone gamma balancing) so neither dark moody covers nor bright pastel
+ * covers collapse into mostly-black or mostly-white squares.
+ */
+function autoLevelAndBalanceGrayscale(grayBuffer, width, height) {
+  const total = width * height;
+  const hist = new Uint32Array(256);
+  let sum = 0;
+
+  for (let i = 0; i < total; i++) {
+    const v = grayBuffer[i];
+    hist[v]++;
+    sum += v;
+  }
+
+  // Find 2nd and 98th percentile luminance to ignore single-pixel outliers/borders
+  const lowTarget = Math.floor(total * 0.02);
+  const highTarget = Math.floor(total * 0.98);
+  let acc = 0;
+  let minVal = 0;
+  let maxVal = 255;
+
+  for (let i = 0; i < 256; i++) {
+    acc += hist[i];
+    if (acc >= lowTarget) {
+      minVal = i;
+      break;
+    }
+  }
+  acc = 0;
+  for (let i = 0; i < 256; i++) {
+    acc += hist[i];
+    if (acc >= highTarget) {
+      maxVal = i;
+      break;
+    }
+  }
+
+  const span = Math.max(24, maxVal - minVal);
+
+  // Compute mean brightness after stretch to determine optimal gamma curve
+  const meanNormalized = Math.max(0.08, Math.min(0.92, ((sum / total) - minVal) / span));
+  // Choose gamma that gently pulls dark (<0.42) or bright (>0.58) images toward balanced 0.50 midtone
+  let gamma = 1.0;
+  if (meanNormalized < 0.45 || meanNormalized > 0.55) {
+    const rawGamma = Math.log(0.5) / Math.log(meanNormalized);
+    // Blend 65% toward ideal midtone balance so dark covers stay atmospheric without turning pure black
+    gamma = Math.max(0.55, Math.min(1.75, 1.0 + (rawGamma - 1.0) * 0.65));
+  }
+
+  const lut = new Float32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const norm = Math.max(0, Math.min(1, (i - minVal) / span));
+    lut[i] = Math.pow(norm, gamma) * 255.0;
+  }
+
+  const out = new Float32Array(total);
+  for (let i = 0; i < total; i++) {
+    out[i] = lut[grayBuffer[i]];
+  }
+  return out;
+}
+
+/**
+ * Applies a subtle 3x3 unsharp mask to preserve album typography, portraits, and line art
+ * before 1-bit quantization.
+ */
+function applyUnsharpMask(lum, width, height, amount = 0.35) {
+  const out = new Float32Array(lum);
+  for (let y = 1; y < height - 1; y++) {
+    const row = y * width;
+    for (let x = 1; x < width - 1; x++) {
+      const idx = row + x;
+      const center = lum[idx];
+      const neighbors =
+        (lum[idx - 1] + lum[idx + 1] + lum[idx - width] + lum[idx + width]) * 0.25;
+      const sharpened = center + (center - neighbors) * amount;
+      out[idx] = Math.max(0, Math.min(255, sharpened));
+    }
+  }
+  return out;
+}
+
+/**
+ * Applies 1-bit monochrome dithering to an 8-bit grayscale pixel buffer.
+ *
+ * Supported `algorithm` values:
+ *   - `'atkinson'`  : Bill Atkinson's classic MacPaint dithering (diffuses 6/8 = 75% of error)
+ *   - `'floyd'`     : Serpentine Floyd-Steinberg dithering (diffuses 16/16 = 100% of error)
+ *   - `'bluenoise'` : High-frequency 2D Blue Noise (Interleaved Gradient Blue Noise + 35% micro-diffusion)
+ *   - `'adaptive'`  : Smart Auto-Level + Gamma Rescue + Unsharp Mask + Stucki 42-weight error diffusion
  *
  * Returns:
  *   - `pixels`: Uint8Array of 0 (black) or 255 (white) values (length = width * height)
  *   - `packed`: Buffer of packed 1-bit QuickDraw monochrome bytes where:
  *       bit = 1 -> black pixel (QuickDraw foreground)
  *       bit = 0 -> white pixel (QuickDraw background)
- *       Each scanline is padded to an even number of bytes (`rowBytes`), matching
- *       Macintosh QuickDraw `BitMap.rowBytes` requirements!
  */
-function ditherGrayscaleTo1Bit(grayBuffer, width, height, algorithm = 'atkinson') {
-  const lum = new Float32Array(width * height);
-  for (let i = 0; i < width * height; i++) {
-    lum[i] = grayBuffer[i];
+function ditherGrayscaleTo1Bit(grayBuffer, width, height, algorithm = 'adaptive') {
+  const alg = String(algorithm || 'adaptive').toLowerCase().trim();
+  const isFloyd = alg.startsWith('floyd');
+  const isBlueNoise = alg.includes('blue');
+  const isAdaptive = alg.startsWith('adapt') || alg.startsWith('stucki') || alg.startsWith('smart');
+
+  let lum;
+  if (isAdaptive) {
+    const leveled = autoLevelAndBalanceGrayscale(grayBuffer, width, height);
+    lum = applyUnsharpMask(leveled, width, height, 0.45);
+  } else if (isBlueNoise) {
+    // Gentle auto-level + crisp edge boost for blue noise stippling
+    const leveled = autoLevelAndBalanceGrayscale(grayBuffer, width, height);
+    lum = applyUnsharpMask(leveled, width, height, 0.3);
+  } else {
+    lum = new Float32Array(width * height);
+    for (let i = 0; i < width * height; i++) {
+      lum[i] = grayBuffer[i];
+    }
   }
 
   const outPixels = new Uint8Array(width * height);
-  const useFloyd = String(algorithm).toLowerCase().startsWith('floyd');
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      const oldVal = lum[idx];
-      const newVal = oldVal < 128 ? 0 : 255;
-      outPixels[idx] = newVal;
-      const err = oldVal - newVal;
+  if (isBlueNoise) {
+    // High-frequency 2D Blue Noise (Jorge Jimenez Interleaved Gradient Noise + light 25% error feedback
+    // to preserve fine line detail while keeping organic isotropic stippling)
+    for (let y = 0; y < height; y++) {
+      const serpentine = (y & 1) === 1;
+      const xStart = serpentine ? width - 1 : 0;
+      const xEnd = serpentine ? -1 : width;
+      const xStep = serpentine ? -1 : 1;
 
-      if (useFloyd) {
-        // Floyd-Steinberg (diffuses 100% of error: 7/16, 3/16, 5/16, 1/16)
-        if (x + 1 < width) lum[idx + 1] += (err * 7) / 16;
-        if (y + 1 < height) {
-          if (x > 0) lum[idx + width - 1] += (err * 3) / 16;
-          lum[idx + width] += (err * 5) / 16;
-          if (x + 1 < width) lum[idx + width + 1] += (err * 1) / 16;
+      for (let x = xStart; x !== xEnd; x += xStep) {
+        const idx = y * width + x;
+        const oldVal = lum[idx];
+
+        // 2D Blue-Noise spatial threshold in [0..1) -> mapped to [-56..+56]
+        const ign = (52.9829189 * ((0.06711056 * x + 0.00583715 * y) % 1.0)) % 1.0;
+        const threshold = 128 + (ign - 0.5) * 108;
+
+        const newVal = oldVal < threshold ? 0 : 255;
+        outPixels[idx] = newVal;
+
+        // Subtle 35% local error feedback keeps thin text & borders intact
+        const err = (oldVal - newVal) * 0.35;
+        if (x + xStep >= 0 && x + xStep < width) {
+          lum[idx + xStep] += err * 0.55;
         }
-      } else {
-        // Bill Atkinson MacPaint Dithering (diffuses 6/8 = 75% of error for crisp high-contrast midtones)
-        const e8 = err / 8;
-        if (x + 1 < width) lum[idx + 1] += e8;
-        if (x + 2 < width) lum[idx + 2] += e8;
         if (y + 1 < height) {
-          if (x > 0) lum[idx + width - 1] += e8;
-          lum[idx + width] += e8;
-          if (x + 1 < width) lum[idx + width + 1] += e8;
+          lum[idx + width] += err * 0.45;
         }
+      }
+    }
+  } else if (isAdaptive) {
+    // Serpentine Stucki 42-weight wide-kernel 100% error diffusion
+    // Row 0:       *   8   4  (/42)
+    // Row 1: 2  4  8   4   2  (/42)
+    // Row 2: 1  2  4   2   1  (/42)
+    for (let y = 0; y < height; y++) {
+      const serpentine = (y & 1) === 1;
+      const xStart = serpentine ? width - 1 : 0;
+      const xEnd = serpentine ? -1 : width;
+      const xStep = serpentine ? -1 : 1;
+
+      for (let x = xStart; x !== xEnd; x += xStep) {
+        const idx = y * width + x;
+        const oldVal = lum[idx];
+        const newVal = oldVal < 128 ? 0 : 255;
+        outPixels[idx] = newVal;
+        const e = (oldVal - newVal) / 42.0;
+
+        const x1 = x + xStep;
+        const x2 = x + xStep * 2;
+        const xm1 = x - xStep;
+        const xm2 = x - xStep * 2;
+
+        if (x1 >= 0 && x1 < width) lum[idx + xStep] += e * 8;
+        if (x2 >= 0 && x2 < width) lum[idx + xStep * 2] += e * 4;
+
+        if (y + 1 < height) {
+          const r1 = (y + 1) * width;
+          if (xm2 >= 0 && xm2 < width) lum[r1 + xm2] += e * 2;
+          if (xm1 >= 0 && xm1 < width) lum[r1 + xm1] += e * 4;
+          lum[r1 + x] += e * 8;
+          if (x1 >= 0 && x1 < width) lum[r1 + x1] += e * 4;
+          if (x2 >= 0 && x2 < width) lum[r1 + x2] += e * 2;
+        }
+
         if (y + 2 < height) {
-          lum[idx + width * 2] += e8;
+          const r2 = (y + 2) * width;
+          if (xm2 >= 0 && xm2 < width) lum[r2 + xm2] += e * 1;
+          if (xm1 >= 0 && xm1 < width) lum[r2 + xm1] += e * 2;
+          lum[r2 + x] += e * 4;
+          if (x1 >= 0 && x1 < width) lum[r2 + x1] += e * 2;
+          if (x2 >= 0 && x2 < width) lum[r2 + x2] += e * 1;
+        }
+      }
+    }
+  } else {
+    // Classic Atkinson or Serpentine Floyd-Steinberg
+    for (let y = 0; y < height; y++) {
+      const serpentine = isFloyd && (y & 1) === 1;
+      const xStart = serpentine ? width - 1 : 0;
+      const xEnd = serpentine ? -1 : width;
+      const xStep = serpentine ? -1 : 1;
+
+      for (let x = xStart; x !== xEnd; x += xStep) {
+        const idx = y * width + x;
+        const oldVal = lum[idx];
+        const newVal = oldVal < 128 ? 0 : 255;
+        outPixels[idx] = newVal;
+        const err = oldVal - newVal;
+
+        if (isFloyd) {
+          // Serpentine Floyd-Steinberg (diffuses 100% of error: 7/16, 3/16, 5/16, 1/16)
+          const xNext = x + xStep;
+          const xPrev = x - xStep;
+          if (xNext >= 0 && xNext < width) lum[idx + xStep] += (err * 7) / 16;
+          if (y + 1 < height) {
+            if (xPrev >= 0 && xPrev < width) lum[idx + width - xStep] += (err * 3) / 16;
+            lum[idx + width] += (err * 5) / 16;
+            if (xNext >= 0 && xNext < width) lum[idx + width + xStep] += (err * 1) / 16;
+          }
+        } else {
+          // Bill Atkinson MacPaint Dithering (diffuses 6/8 = 75% of error for crisp high-contrast midtones)
+          const e8 = err / 8;
+          if (x + 1 < width) lum[idx + 1] += e8;
+          if (x + 2 < width) lum[idx + 2] += e8;
+          if (y + 1 < height) {
+            if (x > 0) lum[idx + width - 1] += e8;
+            lum[idx + width] += e8;
+            if (x + 1 < width) lum[idx + width + 1] += e8;
+          }
+          if (y + 2 < height) {
+            lum[idx + width * 2] += e8;
+          }
         }
       }
     }
@@ -106,19 +292,20 @@ function packQuickDrawBitMapWithHeader({ width, height, rowBytes, packed }) {
  * @param {Buffer} inputBuffer - Raw source image bytes
  * @param {Object} options
  * @param {number} [options.size=200] - Target width & height in pixels (default 200x200)
- * @param {string} [options.dither='atkinson'] - 'atkinson' or 'floyd'
+ * @param {string} [options.dither='adaptive'] - 'adaptive' | 'atkinson' | 'floyd' | 'bluenoise'
  * @param {string} [options.format='raw'] - 'raw' (8-byte header + QuickDraw bits), 'bits' (pure bits only), 'png' (1-bit PNG preview), 'hex' (pipe-delimited hex string)
  */
 async function processArtworkBuffer(inputBuffer, {
   size = DEFAULT_ART_SIZE,
   width,
   height,
-  dither = 'atkinson',
+  dither = 'adaptive',
   format = 'raw',
   contrast = 1.08,
 } = {}) {
   const targetW = Math.max(16, Math.min(512, parseInt(width || size || DEFAULT_ART_SIZE, 10)));
   const targetH = Math.max(16, Math.min(512, parseInt(height || size || DEFAULT_ART_SIZE, 10)));
+  const ditherKey = String(dither || 'adaptive').toLowerCase().trim();
 
   // Downscale with Lanczos3, flatten alpha onto white, convert to 8-bit grayscale
   let pipeline = sharp(inputBuffer)
@@ -126,12 +313,13 @@ async function processArtworkBuffer(inputBuffer, {
     .resize(targetW, targetH, { fit: 'cover' })
     .grayscale();
 
-  if (contrast && contrast !== 1.0) {
+  // Adaptive and Blue Noise perform their own histogram auto-leveling & gamma rescue
+  if (contrast && contrast !== 1.0 && !ditherKey.startsWith('adapt') && !ditherKey.includes('blue')) {
     pipeline = pipeline.linear(contrast, -(128 * contrast) + 128);
   }
 
   const grayBuffer = await pipeline.raw().toBuffer();
-  const dithered = ditherGrayscaleTo1Bit(grayBuffer, targetW, targetH, dither);
+  const dithered = ditherGrayscaleTo1Bit(grayBuffer, targetW, targetH, ditherKey);
 
   const fmt = String(format).toLowerCase();
   if (fmt === 'png') {
@@ -186,7 +374,7 @@ async function processArtworkBuffer(inputBuffer, {
 /**
  * Generates a classic 1-bit Macintosh musical note placeholder image when no artwork is available.
  */
-async function generatePlaceholderArtwork({ size = DEFAULT_ART_SIZE, dither = 'atkinson', format = 'raw' } = {}) {
+async function generatePlaceholderArtwork({ size = DEFAULT_ART_SIZE, dither = 'adaptive', format = 'raw' } = {}) {
   const s = Math.max(16, Math.min(512, parseInt(size || DEFAULT_ART_SIZE, 10)));
   const svg = `
     <svg width="${s}" height="${s}" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">

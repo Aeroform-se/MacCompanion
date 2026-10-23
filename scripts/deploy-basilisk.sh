@@ -7,7 +7,7 @@ CLIENT_DIR="$ROOT_DIR/client"
 BUILD_DIR="$CLIENT_DIR/build"
 VERSION_HEADER="$CLIENT_DIR/src/version.h"
 DRIVESHARE_DIR="${BASILISK_DRIVESHARE:-/Applications/Basillisk/driveshare/MacCompanion}"
-APP_NAME="MaciSpot"
+APP_NAME="SpotiMac"
 
 if [ ! -f "$TOOLCHAIN_FILE" ]; then
     echo "Error: Retro68 toolchain not found at $TOOLCHAIN_FILE"
@@ -81,11 +81,14 @@ if [ -d "/Applications/Basillisk/driveshare" ]; then
            "$DRIVESHARE_DIR/.finf/MacCompanionSpotify" \
            "$DRIVESHARE_DIR/MacCompanionSpotify.bin" \
            "$DRIVESHARE_DIR/MacCompanionSpotify.dsk" \
+           "$DRIVESHARE_DIR/MaciSpot" \
+           "$DRIVESHARE_DIR/.rsrc/MaciSpot" \
+           "$DRIVESHARE_DIR/.finf/MaciSpot" \
            "$DRIVESHARE_DIR/$APP_NAME.bin" \
            "$DRIVESHARE_DIR/$APP_NAME.dsk" \
            "$DRIVESHARE_DIR/launch"
 
-    # Deploy latest active build as MaciSpot
+    # Deploy latest active build as SpotiMac
     deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$DRIVESHARE_DIR" "$APP_NAME" "MCSP"
 
     # Deploy version-numbered copy into Unix -> MacCompanion -> Releases

@@ -1,10 +1,10 @@
 /*
- * MaciSpot — Native 68k Macintosh Spotify Client
- * Version 0.3 Beta ("Soda")
+ * SpotiMac — Native 68k Macintosh Spotify Client
+ * Version 0.3.5 RC ("Business")
  * Compiled with Retro68 + Apple Universal Interfaces 3.4.2
  *
  * UI Design: 512 x 322 flush canvas below the 20px Mac OS menu bar
- * (exact 512 x 342 Compact Mac screen dimensions).
+ * (exact 512 x 342 Compact Mac screen dimensions) + 192 x 68 Mini-Player.
  */
 
 #include <QuickDraw.h>
@@ -74,7 +74,7 @@
 #define CONN_FOUND          3
 #define CONN_READY          4
 
-/* Hover / Pressed button identifiers (button-states.png + UI-update.png) */
+/* Hover / Pressed button identifiers (button-states-2.png + Mini-player.png) */
 #define BTN_NONE            0
 #define BTN_SHUFFLE         1
 #define BTN_PREV            2
@@ -85,6 +85,10 @@
 #define BTN_TIMELINE        7
 #define BTN_VOLUME          8
 #define BTN_LIKE            9
+#define BTN_COLLAPSE        10
+
+#define MINI_W              192
+#define MINI_H              68
 
 /* ============================================================================
  * Data Structures
@@ -146,6 +150,9 @@ typedef struct {
  * ============================================================================ */
 
 static WindowPtr       gMainWindow        = NULL;
+static WindowPtr       gMiniWindow        = NULL;
+static Boolean         gMiniPlayerMode    = false;
+static Boolean         gMiniWinPositioned = false;
 static GrafPort        gOffscreenPort;
 static Ptr             gOffscreenBits     = NULL;
 static Boolean         gOffscreenReady    = false;
@@ -181,6 +188,7 @@ static Boolean         gAboutModalOpen    = false;
 /* Button Hover & Pressed states */
 static short           gHoverBtn          = BTN_NONE;
 static short           gPressedBtn        = BTN_NONE;
+static Boolean         gSuppressPlayHover = false;
 
 /* Left & Right List state */
 static LeftItem        gLeftItems[MAX_LEFT_ITEMS];
@@ -222,7 +230,7 @@ static void RenderCanvas(void);
 static void ConnectAndLoadAll(void);
 
 /* ============================================================================
- * Persistent Server Preferences ("MaciSpot Prefs" in System Folder:Preferences)
+ * Persistent Server Preferences ("SpotiMac Prefs" in System Folder:Preferences)
  * ============================================================================ */
 
 #define PREFS_MAGIC         0x4D435331UL /* 'MCS1' */
@@ -232,9 +240,9 @@ typedef struct {
     ip_addr       serverIp;
     unsigned char seenServerScreen;
     unsigned char reserved[3];
-} MaciSpotPrefs;
+} SpotiMacPrefs;
 
-static Boolean GetPrefsFileSpec(FSSpec *outSpec)
+static Boolean GetPrefsFileSpec(FSSpec *outSpec, Boolean legacyName)
 {
     short vRefNum = 0;
     long  dirID   = 0;
@@ -243,7 +251,7 @@ static Boolean GetPrefsFileSpec(FSSpec *outSpec)
     err = FindFolder(kOnSystemDisk, kPreferencesFolderType, kCreateFolder, &vRefNum, &dirID);
     if (err != noErr) return false;
 
-    err = FSMakeFSSpec(vRefNum, dirID, "\pMaciSpot Prefs", outSpec);
+    err = FSMakeFSSpec(vRefNum, dirID, legacyName ? "\pMaciSpot Prefs" : "\pSpotiMac Prefs", outSpec);
     return (err == noErr || err == fnfErr);
 }
 
@@ -251,36 +259,41 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
 {
     FSSpec        spec;
     short         refNum = 0;
-    long          count  = sizeof(MaciSpotPrefs);
-    MaciSpotPrefs prefs;
+    long          count  = sizeof(SpotiMacPrefs);
+    SpotiMacPrefs prefs;
     OSErr         err;
     FILE         *fp;
+    short         attempt;
 
     if (!outServerIp) return false;
     *outServerIp = 0;
 
-    if (GetPrefsFileSpec(&spec)) {
-        err = FSpOpenDF(&spec, fsRdPerm, &refNum);
-        if (err == noErr) {
-            memset(&prefs, 0, sizeof(prefs));
-            err = FSRead(refNum, &count, &prefs);
-            FSClose(refNum);
-            if (err == noErr &&
-                count == sizeof(MaciSpotPrefs) &&
-                prefs.magic == PREFS_MAGIC &&
-                prefs.seenServerScreen != 0 &&
-                prefs.serverIp != 0) {
-                *outServerIp = prefs.serverIp;
-                return true;
+    for (attempt = 0; attempt < 2; attempt++) {
+        if (GetPrefsFileSpec(&spec, attempt == 1)) {
+            err = FSpOpenDF(&spec, fsRdPerm, &refNum);
+            if (err == noErr) {
+                count = sizeof(SpotiMacPrefs);
+                memset(&prefs, 0, sizeof(prefs));
+                err = FSRead(refNum, &count, &prefs);
+                FSClose(refNum);
+                if (err == noErr &&
+                    count == sizeof(SpotiMacPrefs) &&
+                    prefs.magic == PREFS_MAGIC &&
+                    prefs.seenServerScreen != 0 &&
+                    prefs.serverIp != 0) {
+                    *outServerIp = prefs.serverIp;
+                    return true;
+                }
             }
         }
     }
 
     /* Fallback: check local directory file if Preferences folder was unavailable */
-    fp = fopen("MaciSpot Prefs", "rb");
+    fp = fopen("SpotiMac Prefs", "rb");
+    if (!fp) fp = fopen("MaciSpot Prefs", "rb");
     if (fp) {
         memset(&prefs, 0, sizeof(prefs));
-        if (fread(&prefs, 1, sizeof(MaciSpotPrefs), fp) == sizeof(MaciSpotPrefs) &&
+        if (fread(&prefs, 1, sizeof(SpotiMacPrefs), fp) == sizeof(SpotiMacPrefs) &&
             prefs.magic == PREFS_MAGIC &&
             prefs.seenServerScreen != 0 &&
             prefs.serverIp != 0) {
@@ -297,8 +310,8 @@ static void SaveServerPrefs(ip_addr serverIp)
 {
     FSSpec        spec;
     short         refNum = 0;
-    long          count  = sizeof(MaciSpotPrefs);
-    MaciSpotPrefs prefs;
+    long          count  = sizeof(SpotiMacPrefs);
+    SpotiMacPrefs prefs;
     OSErr         err;
     FILE         *fp;
 
@@ -309,7 +322,7 @@ static void SaveServerPrefs(ip_addr serverIp)
     prefs.serverIp         = serverIp;
     prefs.seenServerScreen = 1;
 
-    if (GetPrefsFileSpec(&spec)) {
+    if (GetPrefsFileSpec(&spec, false)) {
         FSpCreate(&spec, 'MCSP', 'pref', smSystemScript);
         err = FSpOpenDF(&spec, fsWrPerm, &refNum);
         if (err == noErr) {
@@ -320,9 +333,9 @@ static void SaveServerPrefs(ip_addr serverIp)
         }
     }
 
-    fp = fopen("MaciSpot Prefs", "wb");
+    fp = fopen("SpotiMac Prefs", "wb");
     if (fp) {
-        fwrite(&prefs, 1, sizeof(MaciSpotPrefs), fp);
+        fwrite(&prefs, 1, sizeof(SpotiMacPrefs), fp);
         fclose(fp);
     }
 }
@@ -578,47 +591,49 @@ static void DrawHorizontalDottedLine(short xLeft, short xRight, short y, Boolean
 }
 
 /*
- * Draws the 9x9 circular slider thumb dot centered at (cx, cy).
- * Matches `button-states.png`:
- * - Normal (`hollow == false`): Solid black 9x9 circle.
- * - Hover/Active (`hollow == true`): 2px black ring with white center.
+ * Draws the 9x9 slider thumb dot centered at (cx, cy) matching `button-states-2.png`:
+ * - 1px white gap on left & right (`cx - 4`, `cx + 4`)
+ * - 7x7 black circle (`cx - 3..cx + 3`, `cy - 3..cy + 3`)
+ * - On hover (`hollow == true`): 3x3 cross cutout in center (`(cx, cy-1)`, `(cx-1..cx+1, cy)`, `(cx, cy+1)`).
  */
 static void DrawSliderDot(short cx, short cy, Boolean hollow)
 {
     Rect r;
+    PenNormal();
+    /* Clear 9x9 area around dot so left/right have 1px white separation from track bar */
     SetRect(&r, cx - 4, cy - 4, cx + 5, cy + 5);
+    EraseRect(&r);
+
+    /* Paint exact 7x7 circle rows (widths 3, 5, 7, 7, 7, 5, 3) */
+    SetRect(&r, cx - 1, cy - 3, cx + 2, cy + 4);
+    PaintRect(&r);
+    SetRect(&r, cx - 2, cy - 2, cx + 3, cy + 3);
+    PaintRect(&r);
+    SetRect(&r, cx - 3, cy - 1, cx + 4, cy + 2);
+    PaintRect(&r);
+
     if (hollow) {
-        EraseOval(&r);
-        FrameOval(&r);
-        InsetRect(&r, 1, 1);
-        FrameOval(&r);
-    } else {
-        PaintOval(&r);
+        /* 3x3 white cross cutout in center (Row 2 Hover state in button-states-2.png) */
+        SetRect(&r, cx - 1, cy, cx + 2, cy + 1);
+        EraseRect(&r);
+        SetRect(&r, cx, cy - 1, cx + 1, cy + 2);
+        EraseRect(&r);
     }
 }
 
 /*
- * Draws the hover or pressed border box around a transport button as shown in `button-states.png`:
- * - Hover (`pressed == false`): Rounded box at `y = 281..298` + 2px gray shadow at `y = 298..300`.
- * - Pressed (`pressed == true`): Shifted down 1px (`y = 282..299`) + 1px gray shadow at `y = 299..300`.
+ * Draws the 4-dot horizontal hover indicator (`#.#.#.#`, 7px wide) below a button
+ * as shown in Row 2 of `button-states-2.png`.
  */
-static void DrawTransportBtnBox(short xLeft, short xRight, Boolean isHover, Boolean isPressed)
+static void DrawButtonHoverDots(short xFirstDot, short y, Boolean isHover)
 {
-    Rect box, shadow;
-    if (!isHover && !isPressed) return;
-
-    if (isPressed) {
-        SetRect(&shadow, xLeft + 2, 298, xRight - 2, 300);
-        FillRect(&shadow, &qd.gray);
-        SetRect(&box, xLeft, 282, xRight, 299);
-        EraseRoundRect(&box, 6, 6);
-        FrameRoundRect(&box, 6, 6);
-    } else {
-        SetRect(&shadow, xLeft + 2, 297, xRight - 2, 300);
-        FillRect(&shadow, &qd.gray);
-        SetRect(&box, xLeft, 281, xRight, 298);
-        EraseRoundRect(&box, 6, 6);
-        FrameRoundRect(&box, 6, 6);
+    short i;
+    if (!isHover) return;
+    PenNormal();
+    PenMode(patCopy);
+    for (i = 0; i < 4; i++) {
+        MoveTo(xFirstDot + i * 2, y);
+        LineTo(xFirstDot + i * 2, y);
     }
 }
 
@@ -630,7 +645,7 @@ static short GetSpeakerButtonRightX(void)
     short w;
     if (len > 18) len = 18;
     w = len * 6; /* Monaco 9 is 6px per char */
-    return 364 + w + 8;
+    return 359 + w + 6;
 }
 
 /* ============================================================================
@@ -760,11 +775,247 @@ static void RenderSearchCenterPanel(void)
     TextMode(srcOr);
 }
 
+static void RenderMiniPlayer(void)
+{
+    GrafPtr savePort;
+    Rect r, barRect;
+    char titleLine[160];
+    char truncTitle[36];
+    char timeLine[32];
+    short len, w, startX;
+
+    if (!gMiniWindow) return;
+    GetPort(&savePort);
+
+    if (gOffscreenReady) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMiniWindow);
+    }
+
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+    TextMode(srcOr);
+    PenNormal();
+
+    /* 1. White interior (192x68) with exact rounded corner curves from Mini-player.png */
+    SetRect(&r, 0, 0, MINI_W, MINI_H);
+    EraseRect(&r);
+
+    /* Top-left corner */
+    MoveTo(0, 0); LineTo(3, 0);
+    MoveTo(0, 1); LineTo(1, 1);
+    MoveTo(0, 2); LineTo(0, 3);
+    /* Top-right corner */
+    MoveTo(MINI_W - 4, 0); LineTo(MINI_W - 1, 0);
+    MoveTo(MINI_W - 2, 1); LineTo(MINI_W - 1, 1);
+    MoveTo(MINI_W - 1, 2); LineTo(MINI_W - 1, 3);
+    /* Bottom-left corner */
+    MoveTo(0, MINI_H - 4); LineTo(0, MINI_H - 3);
+    MoveTo(0, MINI_H - 2); LineTo(1, MINI_H - 2);
+    MoveTo(0, MINI_H - 1); LineTo(3, MINI_H - 1);
+    /* Bottom-right corner */
+    MoveTo(MINI_W - 1, MINI_H - 4); LineTo(MINI_W - 1, MINI_H - 3);
+    MoveTo(MINI_W - 2, MINI_H - 2); LineTo(MINI_W - 1, MINI_H - 2);
+    MoveTo(MINI_W - 4, MINI_H - 1); LineTo(MINI_W - 1, MINI_H - 1);
+
+    /* 2. Centered "Artist - Song title" at top (baseline y = 15) */
+    if (gNowPlaying.trackName[0] != '\0') {
+        if (gNowPlaying.artistName[0] != '\0') {
+            sprintf(titleLine, "%s - %s", gNowPlaying.artistName, gNowPlaying.trackName);
+        } else {
+            SafeCopy(titleLine, gNowPlaying.trackName, sizeof(titleLine));
+        }
+    } else {
+        SafeCopy(titleLine, "SpotiMac - 1984", sizeof(titleLine));
+    }
+    len = (short)strlen(titleLine);
+    if (len > 29) {
+        memcpy(truncTitle, titleLine, 26);
+        truncTitle[26] = '.';
+        truncTitle[27] = '.';
+        truncTitle[28] = '\0';
+        len = 28;
+    } else {
+        SafeCopy(truncTitle, titleLine, sizeof(truncTitle));
+    }
+    w = TextWidth(truncTitle, 0, len);
+    startX = (MINI_W / 2) - (w / 2);
+    if (startX < 6) startX = 6;
+    MoveTo(startX, 15);
+    DrawText(truncTitle, 0, len);
+
+    /* 3. Transport Row (Mini-player.psd exact coordinates) */
+    /* Like / Save Heart (11, 31) 11x10 + hover dots at (13, 44) */
+    {
+        Boolean hov = (gHoverBtn == BTN_LIKE) && (gPressedBtn != BTN_LIKE);
+        BlitIcon1Bit(gNowPlaying.isLiked ? gIconHeartFilled : gIconHeartOutline, 11, 10, 11, 31, srcCopy);
+        DrawButtonHoverDots(13, 44, hov);
+    }
+    DrawVerticalDottedLine(33, 28, 42, false);
+
+    /* Shuffle (43, 30) 14x11 + hover dots at (46, 44) */
+    {
+        Boolean hov = (gHoverBtn == BTN_SHUFFLE) && (gPressedBtn != BTN_SHUFFLE);
+        if (strcmp(gNowPlaying.shuffleMode, "smart") == 0) {
+            BlitIcon1Bit(gIconShuffleSmart, 14, 11, 43, 30, srcCopy);
+        } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
+            BlitIcon1Bit(gIconShuffleOn, 14, 11, 43, 30, srcCopy);
+        } else {
+            BlitIcon1Bit(gIconShuffleOff, 14, 11, 43, 30, srcCopy);
+        }
+        DrawButtonHoverDots(46, 44, hov);
+    }
+
+    /* Previous (68, 31) 6x9 + hover dots at (67, 44) */
+    {
+        Boolean hov = (gHoverBtn == BTN_PREV) && (gPressedBtn != BTN_PREV);
+        Boolean prs = (gPressedBtn == BTN_PREV);
+        BlitIcon1Bit(prs ? gIconPrevClick : gIconPrev, 6, 9, 68, 31, srcCopy);
+        DrawButtonHoverDots(67, 44, hov);
+    }
+
+    /* Play / Pause Circle (85, 24) 22x22 */
+    {
+        Boolean hov = (gHoverBtn == BTN_PLAY) && !gSuppressPlayHover;
+        Boolean prs = (gPressedBtn == BTN_PLAY);
+        const unsigned char *iconBits;
+        if (prs) {
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircleInv22 : gIconPlayCircleInv22;
+        } else if (hov) {
+            iconBits = gNowPlaying.isPlaying ? gIconPlayCircle22 : gIconPauseCircle22;
+        } else {
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
+        }
+        BlitIcon1Bit(iconBits, 22, 22, 85, 24, srcCopy);
+    }
+
+    /* Next (118, 31) 6x9 + hover dots at (118, 44) */
+    {
+        Boolean hov = (gHoverBtn == BTN_NEXT) && (gPressedBtn != BTN_NEXT);
+        Boolean prs = (gPressedBtn == BTN_NEXT);
+        BlitIcon1Bit(prs ? gIconNextClick : gIconNext, 6, 9, 118, 31, srcCopy);
+        DrawButtonHoverDots(118, 44, hov);
+    }
+
+    /* Repeat (135, 30/31) + hover dots at (138, 44) */
+    {
+        Boolean hov = (gHoverBtn == BTN_REPEAT) && (gPressedBtn != BTN_REPEAT);
+        if (strcmp(gNowPlaying.repeatState, "track") == 0) {
+            BlitIcon1Bit(gIconRepeatTrack, 12, 11, 135, 31, srcCopy);
+        } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
+            BlitIcon1Bit(gIconRepeatAll12, 12, 12, 135, 30, srcCopy);
+        } else {
+            BlitIcon1Bit(gIconRepeatOff, 12, 11, 135, 31, srcCopy);
+        }
+        DrawButtonHoverDots(138, 44, hov);
+    }
+
+    DrawVerticalDottedLine(158, 28, 42, false);
+
+    /* Enlarge / Expand Button (169, 30) 11x11 + hover dots at (172, 44) */
+    {
+        Boolean hov = (gHoverBtn == BTN_COLLAPSE) && (gPressedBtn != BTN_COLLAPSE);
+        Boolean prs = (gPressedBtn == BTN_COLLAPSE);
+        BlitIcon1Bit(prs ? gIconEnlargeClick : gIconEnlargeNormal, 11, 11, 169, 30, srcCopy);
+        DrawButtonHoverDots(172, 44, hov);
+    }
+
+    /* 4. Bottom Row: Timecode (12, 59) + Volume Icon (112, 52) + Volume Bar (126, 54)-(181, 57) */
+    sprintf(
+        timeLine,
+        "%s/%s",
+        gNowPlaying.progressMmSs[0] ? gNowPlaying.progressMmSs : "00:00",
+        gNowPlaying.durationMmSs[0] ? gNowPlaying.durationMmSs : "00:00"
+    );
+    MoveTo(12, 59);
+    DrawCStringTruncated(timeLine, 11);
+
+    BlitIcon1Bit(gIconVolume, 10, 7, 112, 52, srcCopy);
+    SetRect(&barRect, 126, 54, 181, 57);
+    FrameRect(&barRect);
+    {
+        short vol = gNowPlaying.volumePct;
+        short fillW;
+        short dotX;
+        Boolean hollowDot = (gHoverBtn == BTN_VOLUME) && (gPressedBtn != BTN_VOLUME);
+        if (vol < 0) vol = 0;
+        if (vol > 100) vol = 100;
+        fillW = (short)((vol * 55L) / 100L);
+        if (fillW > 0) {
+            SetRect(&r, 126, 54, 126 + fillW, 57);
+            PaintRect(&r);
+        }
+        dotX = 126 + fillW;
+        if (dotX < 130) dotX = 130;
+        if (dotX > 177) dotX = 177;
+        DrawSliderDot(dotX, 55, hollowDot);
+    }
+
+    if (gOffscreenReady) {
+        Rect miniRect;
+        SetRect(&miniRect, 0, 0, MINI_W, MINI_H);
+        SetPort(gMiniWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMiniWindow->portBits, &miniRect, &miniRect, srcCopy, NULL);
+    }
+
+    SetPort(savePort);
+}
+
+static void EnterMiniPlayerMode(void)
+{
+    if (!gMiniWindow || gMiniPlayerMode) return;
+    gSpeakerPopupOpen  = false;
+    gAboutModalOpen    = false;
+    gHoverBtn          = BTN_NONE;
+    gPressedBtn        = BTN_NONE;
+    gSuppressPlayHover = false;
+
+    if (!gMiniWinPositioned && gMainWindow) {
+        GrafPtr savePort;
+        Point topLeft;
+        GetPort(&savePort);
+        SetPort(gMainWindow);
+        topLeft.h = 160;
+        topLeft.v = 119;
+        LocalToGlobal(&topLeft);
+        SetPort(savePort);
+        MoveWindow(gMiniWindow, topLeft.h, topLeft.v, false);
+        gMiniWinPositioned = true;
+    }
+
+    gMiniPlayerMode = true;
+    if (gMainWindow) HideWindow(gMainWindow);
+    ShowWindow(gMiniWindow);
+    SelectWindow(gMiniWindow);
+    RenderMiniPlayer();
+}
+
+static void ExitMiniPlayerMode(void)
+{
+    if (!gMainWindow || !gMiniPlayerMode) return;
+    gHoverBtn          = BTN_NONE;
+    gPressedBtn        = BTN_NONE;
+    gSuppressPlayHover = false;
+    gMiniPlayerMode    = false;
+
+    if (gMiniWindow) HideWindow(gMiniWindow);
+    ShowWindow(gMainWindow);
+    SelectWindow(gMainWindow);
+    RenderCanvas();
+}
+
 static void RenderCanvas(void)
 {
     GrafPtr savePort;
     Rect r, sqRect, barRect, thumbRect;
     short i;
+
+    if (gMiniPlayerMode) {
+        RenderMiniPlayer();
+        return;
+    }
 
     if (!gMainWindow) return;
     GetPort(&savePort);
@@ -890,12 +1141,12 @@ static void RenderCanvas(void)
         /* Two-line Artist (y = 249) and Track Title (y = 261) centered below artwork (UI-update.png) */
         if (gNowPlaying.trackName[0] != '\0') {
             DrawCenteredLineBelowArt(
-                gNowPlaying.artistName[0] != '\0' ? gNowPlaying.artistName : "MaciSpot",
+                gNowPlaying.artistName[0] != '\0' ? gNowPlaying.artistName : "SpotiMac",
                 249
             );
             DrawCenteredLineBelowArt(gNowPlaying.trackName, 261);
         } else {
-            DrawCenteredLineBelowArt("MaciSpot", 249);
+            DrawCenteredLineBelowArt("SpotiMac", 249);
             DrawCenteredLineBelowArt("Party like it's 1984", 261);
         }
 
@@ -936,103 +1187,107 @@ static void RenderCanvas(void)
     }
 
     /* --------------------------------------------------------------------
-     * 3. Bottom Play Bar (y = 273..322, White background)
+     * 3. Bottom Play Bar (y = 273..322, White background, button-states-2.png)
      * -------------------------------------------------------------------- */
     SetRect(&r, 0, 273, CANVAS_W, CANVAS_H);
     EraseRect(&r);
     TextMode(srcOr);
     PenNormal();
 
-    /* Like / Save Heart button (156, 286) 11x10, box (150, 281)-(172, 298) + divider at x = 181 */
+    /* Like / Save Heart button (155, 285) 11x10 + hover dots at (157, 298) */
     {
-        Boolean hov = (gHoverBtn == BTN_LIKE);
-        Boolean prs = (gPressedBtn == BTN_LIKE);
-        short dy = prs ? 1 : 0;
-        DrawTransportBtnBox(150, 172, hov, prs);
+        Boolean hov = (gHoverBtn == BTN_LIKE) && (gPressedBtn != BTN_LIKE);
         if (gNowPlaying.isLiked) {
-            BlitIcon1Bit(gIconHeartFilled, 11, 10, 156, 286 + dy, srcCopy);
+            BlitIcon1Bit(gIconHeartFilled, 11, 10, 155, 285, srcCopy);
         } else {
-            BlitIcon1Bit(gIconHeartOutline, 11, 10, 156, 286 + dy, srcCopy);
+            BlitIcon1Bit(gIconHeartOutline, 11, 10, 155, 285, srcCopy);
         }
+        DrawButtonHoverDots(157, 298, hov);
     }
-    DrawVerticalDottedLine(181, 281, 300, false);
+    DrawVerticalDottedLine(181, 280, 298, false);
 
-    /* Shuffle button (195, 285) 14x11, box (191, 281)-(213, 298) */
+    /* Shuffle button (195, 284) 14x11 + hover dots at (198, 298) */
     {
-        Boolean hov = (gHoverBtn == BTN_SHUFFLE);
-        Boolean prs = (gPressedBtn == BTN_SHUFFLE);
-        short dy = prs ? 1 : 0;
-        DrawTransportBtnBox(191, 213, hov, prs);
+        Boolean hov = (gHoverBtn == BTN_SHUFFLE) && (gPressedBtn != BTN_SHUFFLE);
         if (strcmp(gNowPlaying.shuffleMode, "smart") == 0) {
-            BlitIcon1Bit(gIconShuffleSmart, 14, 11, 195, 285 + dy, srcCopy);
+            BlitIcon1Bit(gIconShuffleSmart, 14, 11, 195, 284, srcCopy);
         } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
-            BlitIcon1Bit(gIconShuffleOn, 14, 11, 195, 285 + dy, srcCopy);
+            BlitIcon1Bit(gIconShuffleOn, 14, 11, 195, 284, srcCopy);
         } else {
-            BlitIcon1Bit(gIconShuffleOff, 14, 11, 195, 285 + dy, srcCopy);
+            BlitIcon1Bit(gIconShuffleOff, 14, 11, 195, 284, srcCopy);
         }
+        DrawButtonHoverDots(198, 298, hov);
     }
 
-    /* Previous button (224, 286) 6x9, box (216, 281)-(238, 298) */
+    /* Previous button (224, 285) 6x9 + hover dots at (223, 298) */
     {
-        Boolean hov = (gHoverBtn == BTN_PREV);
+        Boolean hov = (gHoverBtn == BTN_PREV) && (gPressedBtn != BTN_PREV);
         Boolean prs = (gPressedBtn == BTN_PREV);
-        short dy = prs ? 1 : 0;
-        DrawTransportBtnBox(216, 238, hov, prs);
-        BlitIcon1Bit(gIconPrev, 6, 9, 224, 286 + dy, srcCopy);
+        BlitIcon1Bit(prs ? gIconPrevClick : gIconPrev, 6, 9, 224, 285, srcCopy);
+        DrawButtonHoverDots(223, 298, hov);
     }
 
-    /* Play / Pause circle (244, 278) 24x24 (shifts down 1px when pressed) */
+    /* Play / Pause circle (245, 278) 22x22 */
     {
+        Boolean hov = (gHoverBtn == BTN_PLAY) && !gSuppressPlayHover;
         Boolean prs = (gPressedBtn == BTN_PLAY);
-        short dy = prs ? 1 : 0;
-        if (gNowPlaying.isPlaying) {
-            BlitIcon1Bit(gIconPauseCircle, 24, 24, 244, 278 + dy, srcCopy);
+        const unsigned char *iconBits;
+        if (prs) {
+            /* Mouse down: gNowPlaying.isPlaying was already toggled to the next state, so show inverted next state */
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircleInv22 : gIconPlayCircleInv22;
+        } else if (hov) {
+            /* Hover: preview next state in filled black circle */
+            iconBits = gNowPlaying.isPlaying ? gIconPlayCircle22 : gIconPauseCircle22;
         } else {
-            BlitIcon1Bit(gIconPlayCircle, 24, 24, 244, 278 + dy, srcCopy);
+            /* Normal: current state in filled black circle */
+            iconBits = gNowPlaying.isPlaying ? gIconPauseCircle22 : gIconPlayCircle22;
         }
+        BlitIcon1Bit(iconBits, 22, 22, 245, 278, srcCopy);
     }
 
-    /* Next button (281, 286) 6x9, box (273, 281)-(295, 298) */
+    /* Next button (282, 285) 6x9 + hover dots at (282, 298) */
     {
-        Boolean hov = (gHoverBtn == BTN_NEXT);
+        Boolean hov = (gHoverBtn == BTN_NEXT) && (gPressedBtn != BTN_NEXT);
         Boolean prs = (gPressedBtn == BTN_NEXT);
-        short dy = prs ? 1 : 0;
-        DrawTransportBtnBox(273, 295, hov, prs);
-        BlitIcon1Bit(gIconNext, 6, 9, 281, 286 + dy, srcCopy);
+        BlitIcon1Bit(prs ? gIconNextClick : gIconNext, 6, 9, 282, 285, srcCopy);
+        DrawButtonHoverDots(282, 298, hov);
     }
 
-    /* Repeat button (302, 286) 12x11, box (297, 281)-(319, 298) */
+    /* Repeat button (303, 284/285) + hover dots at (306, 298) */
     {
-        Boolean hov = (gHoverBtn == BTN_REPEAT);
-        Boolean prs = (gPressedBtn == BTN_REPEAT);
-        short dy = prs ? 1 : 0;
-        DrawTransportBtnBox(297, 319, hov, prs);
+        Boolean hov = (gHoverBtn == BTN_REPEAT) && (gPressedBtn != BTN_REPEAT);
         if (strcmp(gNowPlaying.repeatState, "track") == 0) {
-            BlitIcon1Bit(gIconRepeatTrack, 12, 11, 302, 286 + dy, srcCopy);
+            BlitIcon1Bit(gIconRepeatTrack, 12, 11, 303, 285, srcCopy);
         } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
-            BlitIcon1Bit(gIconRepeatAll, 12, 11, 302, 286 + dy, srcCopy);
+            BlitIcon1Bit(gIconRepeatAll12, 12, 12, 303, 284, srcCopy);
         } else {
-            BlitIcon1Bit(gIconRepeatOff, 12, 11, 302, 286 + dy, srcCopy);
+            BlitIcon1Bit(gIconRepeatOff, 12, 11, 303, 285, srcCopy);
         }
+        DrawButtonHoverDots(306, 298, hov);
     }
 
-    /* Vertical dotted divider (331, 281..300) */
-    DrawVerticalDottedLine(331, 281, 300, false);
+    /* Vertical dotted divider (330, 280..298) */
+    DrawVerticalDottedLine(330, 280, 298, false);
 
-    /* Speaker Icon (348, 285) 8x11 + Active Speaker Name (364, 294) */
+    /* Speaker Icon (346, 284) 8x11 + Active Speaker Name (359, 293) + hover dots at (347, 298) */
     {
-        Boolean hov = (gHoverBtn == BTN_SPEAKER) || gSpeakerPopupOpen;
-        Boolean prs = (gPressedBtn == BTN_SPEAKER);
-        short dy = prs ? 1 : 0;
-        short rightX = GetSpeakerButtonRightX();
-        DrawTransportBtnBox(342, rightX, hov, prs);
-        BlitIcon1Bit(gIconSpeaker, 8, 11, 348, 285 + dy, srcCopy);
-        MoveTo(364, 293 + dy);
+        Boolean hov = (gHoverBtn == BTN_SPEAKER) && (gPressedBtn != BTN_SPEAKER) && !gSpeakerPopupOpen;
+        BlitIcon1Bit(gIconSpeaker, 8, 11, 346, 284, srcCopy);
+        DrawButtonHoverDots(347, 298, hov);
+        MoveTo(359, 293);
         if (gNowPlaying.deviceName[0] != '\0') {
             DrawCStringTruncated(gNowPlaying.deviceName, 18);
         } else {
             DrawCStringTruncated("Choose Speaker", 18);
         }
+    }
+
+    /* Collapse to Mini-Player Button (482, 284) 11x11 + hover dots at (485, 298) */
+    {
+        Boolean hov = (gHoverBtn == BTN_COLLAPSE) && (gPressedBtn != BTN_COLLAPSE);
+        Boolean prs = (gPressedBtn == BTN_COLLAPSE);
+        BlitIcon1Bit(prs ? gIconCollapseClick : gIconCollapseNormal, 11, 11, 482, 284, srcCopy);
+        DrawButtonHoverDots(485, 298, hov);
     }
 
     /* Timeline Bar: elapsed (109, 312), bar (143, 308)-(369, 311), total (374, 312) */
@@ -1044,7 +1299,7 @@ static void RenderCanvas(void)
     {
         short fillW = 0;
         short dotX  = 143;
-        Boolean hollowDot = (gHoverBtn == BTN_TIMELINE || gPressedBtn == BTN_TIMELINE);
+        Boolean hollowDot = (gHoverBtn == BTN_TIMELINE) && (gPressedBtn != BTN_TIMELINE);
         if (gNowPlaying.durationMs > 0) {
             long pct = (gNowPlaying.progressMs * 226L) / gNowPlaying.durationMs;
             if (pct < 0) pct = 0;
@@ -1072,7 +1327,7 @@ static void RenderCanvas(void)
         short vol = gNowPlaying.volumePct;
         short fillW;
         short dotX;
-        Boolean hollowDot = (gHoverBtn == BTN_VOLUME || gPressedBtn == BTN_VOLUME);
+        Boolean hollowDot = (gHoverBtn == BTN_VOLUME) && (gPressedBtn != BTN_VOLUME);
         if (vol < 0) vol = 0;
         if (vol > 100) vol = 100;
         fillW = (short)((vol * 55L) / 100L);
@@ -1157,13 +1412,13 @@ static void RenderCanvas(void)
     }
 
     /* --------------------------------------------------------------------
-     * 5. About MaciSpot Modal Dialog (with 58x58 ~2x2cm Buy Me a Coffee QR)
+     * 5. About SpotiMac Modal Dialog (with 58x58 ~2x2cm Buy Me a Coffee QR)
      * -------------------------------------------------------------------- */
     if (gAboutModalOpen) {
         Rect dlgRect, shadowRect, btnOk;
-        const char *verLine    = "MaciSpot " APP_VERSION_SHORT;
+        const char *verLine    = "SpotiMac " APP_VERSION_SHORT;
         const char *codeLine   = "\"" APP_VERSION_CODENAME "\"";
-        const char *coffeeLine = "Like MaciSpot? Buy me a coffee!";
+        const char *coffeeLine = "Like SpotiMac? Buy me a coffee!";
         short w;
 
         SetRect(&shadowRect, 140, 38, 380, 254);
@@ -1175,8 +1430,8 @@ static void RenderCanvas(void)
         InsetRect(&dlgRect, 2, 2);
         FrameRoundRect(&dlgRect, 8, 8);
 
-        /* MaciSpot Logo (56x44) centered at top */
-        BlitIcon1Bit(gMaciSpotLogoBits, 56, 44, 228, 44, srcCopy);
+        /* SpotiMac Logo (49x44) centered at top */
+        BlitIcon1Bit(gSpotiMacLogoBits, 49, 44, 232, 44, srcCopy);
 
         TextMode(srcOr);
         w = TextWidth(verLine, 0, (short)strlen(verLine));
@@ -1263,13 +1518,85 @@ static void LockOptimisticTrackSelection(const char *id, const char *name, const
     ResetPollTimersAfterAction();
 }
 
+/* Per-Mac network identity so multiple Macs on the same LAN each have their own speaker name */
+static char gMySpeakerName[40] = "Macintosh 68k";
+static char gMyClientId[32]    = "mac68k";
+
+/*
+ * Reads the Macintosh's own Machine Name ('STR ' -16413 in System 7 Sharing Setup)
+ * or Chooser User Name ('STR ' -16096 in System 6/7) to give each Mac on a LAN its
+ * own speaker name in MaciSpot's speaker chooser.
+ */
+static void InitMyMacSpeakerName(void)
+{
+    StringHandle sh;
+    char rawName[40];
+    short i, len = 0;
+
+    rawName[0] = '\0';
+    sh = GetString(-16413); /* Machine Name */
+    if (!sh || *sh == NULL || (*sh)[0] == 0) {
+        sh = GetString(-16096); /* Chooser User Name */
+    }
+    if (sh && *sh != NULL && (*sh)[0] > 0) {
+        short pLen = (unsigned char)(*sh)[0];
+        if (pLen > 31) pLen = 31;
+        for (i = 1; i <= pLen; i++) {
+            unsigned char c = (unsigned char)(*sh)[i];
+            if (c >= 32 && c < 127 && c != '|') {
+                rawName[len++] = (char)c;
+            } else if (c == 0xD4 || c == 0xD5) {
+                /* MacRoman curly apostrophe -> ASCII apostrophe */
+                rawName[len++] = '\'';
+            }
+        }
+        rawName[len] = '\0';
+    }
+
+    if (rawName[0] != '\0') {
+        SafeCopy(gMySpeakerName, rawName, sizeof(gMySpeakerName));
+    } else {
+        SafeCopy(gMySpeakerName, "Macintosh 68k", sizeof(gMySpeakerName));
+    }
+
+    if (NetGetOurIP() != 0) {
+        FormatIPAddress(NetGetOurIP(), gMyClientId);
+    } else {
+        SafeCopy(gMyClientId, "mac68k", sizeof(gMyClientId));
+    }
+}
+
+static Boolean IsThisMacSelectedSpeaker(void)
+{
+    char suffix[16];
+    unsigned char lastOctet = (unsigned char)(NetGetOurIP() & 0xFF);
+
+    if (gNowPlaying.deviceName[0] == '\0') return false;
+
+    if (strcmp(gNowPlaying.deviceName, gMySpeakerName) == 0) {
+        return true;
+    }
+
+    /* Check disambiguated name when two Macs share the same base name: "<Name> (.<octet>)" */
+    sprintf(suffix, " (.%u)", (unsigned int)lastOctet);
+    if (strncmp(gNowPlaying.deviceName, gMySpeakerName, strlen(gMySpeakerName)) == 0 &&
+        strstr(gNowPlaying.deviceName, suffix) != NULL) {
+        return true;
+    }
+
+    /* Fallback if server reports generic "Macintosh 68k" and we are using default name */
+    if (strcmp(gMySpeakerName, "Macintosh 68k") == 0 &&
+        (strcmp(gNowPlaying.deviceName, "Macintosh 68k") == 0 ||
+         strcmp(gNowPlaying.deviceName, "macintosh 68k") == 0)) {
+        return true;
+    }
+
+    return false;
+}
+
 static void SyncLocalAudioWithSpeaker(void)
 {
-    Boolean is68kSpeaker = false;
-    if (strstr(gNowPlaying.deviceName, "Macintosh 68k") != NULL ||
-        strstr(gNowPlaying.deviceName, "macintosh 68k") != NULL) {
-        is68kSpeaker = true;
-    }
+    Boolean is68kSpeaker = IsThisMacSelectedSpeaker();
 
     if (is68kSpeaker && gNowPlaying.isPlaying) {
         if (!AudioStreamIsRunning()) {
@@ -1316,11 +1643,16 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     long n;
     char field[96];
     char incomingTrackId[64];
+    char encId[64], encName[96], path[220];
     Boolean trackLocked;
 
     if (!NetHasServer() || !gHttpBuf) return;
 
-    n = NetHttpGet("/api/spotify/now-playing", gHttpBuf, HTTP_BUF_SIZE);
+    UrlEncode(gMyClientId, encId, sizeof(encId));
+    UrlEncode(gMySpeakerName, encName, sizeof(encName));
+    sprintf(path, "/api/spotify/now-playing?client_id=%s&client_name=%s", encId, encName);
+
+    n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     if (n <= 0 || strncmp(gHttpBuf, "PLAYING|", 8) != 0) {
         return;
     }
@@ -1806,6 +2138,7 @@ static void ActivateSearchResultRow(short idx)
 static void LoadDevicesAndTogglePopover(void)
 {
     long n;
+    char encId[64], encName[96], path[220];
     if (gSpeakerPopupOpen) {
         gSpeakerPopupOpen = false;
         RenderCanvas();
@@ -1815,7 +2148,11 @@ static void LoadDevicesAndTogglePopover(void)
     if (!NetHasServer() || !gHttpBuf) return;
     gDeviceCount = 0;
 
-    n = NetHttpGet("/api/spotify/devices", gHttpBuf, HTTP_BUF_SIZE);
+    UrlEncode(gMyClientId, encId, sizeof(encId));
+    UrlEncode(gMySpeakerName, encName, sizeof(encName));
+    sprintf(path, "/api/spotify/devices?client_id=%s&client_name=%s", encId, encName);
+
+    n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     if (n > 0) {
         const char *line = gHttpBuf;
         while (line && *line && gDeviceCount < MAX_DEVICES) {
@@ -1895,10 +2232,28 @@ static short HitTestTransportHover(Point pt)
         if (pt.h >= 273 && pt.h <= 295) return BTN_NEXT;
         if (pt.h >= 297 && pt.h <= 319) return BTN_REPEAT;
         if (pt.h >= 342 && pt.h <= GetSpeakerButtonRightX()) return BTN_SPEAKER;
+        if (pt.h >= 478 && pt.h <= 498) return BTN_COLLAPSE;
     }
     if (pt.v >= 303 && pt.v <= 318) {
         if (pt.h >= 140 && pt.h <= 372) return BTN_TIMELINE;
         if (pt.h >= 435 && pt.h <= 496) return BTN_VOLUME;
+    }
+    return BTN_NONE;
+}
+
+static short HitTestMiniPlayerHover(Point pt)
+{
+    if (pt.v >= 22 && pt.v <= 47) {
+        if (pt.h >= 7 && pt.h <= 25) return BTN_LIKE;
+        if (pt.h >= 39 && pt.h <= 59) return BTN_SHUFFLE;
+        if (pt.h >= 62 && pt.h <= 79) return BTN_PREV;
+        if (pt.h >= 82 && pt.h <= 110) return BTN_PLAY;
+        if (pt.h >= 113 && pt.h <= 129) return BTN_NEXT;
+        if (pt.h >= 131 && pt.h <= 151) return BTN_REPEAT;
+        if (pt.h >= 164 && pt.h <= 184) return BTN_COLLAPSE;
+    }
+    if (pt.v >= 49 && pt.v <= 63 && pt.h >= 122 && pt.h <= 185) {
+        return BTN_VOLUME;
     }
     return BTN_NONE;
 }
@@ -1910,11 +2265,36 @@ static void UpdateHoverState(void)
     short newSearchRow = -1;
     Boolean changed = false;
 
-    if (!gMainWindow || gConnState != CONN_READY) return;
+    if (gConnState != CONN_READY) return;
+
+    if (gMiniPlayerMode) {
+        if (!gMiniWindow) return;
+        SetPort(gMiniWindow);
+        GetMouse(&pt);
+        newBtn = HitTestMiniPlayerHover(pt);
+        if (newBtn != BTN_PLAY && gSuppressPlayHover) {
+            gSuppressPlayHover = false;
+            changed = true;
+        }
+        if (newBtn != gHoverBtn) {
+            gHoverBtn = newBtn;
+            changed = true;
+        }
+        if (changed) {
+            RenderMiniPlayer();
+        }
+        return;
+    }
+
+    if (!gMainWindow) return;
     SetPort(gMainWindow);
     GetMouse(&pt);
 
     newBtn = HitTestTransportHover(pt);
+    if (newBtn != BTN_PLAY && gSuppressPlayHover) {
+        gSuppressPlayHover = false;
+        changed = true;
+    }
     if (newBtn != gHoverBtn) {
         gHoverBtn = newBtn;
         changed = true;
@@ -1938,11 +2318,14 @@ static void UpdateHoverState(void)
     }
 }
 
-/* Tracks a transport button press with visual down-state (`button-states.png` Row 3) */
+/* Tracks a transport button press with visual down-state (`button-states-2.png` Row 3) */
 static Boolean TrackTransportButtonPress(short btnId)
 {
     Point pt;
     gPressedBtn = btnId;
+    if (btnId == BTN_PLAY) {
+        gSuppressPlayHover = true;
+    }
     RenderCanvas();
     while (StillDown()) {
         if (AudioStreamIsRunning()) {
@@ -2297,10 +2680,15 @@ static void HandleCanvasClick(Point pt)
                 ResetPollTimersAfterAction();
                 return;
             }
-            /* Speaker Selector (342..rightX) */
+            /* Speaker Selector (342..rightX) — mouse down immediately opens/toggles the select menu */
             if (pt.h >= 342 && pt.h <= GetSpeakerButtonRightX()) {
-                TrackTransportButtonPress(BTN_SPEAKER);
                 LoadDevicesAndTogglePopover();
+                return;
+            }
+            /* Collapse to Mini-Player (478..498) */
+            if (pt.h >= 478 && pt.h <= 498) {
+                TrackTransportButtonPress(BTN_COLLAPSE);
+                EnterMiniPlayerMode();
                 return;
             }
         }
@@ -2486,6 +2874,7 @@ static void HandleMenuChoice(long menuChoice)
     switch (menuID) {
         case mApple:
             if (itemID == iAbout) {
+                if (gMiniPlayerMode) ExitMiniPlayerMode();
                 gAboutModalOpen = true;
                 RenderCanvas();
             } else {
@@ -2496,6 +2885,7 @@ static void HandleMenuChoice(long menuChoice)
 
         case mFile:
             if (itemID == iServerIP) {
+                if (gMiniPlayerMode) ExitMiniPlayerMode();
                 if (NetHasServer()) {
                     FormatIPAddress(NetGetServerIP(), gIpInput);
                 }
@@ -2503,6 +2893,7 @@ static void HandleMenuChoice(long menuChoice)
                 RenderCanvas();
             } else if (itemID == iFindSearch) {
                 if (gConnState == CONN_READY) {
+                    if (gMiniPlayerMode) ExitMiniPlayerMode();
                     gSearchFocused = true;
                     RenderCanvas();
                 }
@@ -2533,11 +2924,124 @@ static void HandleMenuChoice(long menuChoice)
             } else if (itemID == iLikeTrack) {
                 TriggerToggleLike();
             } else if (itemID == iChooseSpeaker) {
+                if (gMiniPlayerMode) ExitMiniPlayerMode();
                 LoadDevicesAndTogglePopover();
             }
             break;
     }
     HiliteMenu(0);
+}
+
+static void HandleMiniPlayerClick(EventRecord *ev, Point pt)
+{
+    short btn = HitTestMiniPlayerHover(pt);
+
+    if (btn == BTN_LIKE) {
+        if (gNowPlaying.trackId[0] != '\0') {
+            gNowPlaying.isLiked = !gNowPlaying.isLiked;
+            TrackTransportButtonPress(BTN_LIKE);
+            NetHttpGet("/api/spotify/toggle-like", gHttpBuf, HTTP_BUF_SIZE);
+            ResetPollTimersAfterAction();
+        }
+        return;
+    }
+    if (btn == BTN_SHUFFLE) {
+        char path[96];
+        if (strcmp(gNowPlaying.shuffleMode, "off") == 0) {
+            SafeCopy(gNowPlaying.shuffleMode, "on", sizeof(gNowPlaying.shuffleMode));
+        } else if (strcmp(gNowPlaying.shuffleMode, "on") == 0) {
+            SafeCopy(gNowPlaying.shuffleMode, "smart", sizeof(gNowPlaying.shuffleMode));
+        } else {
+            SafeCopy(gNowPlaying.shuffleMode, "off", sizeof(gNowPlaying.shuffleMode));
+        }
+        TrackTransportButtonPress(BTN_SHUFFLE);
+        sprintf(path, "/api/spotify/shuffle?mode=%s", gNowPlaying.shuffleMode);
+        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        ResetPollTimersAfterAction();
+        return;
+    }
+    if (btn == BTN_PREV) {
+        gTimelineFrozen        = true;
+        gNowPlaying.progressMs = 0;
+        FormatMmSs(0, gNowPlaying.progressMmSs);
+        TrackTransportButtonPress(BTN_PREV);
+        TriggerPreviousTrack();
+        return;
+    }
+    if (btn == BTN_PLAY) {
+        Boolean wantPlay = !gNowPlaying.isPlaying;
+        gNowPlaying.isPlaying = wantPlay;
+        gTimelineFrozen       = !wantPlay;
+        TrackTransportButtonPress(BTN_PLAY);
+        SyncLocalAudioWithSpeaker();
+        if (wantPlay) {
+            NetHttpGet("/api/spotify/play", gHttpBuf, HTTP_BUF_SIZE);
+        } else {
+            NetHttpGet("/api/spotify/pause", gHttpBuf, HTTP_BUF_SIZE);
+        }
+        ResetPollTimersAfterAction();
+        RenderMiniPlayer();
+        return;
+    }
+    if (btn == BTN_NEXT) {
+        gTimelineFrozen        = true;
+        gNowPlaying.progressMs = 0;
+        FormatMmSs(0, gNowPlaying.progressMmSs);
+        TrackTransportButtonPress(BTN_NEXT);
+        TriggerNextTrack();
+        return;
+    }
+    if (btn == BTN_REPEAT) {
+        char path[96];
+        if (strcmp(gNowPlaying.repeatState, "off") == 0) {
+            SafeCopy(gNowPlaying.repeatState, "context", sizeof(gNowPlaying.repeatState));
+        } else if (strcmp(gNowPlaying.repeatState, "context") == 0) {
+            SafeCopy(gNowPlaying.repeatState, "track", sizeof(gNowPlaying.repeatState));
+        } else {
+            SafeCopy(gNowPlaying.repeatState, "off", sizeof(gNowPlaying.repeatState));
+        }
+        TrackTransportButtonPress(BTN_REPEAT);
+        sprintf(path, "/api/spotify/repeat?state=%s", gNowPlaying.repeatState);
+        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        ResetPollTimersAfterAction();
+        return;
+    }
+    if (btn == BTN_COLLAPSE) {
+        TrackTransportButtonPress(BTN_COLLAPSE);
+        ExitMiniPlayerMode();
+        return;
+    }
+    if (btn == BTN_VOLUME) {
+        char path[96];
+        short vol = gNowPlaying.volumePct;
+        Point curPt = pt;
+        gPressedBtn = BTN_VOLUME;
+        do {
+            vol = (short)(((long)(curPt.h - 126) * 100L) / 55L);
+            if (vol < 0) vol = 0;
+            if (vol > 100) vol = 100;
+            if (vol != gNowPlaying.volumePct) {
+                gNowPlaying.volumePct = vol;
+                RenderMiniPlayer();
+            }
+            if (AudioStreamIsRunning()) {
+                AudioStreamPump();
+            }
+            GetMouse(&curPt);
+        } while (StillDown());
+        gPressedBtn = BTN_NONE;
+        RenderMiniPlayer();
+
+        sprintf(path, "/api/spotify/volume?volume_percent=%d", vol);
+        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        ResetPollTimersAfterAction();
+        return;
+    }
+
+    /* Clicking anywhere else on the Mini-Player drags the window freely across the screen */
+    if (gMiniWindow && ev) {
+        DragWindow(gMiniWindow, ev->where, &qd.screenBits.bounds);
+    }
 }
 
 static void HandleMouseDown(EventRecord *ev)
@@ -2563,6 +3067,11 @@ static void HandleMouseDown(EventRecord *ev)
         case inContent:
             if (whichWindow != FrontWindow()) {
                 SelectWindow(whichWindow);
+            } else if (whichWindow == gMiniWindow && gMiniPlayerMode) {
+                Point pt = ev->where;
+                SetPort(gMiniWindow);
+                GlobalToLocal(&pt);
+                HandleMiniPlayerClick(ev, pt);
             } else if (whichWindow == gMainWindow) {
                 Point pt = ev->where;
                 SetPort(gMainWindow);
@@ -2617,6 +3126,7 @@ int main(void)
     InitToolbox();
     SetupMenus();
     NetInit();
+    InitMyMacSpeakerName();
     AudioStreamInit();
 
     gHttpBuf = NewPtrClear(HTTP_BUF_SIZE);
@@ -2631,28 +3141,51 @@ int main(void)
 
     InitOffscreenCanvas();
 
-    /* Position flush at (0, 20) on 512x342 Compact Mac, or centered on larger screens */
+    /*
+     * Window Framing & Positioning:
+     * - On 512x342 Compact Macs (Plus / SE / Classic): Flush borderless window (`plainDBox`) at (0, 20)
+     * - On higher-resolution screens (> 512x342): Standard movable Mac OS window (`noGrowDocProc`)
+     */
     screenW = qd.screenBits.bounds.right - qd.screenBits.bounds.left;
     screenH = qd.screenBits.bounds.bottom - qd.screenBits.bounds.top;
-    if (screenW <= 512 && screenH <= 342) {
-        winLeft = 0;
-        winTop  = 20;
-    } else {
-        winLeft = (screenW - CANVAS_W) / 2;
-        winTop  = 20 + ((screenH - 20 - CANVAS_H) / 2);
-    }
+    {
+        short winProc;
+        if (screenW <= 512 && screenH <= 342) {
+            winLeft = 0;
+            winTop  = 20;
+            winProc = plainDBox;
+        } else {
+            winLeft = (screenW - CANVAS_W) / 2;
+            winTop  = 40 + ((screenH - 40 - CANVAS_H) / 2);
+            if (winTop < 40) winTop = 40;
+            winProc = noGrowDocProc;
+        }
 
-    SetRect(&winBounds, winLeft, winTop, winLeft + CANVAS_W, winTop + CANVAS_H);
-    gMainWindow = NewWindow(
-        NULL,
-        &winBounds,
-        "\pMaciSpot",
-        true,
-        plainDBox,
-        (WindowPtr)-1L,
-        false,
-        0
-    );
+        SetRect(&winBounds, winLeft, winTop, winLeft + CANVAS_W, winTop + CANVAS_H);
+        gMainWindow = NewWindow(
+            NULL,
+            &winBounds,
+            "\pSpotiMac",
+            true,
+            winProc,
+            (WindowPtr)-1L,
+            false,
+            0
+        );
+
+        /* Create the 192x68 frameless Mini-Player window (hidden until Collapse is clicked) */
+        SetRect(&winBounds, winLeft + 160, winTop + 119, winLeft + 160 + MINI_W, winTop + 119 + MINI_H);
+        gMiniWindow = NewWindow(
+            NULL,
+            &winBounds,
+            "\pSpotiMac Mini",
+            false,
+            plainDBox,
+            (WindowPtr)-1L,
+            false,
+            0
+        );
+    }
 
     /*
      * Startup Server Connection Flow:
@@ -2713,6 +3246,10 @@ int main(void)
                         BeginUpdate(gMainWindow);
                         RenderCanvas();
                         EndUpdate(gMainWindow);
+                    } else if ((WindowPtr)ev.message == gMiniWindow) {
+                        BeginUpdate(gMiniWindow);
+                        RenderMiniPlayer();
+                        EndUpdate(gMiniWindow);
                     }
                     break;
             }

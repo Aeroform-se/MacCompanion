@@ -67,6 +67,159 @@ function resolveSampleRateHz(rateSetting) {
 }
 
 /**
+ * Curated 8-Bit Sound Profiles for SpotiMac:
+ *  - warm:    (Default) Lowest possible noise floor in quiet passages via gentle dynamic compression + 9.5 kHz HF roll-off
+ *  - hifi:    Maximum dynamic range & natural transients with Shibata psychoacoustic noise-shaped dither
+ *  - compact: Tailored for the internal 2.25" speaker in a Compact Mac (140 Hz sub-cut + 2.2 kHz presence + leveling)
+ */
+const SOUND_PROFILES = {
+  hifi: {
+    id: 'hifi',
+    label: 'HiFi / Pure Dynamic',
+    description: 'Maximum dynamic range and natural transients with Shibata noise-shaped dither. Best at 100% client volume.',
+    dsp: {
+      resampler: 'soxr',
+      ditherMethod: 'shibata',
+      ditherScale: 1.0,
+      compressorEnabled: false,
+      compThresholdDb: -20,
+      compRatio: 3.0,
+      compMakeupDb: 4,
+      highpassHz: 0,
+      lowpassHz: 0,
+      eqPresenceDb: 0,
+      pregainDb: 0,
+      limiterEnabled: false,
+    },
+  },
+  warm: {
+    id: 'warm',
+    label: 'Low Noise Floor (Warm)',
+    description: 'Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.',
+    dsp: {
+      resampler: 'soxr',
+      ditherMethod: 'none',
+      ditherScale: 0.5,
+      compressorEnabled: true,
+      compThresholdDb: -20,
+      compRatio: 3.0,
+      compMakeupDb: 5,
+      highpassHz: 0,
+      lowpassHz: 9500,
+      eqPresenceDb: 0,
+      pregainDb: 0,
+      limiterEnabled: true,
+    },
+  },
+  compact: {
+    id: 'compact',
+    label: 'Compact Mac Speaker (1984 Punch)',
+    description: 'Tailored for the internal speaker in a Plus/SE/Classic: rolls off sub-140 Hz cone rumble, boosts 2.2 kHz midrange presence, and levels dynamics.',
+    dsp: {
+      resampler: 'soxr',
+      ditherMethod: 'shibata',
+      ditherScale: 1.0,
+      compressorEnabled: true,
+      compThresholdDb: -18,
+      compRatio: 3.5,
+      compMakeupDb: 4,
+      highpassHz: 140,
+      lowpassHz: 0,
+      eqPresenceDb: 3,
+      pregainDb: 0,
+      limiterEnabled: true,
+    },
+  },
+};
+
+const VALID_DITHER_METHODS = new Set([
+  'none',
+  'rectangular',
+  'triangular',
+  'triangular_hp',
+  'lipshitz',
+  'shibata',
+  'low_shibata',
+  'high_shibata',
+  'f_weighted',
+  'modified_e_weighted',
+  'improved_e_weighted',
+]);
+
+function normalizeDspConfig(rawDsp = {}, fallbackProfile = 'warm') {
+  const base = (SOUND_PROFILES[fallbackProfile] || SOUND_PROFILES.warm).dsp;
+  const merged = { ...base, ...(rawDsp || {}) };
+
+  const resampler = merged.resampler === 'swr' ? 'swr' : 'soxr';
+  const ditherMethod = VALID_DITHER_METHODS.has(String(merged.ditherMethod))
+    ? String(merged.ditherMethod)
+    : base.ditherMethod;
+  const ditherScale = Math.max(0, Math.min(1, Number.isFinite(Number(merged.ditherScale)) ? Number(merged.ditherScale) : base.ditherScale));
+  const compressorEnabled = Boolean(merged.compressorEnabled);
+  const compThresholdDb = Math.max(-36, Math.min(-6, Number.isFinite(Number(merged.compThresholdDb)) ? Number(merged.compThresholdDb) : base.compThresholdDb));
+  const compRatio = Math.max(1, Math.min(10, Number.isFinite(Number(merged.compRatio)) ? Number(merged.compRatio) : base.compRatio));
+  const compMakeupDb = Math.max(0, Math.min(12, Number.isFinite(Number(merged.compMakeupDb)) ? Number(merged.compMakeupDb) : base.compMakeupDb));
+  const highpassHz = Math.max(0, Math.min(400, parseInt(merged.highpassHz ?? base.highpassHz, 10) || 0));
+  const lowpassHz = Math.max(0, Math.min(11000, parseInt(merged.lowpassHz ?? base.lowpassHz, 10) || 0));
+  const eqPresenceDb = Math.max(-8, Math.min(8, Number.isFinite(Number(merged.eqPresenceDb)) ? Number(merged.eqPresenceDb) : base.eqPresenceDb));
+  const pregainDb = Math.max(-8, Math.min(8, Number.isFinite(Number(merged.pregainDb)) ? Number(merged.pregainDb) : base.pregainDb));
+  const limiterEnabled = Boolean(merged.limiterEnabled);
+
+  return {
+    resampler,
+    ditherMethod,
+    ditherScale,
+    compressorEnabled,
+    compThresholdDb,
+    compRatio,
+    compMakeupDb,
+    highpassHz,
+    lowpassHz,
+    eqPresenceDb,
+    pregainDb,
+    limiterEnabled,
+  };
+}
+
+function buildFfmpegFilterChain(hz, dspConfig) {
+  const dsp = normalizeDspConfig(dspConfig);
+  const chain = [];
+
+  if (dsp.pregainDb !== 0) {
+    chain.push(`volume=${dsp.pregainDb}dB`);
+  }
+  if (dsp.highpassHz > 0) {
+    chain.push(`highpass=f=${dsp.highpassHz}`);
+  }
+  if (dsp.eqPresenceDb !== 0) {
+    chain.push(`equalizer=f=2200:t=q:w=1.0:g=${dsp.eqPresenceDb}`);
+  }
+  if (dsp.compressorEnabled) {
+    chain.push(
+      `acompressor=threshold=${dsp.compThresholdDb}dB:ratio=${dsp.compRatio}:attack=15:release=220:makeup=${dsp.compMakeupDb}dB`
+    );
+  }
+  if (dsp.limiterEnabled || dsp.compressorEnabled || dsp.pregainDb > 0 || dsp.eqPresenceDb > 0) {
+    chain.push('alimiter=limit=0.95:attack=5:release=50');
+  }
+  if (dsp.lowpassHz > 0) {
+    chain.push(`lowpass=f=${dsp.lowpassHz}`);
+  }
+
+  const aresampleParts = [
+    `osr=${hz}`,
+    `resampler=${dsp.resampler}`,
+    `dither_method=${dsp.ditherMethod}`,
+  ];
+  if (dsp.ditherMethod !== 'none' && dsp.ditherScale !== 1.0) {
+    aresampleParts.push(`dither_scale=${dsp.ditherScale.toFixed(2)}`);
+  }
+  chain.push(`aresample=${aresampleParts.join(':')}`);
+
+  return chain.join(',');
+}
+
+/**
  * Builds a standard 44-byte RIFF/WAVE header for unsigned 8-bit mono PCM (`pcm_u8`)
  * so modern browsers and HTML5 `<audio>` elements can play the live 68k audio stream.
  */
@@ -176,6 +329,12 @@ class RealTimePacer extends Transform {
   }
 }
 
+function cleanIpAddress(rawIp = '') {
+  const str = String(rawIp || '').trim();
+  if (str.startsWith('::ffff:')) return str.slice(7);
+  return str;
+}
+
 class AudioStreamEngine extends EventEmitter {
   constructor({ store, getValidAccessToken, getFetchImpl }) {
     super();
@@ -189,10 +348,15 @@ class AudioStreamEngine extends EventEmitter {
     this.tcpClients = new Set();
     this.httpClients = new Set();
     this.currentRateHz = 22255;
+    this.currentFilterChain = '';
     this.state = 'STOPPED'; // STOPPED | AWAITING_SPEAKER_AUTH | STARTING | READY | PLAYING | UNAVAILABLE
     this.lastError = null;
     this.bytesBroadcast = 0;
     this.hasBinaries = this.checkBinaries();
+
+    // Multi-Mac network speaker registry: Map<clientId, { id, ip, baseName, lastSeen }>
+    this.macClients = new Map();
+    this.activeMacClientId = null;
   }
 
   checkBinaries() {
@@ -209,6 +373,117 @@ class AudioStreamEngine extends EventEmitter {
     const mode = data.audioSampleRate === '11k' ? '11k' : '22k';
     const hz = resolveSampleRateHz(mode);
     return { mode, hz };
+  }
+
+  getDspConfig() {
+    const data = this.store.load();
+    const profile = (data.audioProfile && (SOUND_PROFILES[data.audioProfile] || data.audioProfile === 'custom'))
+      ? data.audioProfile
+      : 'warm';
+    const fallbackProfile = SOUND_PROFILES[profile] ? profile : 'warm';
+    const dsp = normalizeDspConfig(data.audioDsp || {}, fallbackProfile);
+    const { hz } = this.getSampleRateConfig();
+    const filterChain = buildFfmpegFilterChain(hz, dsp);
+    return { profile, dsp, filterChain };
+  }
+
+  /**
+   * Registers or refreshes an active 68k Mac client on the network so multiple Macs
+   * each appear with their own speaker name in the speaker chooser.
+   */
+  registerMacClient({ id, ip, name }) {
+    const cleanIp = cleanIpAddress(ip);
+    const baseName = String(name || '').trim() || DEVICE_NAME;
+    const clientId = String(id || cleanIp || baseName)
+      .replace(/[^A-Za-z0-9._-]/g, '_')
+      .slice(0, 48);
+
+    if (!clientId) return null;
+
+    const now = Date.now();
+    // Prune stale Mac entries older than 10 minutes (except the currently active Mac)
+    for (const [k, entry] of this.macClients.entries()) {
+      if (k !== this.activeMacClientId && now - entry.lastSeen > 10 * 60 * 1000) {
+        this.macClients.delete(k);
+      }
+    }
+
+    this.macClients.set(clientId, {
+      id: clientId,
+      ip: cleanIp,
+      baseName,
+      lastSeen: now,
+    });
+
+    if (!this.activeMacClientId || !this.macClients.has(this.activeMacClientId)) {
+      this.activeMacClientId = clientId;
+    }
+
+    return this.getMacClientList().find((m) => m.id === clientId) || null;
+  }
+
+  /**
+   * Returns all registered 68k Macs with disambiguated speaker names if two Macs
+   * share the same base name on different IPs.
+   */
+  getMacClientList() {
+    const entries = Array.from(this.macClients.values());
+    const nameCounts = new Map();
+    for (const e of entries) {
+      const key = e.baseName.toLowerCase();
+      nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+    }
+
+    return entries.map((e) => {
+      const duplicate = (nameCounts.get(e.baseName.toLowerCase()) || 0) > 1;
+      let suffix = e.id;
+      if (e.ip && e.ip.includes('.')) {
+        suffix = `.${e.ip.split('.').pop()}`;
+      }
+      const displayName = duplicate ? `${e.baseName} (${suffix})` : e.baseName;
+      return {
+        id: e.id,
+        deviceId: `mac68k:${e.id}`,
+        ip: e.ip,
+        name: displayName,
+        baseName: e.baseName,
+        isActive: e.id === this.activeMacClientId,
+        lastSeen: e.lastSeen,
+      };
+    });
+  }
+
+  setActiveMacClient(targetIdOrName) {
+    const needle = String(targetIdOrName || '').trim();
+    if (!needle) return null;
+    const stripped = needle.startsWith('mac68k:') ? needle.slice(7) : needle;
+    const list = this.getMacClientList();
+
+    const found = list.find(
+      (m) =>
+        m.id === stripped ||
+        m.deviceId === needle ||
+        (m.ip && m.ip === stripped) ||
+        m.name.toLowerCase() === stripped.toLowerCase() ||
+        m.baseName.toLowerCase() === stripped.toLowerCase()
+    );
+
+    if (found) {
+      this.activeMacClientId = found.id;
+      return found;
+    }
+    return null;
+  }
+
+  getActiveMacClient() {
+    const list = this.getMacClientList();
+    if (list.length === 0) return null;
+    return list.find((m) => m.id === this.activeMacClientId) || list[0];
+  }
+
+  getActiveMacSpeakerName() {
+    const active = this.getActiveMacClient();
+    return active ? active.name : DEVICE_NAME;
   }
 
   isPaired() {
@@ -323,8 +598,8 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   /**
-   * Spawns (or hot-restarts) the low-latency FFmpeg resampler with triangular dithering
-   * without restarting `librespot`.
+   * Spawns (or hot-restarts on the fly) the low-latency FFmpeg resampler + DSP filter chain
+   * without restarting `librespot` or dropping active TCP/HTTP audio clients.
    */
   spawnFfmpegTranscoder(hz) {
     if (this.ffmpegProc) {
@@ -339,7 +614,13 @@ class AudioStreamEngine extends EventEmitter {
       this.ffmpegProc = null;
     }
 
+    const { profile, dsp } = this.getDspConfig();
+    const filterChain = buildFfmpegFilterChain(hz, dsp);
+
     this.currentRateHz = hz;
+    this.currentFilterChain = filterChain;
+
+    console.log(`[AudioEngine] FFmpeg DSP active (profile="${profile}", ${hz} Hz): -af "${filterChain}"`);
 
     const ffmpegArgs = [
       '-hide_banner',
@@ -352,7 +633,7 @@ class AudioStreamEngine extends EventEmitter {
       '-ar', '44100',
       '-ac', '2',
       '-i', 'pipe:0',
-      '-af', `aresample=osr=${hz}:dither_method=shibata`,
+      '-af', filterChain,
       '-f', 'u8',
       '-acodec', 'pcm_u8',
       '-ac', '1',
@@ -374,8 +655,18 @@ class AudioStreamEngine extends EventEmitter {
       if (this.state !== 'PLAYING') {
         this.state = 'PLAYING';
       }
+
+      const activeMac = this.getActiveMacClient();
+      const targetIp = activeMac && activeMac.ip ? activeMac.ip : null;
+      const hasMatchingSocket = targetIp
+        ? Array.from(this.tcpClients).some((s) => !s.destroyed && cleanIpAddress(s.remoteAddress) === targetIp)
+        : false;
+
       for (const sock of this.tcpClients) {
         if (!sock.destroyed && sock.writable) {
+          if (hasMatchingSocket && cleanIpAddress(sock.remoteAddress) !== targetIp) {
+            continue;
+          }
           sock.write(u8Chunk);
         }
       }
@@ -412,6 +703,7 @@ class AudioStreamEngine extends EventEmitter {
     }
 
     const { hz } = this.getSampleRateConfig();
+    const { filterChain } = this.getDspConfig();
 
     let speakerToken = null;
     try {
@@ -428,8 +720,7 @@ class AudioStreamEngine extends EventEmitter {
     }
 
     if (!forceRestart && this.librespotProc && this.pacer) {
-      if (!this.ffmpegProc || this.currentRateHz !== hz) {
-        console.log(`[AudioEngine] Switching FFmpeg transcoder to ${hz} Hz`);
+      if (!this.ffmpegProc || this.currentRateHz !== hz || this.currentFilterChain !== filterChain) {
         this.spawnFfmpegTranscoder(hz);
       }
       return true;
@@ -458,7 +749,7 @@ class AudioStreamEngine extends EventEmitter {
       '--access-token', speakerToken,
     ];
 
-    console.log(`[AudioEngine] Starting librespot ("${DEVICE_NAME}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz, shibata dither, direct flush)`);
+    console.log(`[AudioEngine] Starting librespot ("${DEVICE_NAME}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
     const lsProc = spawn('librespot', librespotArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -507,18 +798,53 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   /**
-   * Changes the active sample rate ('22k' or '11k') and hot-swaps FFmpeg without restarting librespot.
+   * Updates sample rate ('22k' | '11k'), preset profile ('hifi' | 'warm' | 'compact' | 'custom'),
+   * and/or granular DSP settings, hot-swapping FFmpeg on the fly without interrupting playback.
    */
-  async setSampleRate(rateMode) {
-    const normalized = String(rateMode).toLowerCase().startsWith('11') ? '11k' : '22k';
-    this.store.save({ audioSampleRate: normalized });
-    const hz = resolveSampleRateHz(normalized);
+  async updateAudioConfig(patch = {}) {
+    const currentData = this.store.load();
+    const updates = {};
+
+    if (patch.rate !== undefined) {
+      updates.audioSampleRate = String(patch.rate).toLowerCase().startsWith('11') ? '11k' : '22k';
+    }
+
+    let targetProfile = currentData.audioProfile || 'hifi';
+    let baseDsp = currentData.audioDsp || SOUND_PROFILES.hifi.dsp;
+
+    if (patch.profile && SOUND_PROFILES[patch.profile]) {
+      targetProfile = patch.profile;
+      baseDsp = { ...SOUND_PROFILES[patch.profile].dsp };
+    } else if (patch.profile === 'custom') {
+      targetProfile = 'custom';
+    }
+
+    if (patch.dsp && typeof patch.dsp === 'object') {
+      if (!patch.profile) {
+        targetProfile = 'custom';
+      }
+      baseDsp = { ...baseDsp, ...patch.dsp };
+    }
+
+    updates.audioProfile = targetProfile;
+    updates.audioDsp = normalizeDspConfig(baseDsp, SOUND_PROFILES[targetProfile] ? targetProfile : 'hifi');
+
+    this.store.save(updates);
+
+    const { hz } = this.getSampleRateConfig();
     if (this.librespotProc && this.pacer) {
       this.spawnFfmpegTranscoder(hz);
     } else {
       await this.ensureStarted();
     }
     return this.getStatus();
+  }
+
+  /**
+   * Changes the active sample rate ('22k' or '11k') and hot-swaps FFmpeg without restarting librespot.
+   */
+  async setSampleRate(rateMode) {
+    return this.updateAudioConfig({ rate: rateMode });
   }
 
   /**
@@ -615,18 +941,32 @@ class AudioStreamEngine extends EventEmitter {
 
   getStatus() {
     const { mode, hz } = this.getSampleRateConfig();
+    const { profile, dsp, filterChain } = this.getDspConfig();
+    const macClients = this.getMacClientList();
     return {
-      deviceName: DEVICE_NAME,
+      deviceName: this.getActiveMacSpeakerName(),
+      receiverDeviceName: DEVICE_NAME,
       available: this.hasBinaries,
       paired: this.isPaired(),
       running: Boolean(this.librespotProc),
       state: this.state,
       sampleRateMode: mode,
       sampleRateHz: hz,
+      profile,
+      profiles: Object.values(SOUND_PROFILES).map(({ id, label, description, dsp: presetDsp }) => ({
+        id,
+        label,
+        description,
+        dsp: presetDsp,
+      })),
+      dsp,
+      filterChain,
       tcpPort: DEFAULT_AUDIO_TCP_PORT,
       activeTcpClients: this.tcpClients.size,
       activeHttpClients: this.httpClients.size,
       bytesBroadcast: this.bytesBroadcast,
+      macClients,
+      activeMacClientId: this.activeMacClientId,
     };
   }
 }
@@ -636,7 +976,9 @@ module.exports = {
   DEVICE_NAME,
   LIBRESPOT_CLIENT_ID,
   LIBRESPOT_REDIRECT_URI,
+  SOUND_PROFILES,
   resolveSampleRateHz,
   createWavHeader,
+  buildFfmpegFilterChain,
   AudioStreamEngine,
 };

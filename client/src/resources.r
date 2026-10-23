@@ -30,7 +30,7 @@ resource 'vers' (2) {
 /* Owner Signature Resource ('MCSP' ID 0) */
 type 'MCSP' as 'STR ';
 resource 'MCSP' (0, "Owner Resource") {
-    "MaciSpot " APP_VERSION_SHORT " (" APP_VERSION_CODENAME ")"
+    "SpotiMac " APP_VERSION_SHORT " (" APP_VERSION_CODENAME ")"
 };
 
 /* File Reference ('FREF' 128) & Bundle ('BNDL' 128) for Custom Finder Icons */
@@ -51,7 +51,7 @@ resource 'BNDL' (128) {
 };
 
 /* 32x32 Large Application Icon & Mask ('ICN#' 128) */
-resource 'ICN#' (128, "MaciSpot", purgeable) {
+resource 'ICN#' (128, "SpotiMac", purgeable) {
     {
         /* Icon Bits */
         $"000FF000"
@@ -123,7 +123,7 @@ resource 'ICN#' (128, "MaciSpot", purgeable) {
 };
 
 /* 16x16 Small Application Icon & Mask ('ics#' 128) */
-resource 'ics#' (128, "MaciSpot Small", purgeable) {
+resource 'ics#' (128, "SpotiMac Small", purgeable) {
     {
         /* Small Icon Bits */
         $"1FF0"
@@ -197,7 +197,7 @@ resource 'MENU' (128, "Apple") {
     0x7FFFFFFD,
     enabled, apple,
     {
-        "About MaciSpot...", noIcon, noKey, noMark, plain,
+        "About SpotiMac...", noIcon, noKey, noMark, plain,
         "-", noIcon, noKey, noMark, plain
     }
 };

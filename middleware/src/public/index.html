@@ -354,6 +354,8 @@
       <span id="lan-ip">IP: ...</span>
       <span>•</span>
       <span id="udp-port">UDP: 6801</span>
+      <span>•</span>
+      <span id="server-version">v0.3</span>
     </div>
   </header>
 
@@ -408,7 +410,7 @@
           <button type="button" class="mac-btn hidden" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
         </div>
 
-        <!-- 68k Native Audio Streaming Sample Rate Toggle (shown when READY) -->
+        <!-- 68k Native Audio Streaming Sample Rate & Sound Profile Toggle (shown when READY) -->
         <div id="audio-settings-panel" class="audio-settings-box hidden">
           <div class="audio-settings-header">
             <span>68k Local Audio Stream:</span>
@@ -420,6 +422,23 @@
           <p class="audio-helper-text">
             <strong>11 kHz</strong> suits Macintosh Plus / SE (68000) systems and slower network bridges better. <strong>22 kHz</strong> is recommended for SE/30 and 68030+ Macs.
           </p>
+
+          <!-- 3 Curated Sound Profiles -->
+          <div style="margin-top:6px; padding-top:8px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:6px;">
+            <div class="audio-settings-header">
+              <span>Sound Profile (Live Hot-Swap):</span>
+              <a href="/test.html#dsp-lab" class="subtle-btn" style="font-weight:normal;">Granular Lab →</a>
+            </div>
+            <div class="rate-toggle-group" style="flex-wrap:wrap;">
+              <button type="button" id="prof-warm-btn" class="rate-btn active" style="flex:1;" onclick="setAudioProfile('warm')">Low Noise (Warm)</button>
+              <button type="button" id="prof-hifi-btn" class="rate-btn" style="flex:1;" onclick="setAudioProfile('hifi')">HiFi (Shibata)</button>
+              <button type="button" id="prof-compact-btn" class="rate-btn" style="flex:1;" onclick="setAudioProfile('compact')">Compact Mac Speaker</button>
+            </div>
+            <p id="profile-desc-text" class="audio-helper-text">
+              Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.
+            </p>
+          </div>
+
           <div id="speaker-pair-row" style="margin-top:4px; padding-top:6px; border-top:1px dotted #000; display:flex; align-items:center; justify-content:space-between; gap:8px;">
             <span id="speaker-status-label" style="font-size:11px;">Speaker: Checking...</span>
             <a href="/api/spotify/audio-login" id="speaker-pair-btn" class="mac-btn primary" style="font-size:11px; padding:4px 10px;">Activate "Macintosh 68k" Speaker</a>
@@ -513,6 +532,19 @@
       }
     }
 
+    async function setAudioProfile(profile) {
+      try {
+        await fetch('/api/spotify/audio-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile }),
+        });
+        await pollStatus();
+      } catch (err) {
+        await pollStatus();
+      }
+    }
+
     async function retryConnection() {
       try {
         await fetch('/api/spotify/clear-error', { method: 'POST' });
@@ -546,6 +578,9 @@
       document.getElementById('server-status-text').textContent = 'Server Online';
       document.getElementById('lan-ip').textContent = `IP: ${data.server.ip}:${data.server.httpPort}`;
       document.getElementById('udp-port').textContent = `UDP: ${data.server.udpPort}`;
+      if (data.server.version) {
+        document.getElementById('server-version').textContent = data.server.version;
+      }
 
       if (!spotify) return;
 
@@ -561,10 +596,28 @@
         document.getElementById('rate-22k-btn').classList.toggle('active', !is11k);
         document.getElementById('rate-11k-btn').classList.toggle('active', is11k);
 
+        const prof = spotify.audio.profile || 'warm';
+        document.getElementById('prof-hifi-btn').classList.toggle('active', prof === 'hifi');
+        document.getElementById('prof-warm-btn').classList.toggle('active', prof === 'warm');
+        document.getElementById('prof-compact-btn').classList.toggle('active', prof === 'compact');
+
+        const descEl = document.getElementById('profile-desc-text');
+        if (prof === 'warm') {
+          descEl.textContent = 'Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.';
+        } else if (prof === 'compact') {
+          descEl.textContent = 'Tailored for the internal speaker in a Plus/SE/Classic: rolls off sub-140 Hz cone rumble, boosts 2.2 kHz midrange presence, and levels dynamics.';
+        } else if (prof === 'custom') {
+          descEl.textContent = `Custom Granular DSP active (${spotify.audio.filterChain || 'custom'}).`;
+        } else {
+          descEl.textContent = 'Maximum dynamic range and natural transients with Shibata noise-shaped dither. Best at 100% client volume.';
+        }
+
         const speakerLabel = document.getElementById('speaker-status-label');
         const speakerBtn = document.getElementById('speaker-pair-btn');
         if (spotify.audio.paired && spotify.audio.running) {
-          speakerLabel.textContent = `● Speaker Active: "${spotify.audio.deviceName}"`;
+          const macCount = Array.isArray(spotify.audio.macClients) ? spotify.audio.macClients.length : 0;
+          const suffix = macCount > 1 ? ` (${macCount} Macs online)` : '';
+          speakerLabel.textContent = `● Active Speaker: "${spotify.audio.deviceName}"${suffix}`;
           speakerBtn.textContent = 'Re-Pair Speaker';
           speakerBtn.classList.remove('primary');
         } else {

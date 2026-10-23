@@ -26,4 +26,4 @@ basilisk: client
 	open -a "/Applications/Basillisk/BasiliskII.app"
 
 launch-client: client
-	./toolchain/Retro68-build/toolchain/bin/LaunchAPPL -e shared --shared-directory "/Applications/Basillisk/driveshare/MacCompanion/launch" client/build/MaciSpot.bin
+	./toolchain/Retro68-build/toolchain/bin/LaunchAPPL -e shared --shared-directory "/Applications/Basillisk/driveshare/MacCompanion/launch" client/build/SpotiMac.bin

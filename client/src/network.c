@@ -139,6 +139,11 @@ ip_addr NetGetServerIP(void)
     return gServerIP;
 }
 
+ip_addr NetGetOurIP(void)
+{
+    return gOurIP;
+}
+
 unsigned short NetGetServerPort(void)
 {
     return gServerHttpPort;

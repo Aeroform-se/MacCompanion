@@ -35,6 +35,9 @@ const store = createModuleStore('spotify', {
   userProfile: null,
   smartShuffleActive: false,
   audioSampleRate: '22k',
+  audioProfile: 'warm',
+  audioDsp: null,
+  artworkDither: 'adaptive',
   lastError: null,
   lastErrorCode: null,
 });
@@ -255,10 +258,35 @@ async function checkIsTrackLiked(trackIdOrUri) {
     shuffleTs: 0,
     repeatState: null,
     repeatTs: 0,
+    deviceName: null,
+    deviceNameTs: 0,
   };
 
+  function registerMacFromRequest(req) {
+    if (!req) return null;
+    const clientName = req.query && req.query.client_name;
+    const clientId = req.query && req.query.client_id;
+    if (!clientName && !clientId) return null;
+    const rawIp =
+      (req.query && req.query.client_ip) ||
+      req.ip ||
+      (req.socket && req.socket.remoteAddress) ||
+      '';
+    return audioEngine.registerMacClient({
+      id: clientId || rawIp || clientName,
+      ip: rawIp,
+      name: clientName || 'Macintosh 68k',
+    });
+  }
+
   function applyOptimisticOverrides(np) {
-    if (!np || customFetch) return np;
+    if (!np) return np;
+    // When Spotify's active speaker is our librespot receiver ("Macintosh 68k"),
+    // map deviceName to the currently selected 68k Mac's speaker name.
+    if (np.deviceName && np.deviceName.toLowerCase().includes('macintosh 68k')) {
+      np.deviceName = audioEngine.getActiveMacSpeakerName();
+    }
+    if (customFetch) return np;
     const now = Date.now();
     if (optimisticState.isPlaying !== null && (now - optimisticState.isPlayingTs) < OPTIMISTIC_TTL_MS) {
       np.isPlaying = optimisticState.isPlaying;
@@ -277,6 +305,9 @@ async function checkIsTrackLiked(trackIdOrUri) {
     }
     if (optimisticState.repeatState !== null && (now - optimisticState.repeatTs) < OPTIMISTIC_TTL_MS) {
       np.repeatState = optimisticState.repeatState;
+    }
+    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 5000) {
+      np.deviceName = optimisticState.deviceName;
     }
     return np;
   }
@@ -702,6 +733,7 @@ router.get('/audio-callback', async (req, res) => {
  */
 router.get('/now-playing', async (req, res) => {
   try {
+    registerMacFromRequest(req);
     const raw = await callSpotify('/me/player');
     const data = store.load();
     let isLiked = false;
@@ -1338,18 +1370,74 @@ router.all('/toggle-like', async (req, res) => {
 
 router.get('/devices', async (req, res) => {
   try {
+    registerMacFromRequest(req);
     const data = await callSpotify('/me/player/devices');
     const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
-    const rows = devices.map((d) => [
-      'DEVICE',
-      d.id || '',
-      d.name || 'Unknown Device',
-      d.type || 'Speaker',
-      d.is_active ? '1' : '0',
-      typeof d.volume_percent === 'number' ? d.volume_percent : 100,
-    ]);
+    const macClients = audioEngine.getMacClientList();
+
+    const rows = [];
+    const expandedDevices = [];
+    let macsInserted = false;
+
+    for (const d of devices) {
+      const isLibrespot = d.name && d.name.toLowerCase().includes('macintosh 68k');
+      if (isLibrespot && macClients.length > 0) {
+        const vol = typeof d.volume_percent === 'number' ? d.volume_percent : 100;
+        for (const mac of macClients) {
+          const isMacActive = Boolean(d.is_active && mac.isActive);
+          rows.push([
+            'DEVICE',
+            mac.deviceId,
+            mac.name,
+            'Computer',
+            isMacActive ? '1' : '0',
+            vol,
+          ]);
+          expandedDevices.push({
+            id: mac.deviceId,
+            name: mac.name,
+            type: 'Computer',
+            is_active: isMacActive,
+            volume_percent: vol,
+          });
+        }
+        macsInserted = true;
+      } else {
+        rows.push([
+          'DEVICE',
+          d.id || '',
+          d.name || 'Unknown Device',
+          d.type || 'Speaker',
+          d.is_active ? '1' : '0',
+          typeof d.volume_percent === 'number' ? d.volume_percent : 100,
+        ]);
+        expandedDevices.push(d);
+      }
+    }
+
+    // If librespot is running locally and Macs are registered, ensure they appear in the speaker list
+    if (!macsInserted && macClients.length > 0 && audioEngine.isPaired()) {
+      for (const mac of macClients) {
+        rows.unshift([
+          'DEVICE',
+          mac.deviceId,
+          mac.name,
+          'Computer',
+          '0',
+          100,
+        ]);
+        expandedDevices.unshift({
+          id: mac.deviceId,
+          name: mac.name,
+          type: 'Computer',
+          is_active: false,
+          volume_percent: 100,
+        });
+      }
+    }
+
     const pipe = formatPipeTable(rows);
-    if (req.query.format === 'json') return res.json({ ok: true, devices, pipe: pipe.trim() });
+    if (req.query.format === 'json') return res.json({ ok: true, devices: expandedDevices, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
   } catch (err) {
     return handleRouteError(req, res, err);
@@ -1358,11 +1446,26 @@ router.get('/devices', async (req, res) => {
 
 router.all('/transfer', async (req, res) => {
   try {
+    registerMacFromRequest(req);
     let deviceId = req.query.device_id || (req.body && req.body.device_id);
     const target = (req.query.target || (req.body && req.body.target) || '').toLowerCase();
     let deviceName = '';
 
-    if (target === '68k' || target === 'macintosh' || deviceId === '68k') {
+    const isMacTarget =
+      target === '68k' ||
+      target === 'macintosh' ||
+      deviceId === '68k' ||
+      (typeof deviceId === 'string' && deviceId.startsWith('mac68k:')) ||
+      Boolean(deviceId && audioEngine.setActiveMacClient(deviceId));
+
+    if (isMacTarget) {
+      let chosenMac = null;
+      if (deviceId && deviceId !== '68k') {
+        chosenMac = audioEngine.setActiveMacClient(deviceId);
+      }
+      if (!chosenMac) {
+        chosenMac = audioEngine.getActiveMacClient();
+      }
       await audioEngine.ensureStarted();
       const data = await callSpotify('/me/player/devices');
       const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
@@ -1373,7 +1476,9 @@ router.all('/transfer', async (req, res) => {
         throw err;
       }
       deviceId = found.id;
-      deviceName = found.name;
+      deviceName = chosenMac ? chosenMac.name : found.name;
+      optimisticState.deviceName = deviceName;
+      optimisticState.deviceNameTs = Date.now();
     } else if (target === 'desktop' || target === 'other' || deviceId === 'desktop') {
       const data = await callSpotify('/me/player/devices');
       const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
@@ -1385,6 +1490,23 @@ router.all('/transfer', async (req, res) => {
       }
       deviceId = found.id;
       deviceName = found.name;
+      optimisticState.deviceName = deviceName;
+      optimisticState.deviceNameTs = Date.now();
+    } else if (deviceId) {
+      try {
+        const data = await callSpotify('/me/player/devices');
+        const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
+        const found = devices.find((d) => d.id === deviceId);
+        if (found && found.name) {
+          if (found.name.toLowerCase().includes('macintosh 68k')) {
+            deviceName = audioEngine.getActiveMacSpeakerName();
+          } else {
+            deviceName = found.name;
+          }
+          optimisticState.deviceName = deviceName;
+          optimisticState.deviceNameTs = Date.now();
+        }
+      } catch {}
     }
 
     if (!deviceId) {
@@ -1890,10 +2012,24 @@ router.get('/search', async (req, res) => {
  *   - `id` / `track_id` / `album_id` / `url`: Optional specific track/album/image URL.
  *     If omitted, automatically uses the currently playing track's album cover (or a 1-bit retro musical note placeholder if idle).
  */
+const rawSourceJpegCache = new Map();
+
+router.all('/artwork-dither', (req, res) => {
+  const dither = String(req.query.dither || (req.body && req.body.dither) || store.load().artworkDither || 'adaptive').toLowerCase().trim();
+  if (req.method === 'POST' || req.query.dither || (req.body && req.body.dither)) {
+    store.save({ artworkDither: dither });
+    artworkCache.clear();
+  }
+  const active = store.load().artworkDither || 'adaptive';
+  const pipe = `OK|ARTWORK_DITHER|${active}\n`;
+  if (req.query.format === 'json') return res.json({ ok: true, artworkDither: active, pipe: pipe.trim() });
+  return sendPipeResponse(req, res, pipe);
+});
+
 router.get('/artwork', async (req, res) => {
   try {
     const size = parseInt(req.query.size || String(DEFAULT_ART_SIZE), 10);
-    const dither = req.query.dither || 'atkinson';
+    const dither = req.query.dither || store.load().artworkDither || 'adaptive';
     const format = req.query.format || 'raw';
     let imageUrl = (req.query.url || '').trim();
 
@@ -1924,19 +2060,30 @@ router.get('/artwork', async (req, res) => {
     if (!customFetch && cacheKey && artworkCache.has(cacheKey)) {
       result = artworkCache.get(cacheKey);
     } else if (imageUrl) {
-      const fetchFn = getFetchImpl();
-      const imgRes = await fetchFn(imageUrl);
-      if (!imgRes.ok) {
-        throw new Error(`Failed to fetch album art JPEG: HTTP ${imgRes.status}`);
+      let sourceBuf = !customFetch ? rawSourceJpegCache.get(imageUrl) : null;
+      if (!sourceBuf) {
+        const fetchFn = getFetchImpl();
+        const imgRes = await fetchFn(imageUrl);
+        if (!imgRes.ok) {
+          throw new Error(`Failed to fetch album art JPEG: HTTP ${imgRes.status}`);
+        }
+        const arrayBuf = await imgRes.arrayBuffer();
+        sourceBuf = Buffer.from(arrayBuf);
+        if (!customFetch) {
+          if (rawSourceJpegCache.size > 6) {
+            const oldestUrl = rawSourceJpegCache.keys().next().value;
+            rawSourceJpegCache.delete(oldestUrl);
+          }
+          rawSourceJpegCache.set(imageUrl, sourceBuf);
+        }
       }
-      const arrayBuf = await imgRes.arrayBuffer();
-      result = await processArtworkBuffer(Buffer.from(arrayBuf), {
+      result = await processArtworkBuffer(sourceBuf, {
         size,
         dither,
         format,
       });
       if (!customFetch && cacheKey) {
-        if (artworkCache.size > 12) {
+        if (artworkCache.size > 20) {
           const oldest = artworkCache.keys().next().value;
           artworkCache.delete(oldest);
         }
@@ -1963,29 +2110,69 @@ router.get('/artwork', async (req, res) => {
 // ============================================================================
 
 /**
- * GET /api/spotify/audio-config
- * Returns current local 68k audio streaming configuration & receiver status.
- * Pipe format:
- *   AUDIO|<state>|<sampleRateMode(22k/11k)>|<sampleRateHz(22255/11127)>|<tcpPort(6802)>|<deviceName>
- */
-router.get('/audio-config', (req, res) => {
-  const st = audioEngine.getStatus();
-  const pipe = `${formatPipeRow(['AUDIO', st.state, st.sampleRateMode, st.sampleRateHz, st.tcpPort, st.deviceName])}\n`;
-  if (req.query.format === 'json') {
-    return res.json({ ok: true, audio: st, pipe: pipe.trim() });
-  }
-  return sendPipeResponse(req, res, pipe);
-});
-
-/**
- * POST/GET /api/spotify/audio-config?rate=22k|11k
- * Sets the local 68k audio sample rate (22,255 Hz or 11,127 Hz) and hot-restarts the transcoder.
+ * GET / POST /api/spotify/audio-config
+ * Returns or updates current local 68k audio streaming configuration, sound profile, & DSP settings.
+ * Pipe format (GET):
+ *   AUDIO|<state>|<sampleRateMode(22k/11k)>|<sampleRateHz(22255/11127)>|<tcpPort(6802)>|<deviceName>|<profile>
  */
 router.all('/audio-config', async (req, res) => {
   try {
-    const rate = req.query.rate || (req.body && req.body.rate) || '22k';
-    const st = await audioEngine.setSampleRate(rate);
-    const pipe = `${formatPipeRow(['OK', 'AUDIO_RATE', st.sampleRateMode, st.sampleRateHz, st.tcpPort])}\n`;
+    const src = { ...(req.query || {}), ...(req.body || {}) };
+    const hasUpdate =
+      req.method === 'POST' ||
+      req.method === 'PUT' ||
+      src.rate !== undefined ||
+      src.profile !== undefined ||
+      src.dsp !== undefined ||
+      src.ditherMethod !== undefined ||
+      src.resampler !== undefined ||
+      src.compressorEnabled !== undefined;
+
+    if (!hasUpdate) {
+      const st = audioEngine.getStatus();
+      const pipe = `${formatPipeRow(['AUDIO', st.state, st.sampleRateMode, st.sampleRateHz, st.tcpPort, st.deviceName, st.profile])}\n`;
+      if (req.query.format === 'json') {
+        return res.json({ ok: true, audio: st, pipe: pipe.trim() });
+      }
+      return sendPipeResponse(req, res, pipe);
+    }
+
+    const patch = {};
+    if (src.rate !== undefined) patch.rate = src.rate;
+    if (src.profile !== undefined) patch.profile = src.profile;
+
+    const dspKeys = [
+      'resampler',
+      'ditherMethod',
+      'ditherScale',
+      'compressorEnabled',
+      'compThresholdDb',
+      'compRatio',
+      'compMakeupDb',
+      'highpassHz',
+      'lowpassHz',
+      'eqPresenceDb',
+      'pregainDb',
+      'limiterEnabled',
+    ];
+    const dspPatch = (src.dsp && typeof src.dsp === 'object') ? { ...src.dsp } : {};
+    for (const k of dspKeys) {
+      if (src[k] !== undefined) {
+        if (k === 'compressorEnabled' || k === 'limiterEnabled') {
+          dspPatch[k] = src[k] === true || src[k] === 'true' || src[k] === '1' || src[k] === 1;
+        } else if (k === 'resampler' || k === 'ditherMethod') {
+          dspPatch[k] = String(src[k]);
+        } else {
+          dspPatch[k] = Number(src[k]);
+        }
+      }
+    }
+    if (Object.keys(dspPatch).length > 0) {
+      patch.dsp = dspPatch;
+    }
+
+    const st = await audioEngine.updateAudioConfig(patch);
+    const pipe = `${formatPipeRow(['OK', 'AUDIO_RATE', st.sampleRateMode, st.sampleRateHz, st.tcpPort, st.profile])}\n`;
     if (req.query.format === 'json') {
       return res.json({ ok: true, audio: st, pipe: pipe.trim() });
     }
