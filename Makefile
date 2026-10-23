@@ -1,4 +1,4 @@
-.PHONY: up down build logs test dev client basilisk launch-client
+.PHONY: up down build logs test dev client
 
 up:
 	docker-compose up -d --build
@@ -19,11 +19,6 @@ dev:
 	cd middleware && npm run dev
 
 client:
-	@chmod +x scripts/deploy-basilisk.sh
-	./scripts/deploy-basilisk.sh
-
-basilisk: client
-	open -a "/Applications/Basillisk/BasiliskII.app"
-
-launch-client: client
-	./toolchain/Retro68-build/toolchain/bin/LaunchAPPL -e shared --shared-directory "/Applications/Basillisk/driveshare/MacCompanion/launch" client/build/SpotiMac.bin
+	@chmod +x scripts/build-client.sh
+	@if [ -f scripts/deploy-basilisk.sh ]; then chmod +x scripts/deploy-basilisk.sh; fi
+	./scripts/build-client.sh

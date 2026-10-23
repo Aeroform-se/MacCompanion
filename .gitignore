@@ -35,6 +35,7 @@ releases/
 *.img
 middleware/src/public/test.html
 middleware/scripts/
+scripts/deploy-basilisk.sh
 
 # Logs & Temporary Files
 logs/

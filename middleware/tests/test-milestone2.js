@@ -77,7 +77,7 @@ async function runTests() {
     const configData = JSON.parse(configRes.body);
     assert.strictEqual(configData.status.state, 'AWAITING_LOGIN');
     assert.strictEqual(configData.status.config.clientId, 'web_ui_client_id_123');
-    assert.strictEqual(configData.status.config.redirectUri, 'https://aeroform-se.github.io/spotify68k/callback.html');
+    assert.strictEqual(configData.status.config.redirectUri, 'https://aeroform-se.github.io/MacCompanion/callback.html');
     assert.strictEqual(configData.status.config.source, 'store');
     console.log('[PASS] Web UI configuration saved to persistent store -> AWAITING_LOGIN');
 
@@ -94,7 +94,7 @@ async function runTests() {
     assert.strictEqual(loginRes.statusCode, 302, 'Login should redirect to Spotify authorize URL');
     const redirectLocation = loginRes.headers.location;
     assert.ok(redirectLocation.startsWith('https://accounts.spotify.com/authorize?'));
-    assert.ok(redirectLocation.includes(encodeURIComponent('https://aeroform-se.github.io/spotify68k/callback.html')));
+    assert.ok(redirectLocation.includes(encodeURIComponent('https://aeroform-se.github.io/MacCompanion/callback.html')));
 
     const storedAfterLoginInit = spotifyModule.store.load();
     assert.ok(storedAfterLoginInit.codeVerifier, 'codeVerifier should be persisted');

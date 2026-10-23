@@ -20,7 +20,7 @@ const { AudioStreamEngine } = require('./audio');
 
 const router = express.Router();
 
-const DEFAULT_REDIRECT_URI = 'https://aeroform-se.github.io/spotify68k/callback.html';
+const DEFAULT_REDIRECT_URI = 'https://aeroform-se.github.io/MacCompanion/callback.html';
 const TOKEN_EXPIRY_BUFFER_MS = 2 * 60 * 1000; // Refresh 2 minutes before expiry
 
 // Persistent store mounted in ./data/spotify.json
