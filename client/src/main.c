@@ -2492,9 +2492,11 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
 static void ParseTracksResponseIntoRightList(const char *buf)
 {
     const char *line = buf;
-    gRightCount    = 0;
-    gRightSelected = -1;
-    gRightScroll   = 0;
+    gRightCount     = 0;
+    gRightSelected  = -1;
+    gRightScroll    = 0;
+    gLastClickedRow = -1;
+    gLastClickTicks = 0;
 
     while (line && *line && gRightCount < MAX_RIGHT_ITEMS) {
         const char *nextLine = strchr(line, '\n');
@@ -3850,16 +3852,19 @@ static void HandleCanvasClick(Point pt)
             short clickedRow = gRightScroll + (pt.v - LIST_TOP_Y) / ROW_HEIGHT;
             if (clickedRow >= 0 && clickedRow < gRightCount) {
                 unsigned long now = TickCount();
-                /* If user double-clicked a track that was already started on the first click, ignore second click */
+                /* Gracefully ignore the second click of a double-click on the same track row
+                 * (gLastClickTicks is stamped AFTER PlayRightItemAtIndex finishes its HTTP calls,
+                 * so a second click queued during network I/O or within ~600ms after is ignored). */
                 if (clickedRow == gLastClickedRow &&
-                    (now - gLastClickTicks) <= GetDblTime() &&
-                    strcmp(gRightItems[clickedRow].kind, "TRACK") == 0 &&
-                    IsRightItemCurrentlyPlaying(clickedRow)) {
+                    gLastClickTicks != 0 &&
+                    (now - gLastClickTicks) <= 36 &&
+                    strcmp(gRightItems[clickedRow].kind, "TRACK") == 0) {
                     return;
                 }
                 gLastClickedRow = clickedRow;
                 gLastClickTicks = now;
                 PlayRightItemAtIndex(clickedRow);
+                gLastClickTicks = TickCount();
             }
             return;
         }
