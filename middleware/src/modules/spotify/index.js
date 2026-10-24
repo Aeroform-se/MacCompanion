@@ -38,6 +38,9 @@ const store = createModuleStore('spotify', {
   audioProfile: 'warm',
   audioDsp: null,
   artworkDither: 'adaptive',
+  lastSpeakerId: null,
+  lastSpeakerName: null,
+  searchHistory: [],
   lastError: null,
   lastErrorCode: null,
 });
@@ -149,8 +152,15 @@ async function callPlayerCommand(endpoint, options = {}) {
       try {
         const devData = await callSpotify('/me/player/devices');
         const devices = (devData && Array.isArray(devData.devices)) ? devData.devices : [];
+        const saved = store.load();
+        const savedId = saved && saved.lastSpeakerId ? String(saved.lastSpeakerId) : '';
+        const savedName = saved && saved.lastSpeakerName ? String(saved.lastSpeakerName).toLowerCase() : '';
+        const savedIsMac = savedId.startsWith('mac68k:') || savedName.includes('macintosh 68k');
         const target =
           devices.find((d) => d.is_active && d.id) ||
+          (savedId && devices.find((d) => d.id === savedId)) ||
+          (savedName && devices.find((d) => d.name && d.name.toLowerCase() === savedName)) ||
+          (savedIsMac && devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k') && d.id)) ||
           devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k') && d.id) ||
           devices.find((d) => d.id);
         if (target && target.id) {
@@ -354,8 +364,15 @@ async function checkIsTrackLiked(trackIdOrUri) {
     if (optimisticState.repeatState !== null && (now - optimisticState.repeatTs) < OPTIMISTIC_TTL_MS) {
       np.repeatState = optimisticState.repeatState;
     }
-    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 6000) {
+    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 15000) {
       np.deviceName = optimisticState.deviceName;
+    } else if (!np.deviceName) {
+      const saved = store.load();
+      if (saved && saved.lastSpeakerName) {
+        np.deviceName = saved.lastSpeakerName;
+      } else if (optimisticState.deviceName) {
+        np.deviceName = optimisticState.deviceName;
+      }
     }
     return np;
   }
@@ -1677,20 +1694,27 @@ router.all('/transfer', async (req, res) => {
   try {
     registerMacFromRequest(req);
     let deviceId = req.query.device_id || (req.body && req.body.device_id);
+    const requestedName = (req.query.device_name || (req.body && req.body.device_name) || '').trim();
+    const isStartup = req.query.startup === '1' || req.query.play === 'keep';
     const target = (req.query.target || (req.body && req.body.target) || '').toLowerCase();
-    let deviceName = '';
+    let deviceName = requestedName || '';
+    const origRequestedId = deviceId || '';
 
     const isMacTarget =
       target === '68k' ||
       target === 'macintosh' ||
       deviceId === '68k' ||
       (typeof deviceId === 'string' && deviceId.startsWith('mac68k:')) ||
-      Boolean(deviceId && audioEngine.setActiveMacClient(deviceId));
+      Boolean(deviceId && audioEngine.setActiveMacClient(deviceId)) ||
+      Boolean(requestedName && audioEngine.setActiveMacClient(requestedName));
 
     if (isMacTarget) {
       let chosenMac = null;
       if (deviceId && deviceId !== '68k') {
         chosenMac = audioEngine.setActiveMacClient(deviceId);
+      }
+      if (!chosenMac && requestedName) {
+        chosenMac = audioEngine.setActiveMacClient(requestedName);
       }
       if (!chosenMac) {
         chosenMac = audioEngine.getActiveMacClient();
@@ -1700,6 +1724,15 @@ router.all('/transfer', async (req, res) => {
       const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
       const found = devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k'));
       if (!found) {
+        if (isStartup && chosenMac) {
+          deviceName = chosenMac.name;
+          optimisticState.deviceName = deviceName;
+          optimisticState.deviceNameTs = Date.now();
+          store.save({ lastSpeakerId: chosenMac.deviceId, lastSpeakerName: deviceName });
+          const pipe = formatPipeRow(['OK', 'TRANSFER', chosenMac.deviceId, deviceName]) + '\n';
+          if (req.query.format === 'json') return res.json({ ok: true, deviceId: chosenMac.deviceId, deviceName, pipe: pipe.trim() });
+          return sendPipeResponse(req, res, pipe);
+        }
         const err = new Error('"Macintosh 68k" speaker not visible in Spotify yet. Wait 2 seconds and try again.');
         err.status = 404;
         throw err;
@@ -1708,6 +1741,10 @@ router.all('/transfer', async (req, res) => {
       deviceName = chosenMac ? chosenMac.name : found.name;
       optimisticState.deviceName = deviceName;
       optimisticState.deviceNameTs = Date.now();
+      store.save({
+        lastSpeakerId: chosenMac ? chosenMac.deviceId : origRequestedId || deviceId,
+        lastSpeakerName: deviceName,
+      });
     } else if (target === 'desktop' || target === 'other' || deviceId === 'desktop') {
       const data = await callSpotify('/me/player/devices');
       const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
@@ -1721,21 +1758,30 @@ router.all('/transfer', async (req, res) => {
       deviceName = found.name;
       optimisticState.deviceName = deviceName;
       optimisticState.deviceNameTs = Date.now();
-    } else if (deviceId) {
+      store.save({ lastSpeakerId: deviceId, lastSpeakerName: deviceName });
+    } else if (deviceId || requestedName) {
       try {
         const data = await callSpotify('/me/player/devices');
         const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
-        const found = devices.find((d) => d.id === deviceId);
-        if (found && found.name) {
-          if (found.name.toLowerCase().includes('macintosh 68k')) {
-            deviceName = audioEngine.getActiveMacSpeakerName();
-          } else {
-            deviceName = found.name;
+        const found =
+          (deviceId && devices.find((d) => d.id === deviceId)) ||
+          (requestedName && devices.find((d) => d.name && d.name.toLowerCase() === requestedName.toLowerCase()));
+        if (found) {
+          deviceId = found.id;
+          if (found.name) {
+            if (found.name.toLowerCase().includes('macintosh 68k')) {
+              deviceName = audioEngine.getActiveMacSpeakerName();
+            } else {
+              deviceName = found.name;
+            }
           }
-          optimisticState.deviceName = deviceName;
-          optimisticState.deviceNameTs = Date.now();
         }
       } catch {}
+      if (deviceName) {
+        optimisticState.deviceName = deviceName;
+        optimisticState.deviceNameTs = Date.now();
+        store.save({ lastSpeakerId: deviceId || origRequestedId, lastSpeakerName: deviceName });
+      }
     }
 
     if (!deviceId) {
@@ -1746,7 +1792,7 @@ router.all('/transfer', async (req, res) => {
 
     await callSpotify('/me/player', {
       method: 'PUT',
-      body: { device_ids: [deviceId], play: true },
+      body: isStartup ? { device_ids: [deviceId] } : { device_ids: [deviceId], play: true },
     });
     nowPlayingCache.fetchedAt = 0;
     const pipe = formatPipeRow(['OK', 'TRANSFER', deviceId, deviceName || deviceId]) + '\n';
@@ -2101,6 +2147,221 @@ router.get('/artist/:id/albums', async (req, res) => {
 });
 
 /**
+ * GET /api/spotify/artist/:id/top-tracks
+ * Lists an artist's popular tracks (falls back to search if Dev Mode restricts top-tracks).
+ */
+router.get('/artist/:id/top-tracks', async (req, res) => {
+  try {
+    const { id: artistId } = normalizeSpotifyUri(req.params.id, 'artist');
+    const artistName = (req.query.name || '').trim();
+    let tracks = [];
+    try {
+      const data = await callSpotify(`/artists/${encodeURIComponent(artistId)}/top-tracks`, {
+        query: { market: 'from_token' },
+      });
+      tracks = (data && Array.isArray(data.tracks)) ? data.tracks : [];
+    } catch {}
+    if (tracks.length === 0) {
+      let q = artistName;
+      if (!q) {
+        try {
+          const artistObj = await callSpotify(`/artists/${encodeURIComponent(artistId)}`);
+          if (artistObj && artistObj.name) q = artistObj.name;
+        } catch {}
+      }
+      if (q) {
+        const searchData = await callSpotify('/search', {
+          query: { q, type: 'track', limit: 25 },
+        });
+        tracks = (searchData && searchData.tracks && Array.isArray(searchData.tracks.items))
+          ? searchData.tracks.items
+          : [];
+      }
+    }
+    const rows = tracks.filter(Boolean).map((t) => formatTrackRow('TRACK', t));
+    recordTrackListRows(rows);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items: tracks, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/show/:id/episodes
+ * Lists episodes of a podcast / show so they can be played in the right column.
+ */
+router.get('/show/:id/episodes', async (req, res) => {
+  try {
+    const { id: showId } = normalizeSpotifyUri(req.params.id, 'show');
+    const limit = Math.min(35, parseInt(req.query.limit || '25', 10));
+    const data = await callSpotify(`/shows/${encodeURIComponent(showId)}/episodes`, {
+      query: { limit },
+    });
+    const items = (data && Array.isArray(data.items)) ? data.items : [];
+    const rows = items.filter(Boolean).map((ep) => [
+      'TRACK',
+      ep.id || '',
+      ep.name || 'Episode',
+      ep.release_date || '',
+      '',
+      ep.duration_ms || 0,
+      formatTimeMmSs(ep.duration_ms || 0),
+      ep.uri || (ep.id ? `spotify:episode:${ep.id}` : ''),
+    ]);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/home-suggestions
+ * Returns a personalized list of last played items (playlists, albums), top artists,
+ * suggested playlists, saved shows/podcasts, and new releases for the Home Library view:
+ *   KIND|id|name|subtitle|count|uri
+ * where KIND is PLAYLIST, ALBUM, ARTIST, or SHOW.
+ */
+let homeSuggestionsCache = { rows: null, ts: 0 };
+
+router.get('/home-suggestions', async (req, res) => {
+  try {
+    if (!customFetch && homeSuggestionsCache.rows && (Date.now() - homeSuggestionsCache.ts) < 60000) {
+      const pipe = formatPipeTable(homeSuggestionsCache.rows);
+      if (req.query.format === 'json') return res.json({ ok: true, rows: homeSuggestionsCache.rows, pipe: pipe.trim() });
+      return sendPipeResponse(req, res, pipe);
+    }
+
+    const [recentRes, playlistsRes, topArtistsRes, savedAlbumsRes, showsRes, newRelRes] = await Promise.allSettled([
+      callSpotify('/me/player/recently-played', { query: { limit: 25 } }),
+      callSpotify('/me/playlists', { query: { limit: 15 } }),
+      callSpotify('/me/top/artists', { query: { time_range: 'short_term', limit: 4 } }),
+      callSpotify('/me/albums', { query: { limit: 5 } }),
+      callSpotify('/me/shows', { query: { limit: 3 } }),
+      callSpotify('/browse/new-releases', { query: { limit: 4 } }),
+    ]);
+
+    const seenUris = new Set();
+    const rows = [];
+    const pushUnique = (kind, id, name, subtitle, count, uri) => {
+      if (!id || !name) return;
+      const key = uri || `${kind}:${id}`;
+      if (seenUris.has(key)) return;
+      seenUris.add(key);
+      rows.push([kind, id, name, subtitle || '', count || 0, uri || `spotify:${kind.toLowerCase()}:${id}`]);
+    };
+
+    const userPlaylists = (playlistsRes.status === 'fulfilled' && playlistsRes.value && Array.isArray(playlistsRes.value.items))
+      ? playlistsRes.value.items.filter(Boolean)
+      : [];
+    const playlistByUri = new Map();
+    for (const p of userPlaylists) {
+      if (p.uri) playlistByUri.set(p.uri, p);
+    }
+
+    // 1. Recently played contexts (playlists/albums) and albums from recent listening history
+    if (recentRes.status === 'fulfilled' && recentRes.value && Array.isArray(recentRes.value.items)) {
+      let recentAlbumsAdded = 0;
+      for (const entry of recentRes.value.items) {
+        if (!entry) continue;
+        if (entry.context && entry.context.uri) {
+          const ctxUri = entry.context.uri;
+          if (ctxUri.startsWith('spotify:playlist:') && playlistByUri.has(ctxUri)) {
+            const pl = playlistByUri.get(ctxUri);
+            const total = (pl.items && pl.items.total) || (pl.tracks && pl.tracks.total) || 0;
+            pushUnique('PLAYLIST', pl.id, pl.name, (pl.owner && pl.owner.display_name) || '', total, pl.uri);
+          }
+        }
+        const alb = entry.track && entry.track.album;
+        if (alb && alb.id && alb.name && recentAlbumsAdded < 4) {
+          const artist = Array.isArray(alb.artists) && alb.artists[0] ? alb.artists[0].name : '';
+          const before = rows.length;
+          pushUnique('ALBUM', alb.id, alb.name, artist, alb.total_tracks || 0, alb.uri);
+          if (rows.length > before) recentAlbumsAdded++;
+        }
+      }
+    }
+
+    // 2. Suggested / Top Playlists from the user's library (up to 4)
+    let plAdded = 0;
+    for (const p of userPlaylists) {
+      if (plAdded >= 4) break;
+      const total = (p.items && p.items.total) || (p.tracks && p.tracks.total) || 0;
+      const before = rows.length;
+      pushUnique('PLAYLIST', p.id, p.name, (p.owner && p.owner.display_name) || '', total, p.uri);
+      if (rows.length > before) plAdded++;
+    }
+
+    // 3. Top Artists (up to 3)
+    if (topArtistsRes.status === 'fulfilled' && topArtistsRes.value && Array.isArray(topArtistsRes.value.items)) {
+      for (const ar of topArtistsRes.value.items.slice(0, 3)) {
+        if (ar && ar.id && ar.name) {
+          pushUnique('ARTIST', ar.id, ar.name, 'Artist', 0, ar.uri);
+        }
+      }
+    }
+
+    // 4. Saved Albums (up to 3)
+    if (savedAlbumsRes.status === 'fulfilled' && savedAlbumsRes.value && Array.isArray(savedAlbumsRes.value.items)) {
+      for (const entry of savedAlbumsRes.value.items.slice(0, 3)) {
+        const a = entry && entry.album;
+        if (a && a.id && a.name) {
+          const artist = Array.isArray(a.artists) && a.artists[0] ? a.artists[0].name : '';
+          pushUnique('ALBUM', a.id, a.name, artist, a.total_tracks || 0, a.uri);
+        }
+      }
+    }
+
+    // 5. Saved Podcasts / Shows (up to 2)
+    if (showsRes.status === 'fulfilled' && showsRes.value && Array.isArray(showsRes.value.items)) {
+      for (const entry of showsRes.value.items.slice(0, 2)) {
+        const s = entry && entry.show;
+        if (s && s.id && s.name) {
+          pushUnique('SHOW', s.id, s.name, s.publisher || '', s.total_episodes || 0, s.uri);
+        }
+      }
+    }
+
+    // 6. New Release Albums (up to 3)
+    if (newRelRes.status === 'fulfilled' && newRelRes.value && newRelRes.value.albums && Array.isArray(newRelRes.value.albums.items)) {
+      for (const a of newRelRes.value.albums.items.slice(0, 3)) {
+        if (a && a.id && a.name) {
+          const artist = Array.isArray(a.artists) && a.artists[0] ? a.artists[0].name : '';
+          pushUnique('ALBUM', a.id, a.name, artist, a.total_tracks || 0, a.uri);
+        }
+      }
+    }
+
+    const capped = rows.slice(0, 16);
+    if (!customFetch && capped.length > 0) {
+      homeSuggestionsCache = { rows: capped, ts: Date.now() };
+    }
+    const pipe = formatPipeTable(capped);
+    if (req.query.format === 'json') return res.json({ ok: true, rows: capped, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/search-history
+ * Returns the last 5 search queries stored on the server:
+ *   HISTORY|<query>
+ */
+router.get('/search-history', (req, res) => {
+  const data = store.load();
+  const history = Array.isArray(data.searchHistory) ? data.searchHistory.slice(0, 5) : [];
+  const rows = history.map((q) => ['HISTORY', q]);
+  const pipe = formatPipeTable(rows);
+  if (req.query.format === 'json') return res.json({ ok: true, history, pipe: pipe.trim() });
+  return sendPipeResponse(req, res, pipe);
+});
+
+/**
  * GET /api/spotify/shows?limit=20 (Saved Podcasts / Shows)
  */
 router.get('/shows', async (req, res) => {
@@ -2138,6 +2399,12 @@ router.get('/search', async (req, res) => {
       const err = new Error('Missing search query parameter q');
       err.status = 400;
       throw err;
+    }
+    if (!customFetch) {
+      const stored = store.load();
+      const prevHist = Array.isArray(stored.searchHistory) ? stored.searchHistory : [];
+      const nextHist = [q, ...prevHist.filter((item) => String(item).toLowerCase() !== q.toLowerCase())].slice(0, 5);
+      store.save({ searchHistory: nextHist });
     }
     const rawType = (req.query.type || 'track').toLowerCase().trim();
     const isMulti = rawType === 'all' || rawType === 'multi' || rawType.includes(',');

@@ -177,38 +177,48 @@ static unsigned long   gFoundStartTicks   = 0;
 static short           gFoundCountdownSec = 3;
 static Boolean         gInitialDataLoaded = false;
 
-static Boolean         gHomeMode          = false; /* false = Playlists (note icon), true = Home (home icon) */
+static Boolean         gHomeMode          = true;  /* false = Playlists (note icon), true = Home (home icon) */
 
 /* Search state */
-static Boolean         gSearchFocused     = false;
-static Boolean         gSearchViewOpen    = false;
-static char            gSearchQuery[48]   = "";
+#define MAX_SEARCH_HISTORY  5
+static Boolean         gSearchFocused         = false;
+static Boolean         gSearchViewOpen        = false;
+static Boolean         gSearchHistoryOpen     = false;
+static char            gSearchQuery[48]       = "";
 static SearchItem      gSearchItems[MAX_SEARCH_ITEMS];
-static short           gSearchCount       = 0;
-static short           gSearchScroll      = 0;
-static short           gSearchHoverRow    = -1;
+static short           gSearchCount           = 0;
+static short           gSearchScroll          = 0;
+static short           gSearchHoverRow        = -1;
+static char            gSearchHistory[MAX_SEARCH_HISTORY][48];
+static short           gSearchHistoryCount    = 0;
+static short           gSearchHistoryHoverRow = -1;
 
-/* Speaker Chooser Popover state */
-static Boolean         gSpeakerPopupOpen  = false;
+/* Speaker Chooser Popover & Persisted Speaker state */
+static Boolean         gSpeakerPopupOpen      = false;
 static DeviceItem      gDevices[MAX_DEVICES];
-static short           gDeviceCount       = 0;
+static short           gDeviceCount           = 0;
+static char            gSavedSpeakerId[64]    = "";
+static char            gSavedSpeakerName[48]  = "";
+static unsigned long   gSpeakerLockUntilTicks = 0;
 
 /* Server IP Input state */
-static char            gIpInput[32]       = "10.0.2.2";
+static char            gIpInput[32]           = "10.0.2.2";
 
 /* About Box Modal state */
-static Boolean         gAboutModalOpen    = false;
+static Boolean         gAboutModalOpen        = false;
 
 /* Button Hover & Pressed states */
-static short           gHoverBtn          = BTN_NONE;
-static short           gPressedBtn        = BTN_NONE;
-static Boolean         gSuppressPlayHover = false;
+static short           gHoverBtn              = BTN_NONE;
+static short           gPressedBtn            = BTN_NONE;
+static Boolean         gSuppressPlayHover     = false;
 
 /* Left & Right List state */
 static LeftItem        gLeftItems[MAX_LEFT_ITEMS];
-static short           gLeftCount         = 0;
-static short           gLeftSelected      = 0;
-static short           gLeftScroll        = 0;
+static short           gLeftCount             = 0;
+static short           gLeftSelected          = 0;
+static short           gLeftScroll            = 0;
+static Boolean         gHasPinnedLeftItem     = false;
+static LeftItem        gPinnedLeftItem;
 
 static RightItem       gRightItems[MAX_RIGHT_ITEMS];
 static short           gRightCount        = 0;
@@ -263,8 +273,40 @@ typedef struct {
     ip_addr       serverIp;
     unsigned char seenServerScreen;
     unsigned char lastVizMode;
-    unsigned char reserved[2];
+    unsigned char historyCount;
+    unsigned char reserved;
+    char          lastSpeakerId[64];
+    char          lastSpeakerName[48];
+    char          searchHistory[MAX_SEARCH_HISTORY][48];
 } SpotiMacPrefs;
+
+static void ApplyLoadedPrefs(const SpotiMacPrefs *prefs, long bytesRead, ip_addr *outServerIp)
+{
+    short i;
+    *outServerIp = prefs->serverIp;
+    if (prefs->lastVizMode < VIZ_MODE_COUNT) {
+        gVizMode = prefs->lastVizMode;
+    }
+    if (bytesRead >= (long)sizeof(SpotiMacPrefs)) {
+        if (prefs->lastSpeakerId[0] != '\0') {
+            memcpy(gSavedSpeakerId, prefs->lastSpeakerId, sizeof(gSavedSpeakerId) - 1);
+            gSavedSpeakerId[sizeof(gSavedSpeakerId) - 1] = '\0';
+        }
+        if (prefs->lastSpeakerName[0] != '\0') {
+            memcpy(gSavedSpeakerName, prefs->lastSpeakerName, sizeof(gSavedSpeakerName) - 1);
+            gSavedSpeakerName[sizeof(gSavedSpeakerName) - 1] = '\0';
+            memcpy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
+        }
+        gSearchHistoryCount = 0;
+        for (i = 0; i < (short)prefs->historyCount && i < MAX_SEARCH_HISTORY; i++) {
+            if (prefs->searchHistory[i][0] != '\0') {
+                memcpy(gSearchHistory[gSearchHistoryCount], prefs->searchHistory[i], 47);
+                gSearchHistory[gSearchHistoryCount][47] = '\0';
+                gSearchHistoryCount++;
+            }
+        }
+    }
+}
 
 static Boolean GetPrefsFileSpec(FSSpec *outSpec, Boolean legacyName)
 {
@@ -300,15 +342,12 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
                 memset(&prefs, 0, sizeof(prefs));
                 err = FSRead(refNum, &count, &prefs);
                 FSClose(refNum);
-                if (err == noErr &&
-                    count == sizeof(SpotiMacPrefs) &&
+                if ((err == noErr || err == eofErr) &&
+                    count >= 12 &&
                     prefs.magic == PREFS_MAGIC &&
                     prefs.seenServerScreen != 0 &&
                     prefs.serverIp != 0) {
-                    *outServerIp = prefs.serverIp;
-                    if (prefs.lastVizMode < VIZ_MODE_COUNT) {
-                        gVizMode = prefs.lastVizMode;
-                    }
+                    ApplyLoadedPrefs(&prefs, count, outServerIp);
                     return true;
                 }
             }
@@ -319,19 +358,17 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
     fp = fopen("SpotiMac Prefs", "rb");
     if (!fp) fp = fopen("MaciSpot Prefs", "rb");
     if (fp) {
+        size_t nRead;
         memset(&prefs, 0, sizeof(prefs));
-        if (fread(&prefs, 1, sizeof(SpotiMacPrefs), fp) == sizeof(SpotiMacPrefs) &&
+        nRead = fread(&prefs, 1, sizeof(SpotiMacPrefs), fp);
+        fclose(fp);
+        if (nRead >= 12 &&
             prefs.magic == PREFS_MAGIC &&
             prefs.seenServerScreen != 0 &&
             prefs.serverIp != 0) {
-            fclose(fp);
-            *outServerIp = prefs.serverIp;
-            if (prefs.lastVizMode < VIZ_MODE_COUNT) {
-                gVizMode = prefs.lastVizMode;
-            }
+            ApplyLoadedPrefs(&prefs, (long)nRead, outServerIp);
             return true;
         }
-        fclose(fp);
     }
     return false;
 }
@@ -344,6 +381,7 @@ static void SaveServerPrefs(ip_addr serverIp)
     SpotiMacPrefs prefs;
     OSErr         err;
     FILE         *fp;
+    short         i;
 
     if (serverIp == 0) return;
 
@@ -352,6 +390,12 @@ static void SaveServerPrefs(ip_addr serverIp)
     prefs.serverIp         = serverIp;
     prefs.seenServerScreen = 1;
     prefs.lastVizMode      = (unsigned char)(gVizMode % VIZ_MODE_COUNT);
+    prefs.historyCount     = (unsigned char)gSearchHistoryCount;
+    memcpy(prefs.lastSpeakerId,   gSavedSpeakerId,   sizeof(prefs.lastSpeakerId) - 1);
+    memcpy(prefs.lastSpeakerName, gSavedSpeakerName, sizeof(prefs.lastSpeakerName) - 1);
+    for (i = 0; i < gSearchHistoryCount && i < MAX_SEARCH_HISTORY; i++) {
+        memcpy(prefs.searchHistory[i], gSearchHistory[i], 47);
+    }
 
     if (GetPrefsFileSpec(&spec, false)) {
         FSpCreate(&spec, 'MCSP', 'pref', smSystemScript);
@@ -369,6 +413,61 @@ static void SaveServerPrefs(ip_addr serverIp)
         fwrite(&prefs, 1, sizeof(SpotiMacPrefs), fp);
         fclose(fp);
     }
+}
+
+static Boolean StrCaseEqual(const char *a, const char *b)
+{
+    if (!a || !b) return false;
+    while (*a && *b) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return false;
+        a++;
+        b++;
+    }
+    return (*a == '\0' && *b == '\0');
+}
+
+static void AddQueryToSearchHistory(const char *query)
+{
+    short i, existingIdx = -1;
+    char clean[48];
+
+    if (!query || query[0] == '\0') return;
+    strncpy(clean, query, sizeof(clean) - 1);
+    clean[sizeof(clean) - 1] = '\0';
+
+    for (i = 0; i < gSearchHistoryCount; i++) {
+        if (StrCaseEqual(gSearchHistory[i], clean)) {
+            existingIdx = i;
+            break;
+        }
+    }
+
+    if (existingIdx == 0) {
+        memcpy(gSearchHistory[0], clean, sizeof(clean));
+        SaveServerPrefs(NetGetServerIP());
+        return;
+    }
+
+    if (existingIdx > 0) {
+        for (i = existingIdx; i > 0; i--) {
+            memcpy(gSearchHistory[i], gSearchHistory[i - 1], 48);
+        }
+        memcpy(gSearchHistory[0], clean, 48);
+    } else {
+        if (gSearchHistoryCount < MAX_SEARCH_HISTORY) {
+            gSearchHistoryCount++;
+        }
+        for (i = gSearchHistoryCount - 1; i > 0; i--) {
+            memcpy(gSearchHistory[i], gSearchHistory[i - 1], 48);
+        }
+        memcpy(gSearchHistory[0], clean, 48);
+    }
+
+    SaveServerPrefs(NetGetServerIP());
 }
 
 /* ============================================================================
@@ -455,26 +554,28 @@ static void FormatMmSs(long ms, char *outBuf)
  * Playing Track Match & Sync Helpers
  * ============================================================================ */
 
-static Boolean IsRightItemCurrentlyPlaying(short idx)
+static Boolean DoesRightItemMatchPlayingTrack(short idx)
 {
     RightItem *it;
     if (idx < 0 || idx >= gRightCount) return false;
     it = &gRightItems[idx];
 
-    /* For Album browsing lists, highlight the selected album row */
-    if (strcmp(it->kind, "ALBUM") == 0) {
-        return (idx == gRightSelected);
-    }
+    if (strcmp(it->kind, "TRACK") != 0) return false;
 
-    if (gNowPlaying.trackId[0] != '\0') {
+    /* Match uniquely by Spotify track ID (or URI containing track ID) whenever available */
+    if (gNowPlaying.trackId[0] != '\0' && (it->id[0] != '\0' || it->uri[0] != '\0')) {
         if (it->id[0] != '\0' && strcmp(it->id, gNowPlaying.trackId) == 0) {
             return true;
         }
         if (it->uri[0] != '\0' && strstr(it->uri, gNowPlaying.trackId) != NULL) {
             return true;
         }
+        return false;
     }
-    if (gNowPlaying.trackName[0] != '\0' &&
+
+    /* Fallback only when track ID is unavailable */
+    if (gNowPlaying.trackId[0] == '\0' &&
+        gNowPlaying.trackName[0] != '\0' &&
         it->name[0] != '\0' &&
         strcmp(it->name, gNowPlaying.trackName) == 0) {
         if (gNowPlaying.artistName[0] == '\0' ||
@@ -489,12 +590,31 @@ static Boolean IsRightItemCurrentlyPlaying(short idx)
 static short FindPlayingTrackIndexInRightList(void)
 {
     short i;
+    /* If the user's selected row matches the playing track ID, prefer that exact row */
+    if (gRightSelected >= 0 && gRightSelected < gRightCount &&
+        DoesRightItemMatchPlayingTrack(gRightSelected)) {
+        return gRightSelected;
+    }
     for (i = 0; i < gRightCount; i++) {
-        if (strcmp(gRightItems[i].kind, "TRACK") == 0 && IsRightItemCurrentlyPlaying(i)) {
+        if (DoesRightItemMatchPlayingTrack(i)) {
             return i;
         }
     }
     return -1;
+}
+
+static Boolean IsRightItemCurrentlyPlaying(short idx)
+{
+    RightItem *it;
+    if (idx < 0 || idx >= gRightCount) return false;
+    it = &gRightItems[idx];
+
+    /* For Album browsing lists, highlight the selected album row */
+    if (strcmp(it->kind, "ALBUM") == 0) {
+        return (idx == gRightSelected);
+    }
+
+    return (idx == FindPlayingTrackIndexInRightList());
 }
 
 static void SyncRightSelectionToPlayingTrack(void)
@@ -677,6 +797,111 @@ static short GetSpeakerButtonRightX(void)
     if (len > 18) len = 18;
     w = len * 6; /* Monaco 9 is 6px per char */
     return 359 + w + 6;
+}
+
+/*
+ * Returns the 9x9 1-bit icon bitmap from `ui/library-icons.psd` for a LeftItem.
+ * Falls back to `gIconLibPlaylist` if an icon type is missing.
+ */
+static const unsigned char *GetLeftItemIconBits(const LeftItem *it)
+{
+    if (!it) return gIconLibPlaylist;
+    if (strcmp(it->kind, "LIKED") == 0) {
+        return gIconLibLiked;
+    }
+    if (strcmp(it->kind, "ALBUM") == 0) {
+        return gIconLibAlbum;
+    }
+    if (strcmp(it->kind, "PLAYLIST") == 0) {
+        return gIconLibPlaylist;
+    }
+    if (strcmp(it->kind, "SHOW") == 0 || strcmp(it->kind, "PODCAST") == 0) {
+        return gIconLibPodcast;
+    }
+    if (strcmp(it->kind, "ARTIST") == 0) {
+        return gIconLibArtist;
+    }
+    if (strcmp(it->kind, "HOME_CAT") == 0) {
+        if (strcmp(it->id, "recent") == 0) return gIconLibRecent;
+        if (strcmp(it->id, "top") == 0)    return gIconLibTopTracks;
+        if (strcmp(it->id, "albums") == 0) return gIconLibSavedAlbums;
+        if (strcmp(it->id, "new") == 0)    return gIconLibNewReleases;
+    }
+    return gIconLibPlaylist;
+}
+
+/*
+ * Renders the Search History dropdown box below the search bar (x = 156..356, y = 17..128)
+ * matching `ui/search-history.png` without overlapping the search bar at y = 5..16.
+ */
+static void RenderSearchHistoryDropdown(void)
+{
+    Rect dropRect, neckRect, hdrPill, hiRect;
+    short row;
+
+    /* 1. Draw rounded dropdown body in the middle content area (y = 22..128) */
+    SetRect(&dropRect, 156, 22, 356, 128);
+    PenNormal();
+    PaintRoundRect(&dropRect, 12, 12);
+    PenMode(patBic);
+    FrameRoundRect(&dropRect, 12, 12);
+    PenNormal();
+
+    /* 2. Connect straight up from y = 28 to the bottom of the search pill at y = 17
+     *    (erasing the top rounded corners at y = 22..28 and extending the black neck
+     *    through the white header at y = 17..21 while preserving the 1px white side walls) */
+    SetRect(&neckRect, 157, 17, 355, 29);
+    PaintRect(&neckRect);
+    PenMode(patBic);
+    MoveTo(156, 22);
+    LineTo(156, 28);
+    MoveTo(355, 22);
+    LineTo(355, 28);
+    PenNormal();
+
+    /* 3. Outer corner transition pixels at y = 16 + 2px staggered dotted divider at y = 17..18 */
+    MoveTo(158, 16);
+    LineTo(158, 16);
+    MoveTo(352, 16);
+    LineTo(352, 16);
+    MoveTo(354, 16);
+    LineTo(354, 16);
+    DrawHorizontalDottedLine(158, 352, 17, true);
+    DrawHorizontalDottedLine(159, 352, 18, true);
+
+    /* "Search history:" white pill at (161, 24)-(266, 36) */
+    SetRect(&hdrPill, 161, 24, 266, 36);
+    EraseRoundRect(&hdrPill, 8, 8);
+    TextMode(srcOr);
+    MoveTo(166, 33);
+    DrawCStringTruncated("Search history:", 16);
+
+    if (gSearchHistoryCount <= 0) {
+        TextMode(srcBic);
+        MoveTo(166, 51);
+        DrawCStringTruncated("No recent searches", 26);
+        TextMode(srcOr);
+        return;
+    }
+
+    for (row = 0; row < MAX_SEARCH_HISTORY; row++) {
+        short rowTop = 40 + row * 17;
+        if (row < gSearchHistoryCount) {
+            if (row == gSearchHistoryHoverRow) {
+                SetRect(&hiRect, 160, rowTop, 352, rowTop + 14);
+                EraseRoundRect(&hiRect, 6, 6);
+                TextMode(srcOr);
+            } else {
+                TextMode(srcBic);
+            }
+            MoveTo(166, rowTop + 11);
+            DrawCStringTruncated(gSearchHistory[row], 29);
+        }
+        if (row < 4) {
+            DrawHorizontalDottedLine(162, 349, rowTop + 16, true);
+        }
+    }
+    TextMode(srcOr);
 }
 
 /* ============================================================================
@@ -1330,15 +1555,17 @@ static void RenderCanvas(void)
     }
     if (gSearchFocused || gSearchQuery[0] != '\0') {
         char searchDisplay[56];
-        if (gSearchFocused) {
+        if (gSearchFocused && gSearchQuery[0] != '\0') {
             sprintf(searchDisplay, "%s_", gSearchQuery);
         } else {
             SafeCopy(searchDisplay, gSearchQuery, sizeof(searchDisplay));
         }
-        TextMode(srcBic);
-        MoveTo(171, 14);
-        DrawCStringTruncated(searchDisplay, 26);
-        TextMode(srcOr);
+        if (searchDisplay[0] != '\0') {
+            TextMode(srcBic);
+            MoveTo(171, 14);
+            DrawCStringTruncated(searchDisplay, 26);
+            TextMode(srcOr);
+        }
     }
 
     /* Right column header ("Tracks" or "Albums") */
@@ -1354,25 +1581,29 @@ static void RenderCanvas(void)
     if (gSearchViewOpen) {
         RenderSearchCenterPanel();
     } else {
-        /* 2A. Left Column: Library / Home Items (x = 10..137, y = 35..243) */
+        /* 2A. Left Column: Library / Home Items with 9x9 Icons (ui/library.png & library-icons.psd) */
         for (i = 0; i < VISIBLE_ROWS; i++) {
             short itemIdx = gLeftScroll + i;
             short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
+            const unsigned char *iconBits;
             if (itemIdx >= gLeftCount) break;
+            iconBits = GetLeftItemIconBits(&gLeftItems[itemIdx]);
 
             if (itemIdx == gLeftSelected) {
-                /* White highlight pill with rounded right edge + right arrow (UI-update.png) */
-                SetRect(&r, 10, rowTop, 137, rowTop + 12);
+                /* White highlight pill with rounded right edge + black icon + right arrow */
+                SetRect(&r, 7, rowTop, 137, rowTop + 12);
                 EraseRoundRect(&r, 8, 8);
-                SetRect(&sqRect, 10, rowTop, 18, rowTop + 12);
+                SetRect(&sqRect, 7, rowTop, 15, rowTop + 12);
                 EraseRect(&sqRect);
+                BlitIcon1Bit(iconBits, 9, 9, 9, rowTop + 2, srcOr);
                 BlitIcon1Bit(gIconListPlayArrow, 3, 6, 131, rowTop + 3, srcCopy);
                 TextMode(srcOr); /* Black text */
             } else {
+                BlitIcon1Bit(iconBits, 9, 9, 9, rowTop + 2, srcBic);
                 TextMode(srcBic); /* White text on black background */
             }
-            MoveTo(12, rowTop + 9);
-            DrawCStringTruncated(gLeftItems[itemIdx].name, 19);
+            MoveTo(24, rowTop + 9);
+            DrawCStringTruncated(gLeftItems[itemIdx].name, 17);
         }
 
         /* Left Scrollbar (x = 144, y = 35..266) */
@@ -1394,7 +1625,7 @@ static void RenderCanvas(void)
         /* 2B. Center Column: 200x200 1-Bit Album Artwork or Visualizer at (156, 35)-(356, 235) */
         if (gVisualizerOpen) {
             BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
-            if (gVizHover) {
+            if (gVizHover && !gSearchHistoryOpen) {
                 /* Fullscreen icon on hover: 8px down from top (35+8=43) and 8px in from right (356-8-12=336) */
                 DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
             }
@@ -1447,6 +1678,11 @@ static void RenderCanvas(void)
             if (gRightCount <= VISIBLE_ROWS) thumbY = 64;
             SetRect(&thumbRect, 503, thumbY, 506, thumbY + thumbH);
             FillRect(&thumbRect, &qd.gray);
+        }
+
+        /* 2D. Search History Dropdown Overlay (ui/search-history.png) */
+        if (gSearchHistoryOpen) {
+            RenderSearchHistoryDropdown();
         }
     }
 
@@ -1762,6 +1998,18 @@ static void RenderVisualizerFastFrame(void)
     if (!gMainWindow) return;
 
     if (gSpeakerPopupOpen || gAboutModalOpen) {
+        RenderCanvas();
+        return;
+    }
+
+    if (gSearchHistoryOpen) {
+        VisualizerRenderFrame(
+            gVizMode,
+            gNowPlaying.isPlaying,
+            gNowPlaying.progressMs,
+            gNowPlaying.trackId,
+            gVisualizerBits
+        );
         RenderCanvas();
         return;
     }
@@ -2191,7 +2439,21 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     GetPipeField(gHttpBuf, 13, field, sizeof(field));
     gNowPlaying.isLiked = (field[0] == '1');
 
-    GetPipeField(gHttpBuf, 14, gNowPlaying.deviceName, sizeof(gNowPlaying.deviceName));
+    GetPipeField(gHttpBuf, 14, field, sizeof(field));
+    if (gSpeakerLockUntilTicks != 0 && (long)(gSpeakerLockUntilTicks - TickCount()) > 0) {
+        /* Keep user-selected / startup-restored speaker locked against cloud lag */
+        if (gSavedSpeakerName[0] != '\0') {
+            SafeCopy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
+        }
+    } else if (field[0] != '\0') {
+        SafeCopy(gNowPlaying.deviceName, field, sizeof(gNowPlaying.deviceName));
+        if (gSavedSpeakerName[0] == '\0') {
+            SafeCopy(gSavedSpeakerName, field, sizeof(gSavedSpeakerName));
+            SaveServerPrefs(NetGetServerIP());
+        }
+    } else if (gNowPlaying.deviceName[0] == '\0' && gSavedSpeakerName[0] != '\0') {
+        SafeCopy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
+    }
 
     if (gNowPlaying.trackId[0] == '\0') {
         memcpy(gCurrentArtworkBits, gInitialArtworkBits, 5200);
@@ -2251,7 +2513,8 @@ static void ParseTracksResponseIntoRightList(const char *buf)
 static void LoadSelectedLeftItemIntoRightList(void)
 {
     LeftItem *sel;
-    char path[160];
+    char path[200];
+    char encName[96];
     long n;
 
     if (!NetHasServer() || gLeftSelected < 0 || gLeftSelected >= gLeftCount) return;
@@ -2262,6 +2525,11 @@ static void LoadSelectedLeftItemIntoRightList(void)
 
     if (strcmp(sel->kind, "LIKED") == 0) {
         n = NetHttpGet("/api/spotify/liked?limit=40", gHttpBuf, HTTP_BUF_SIZE);
+        if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
+    } else if (strcmp(sel->kind, "ALBUM") == 0) {
+        SafeCopy(gActiveContextUri, sel->uri, sizeof(gActiveContextUri));
+        sprintf(path, "/api/spotify/album/%s/tracks?limit=50", sel->id);
+        n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
         if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
     } else if (strcmp(sel->kind, "PLAYLIST") == 0) {
         SafeCopy(gActiveContextUri, sel->uri, sizeof(gActiveContextUri));
@@ -2277,6 +2545,17 @@ static void LoadSelectedLeftItemIntoRightList(void)
             gRightCount    = 1;
             gRightSelected = 0;
         }
+    } else if (strcmp(sel->kind, "ARTIST") == 0) {
+        SafeCopy(gActiveContextUri, sel->uri, sizeof(gActiveContextUri));
+        UrlEncode(sel->name, encName, sizeof(encName));
+        sprintf(path, "/api/spotify/artist/%s/top-tracks?name=%s", sel->id, encName);
+        n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
+    } else if (strcmp(sel->kind, "SHOW") == 0 || strcmp(sel->kind, "PODCAST") == 0) {
+        SafeCopy(gActiveContextUri, sel->uri, sizeof(gActiveContextUri));
+        sprintf(path, "/api/spotify/show/%s/episodes?limit=30", sel->id);
+        n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
     } else if (strcmp(sel->kind, "HOME_CAT") == 0) {
         if (strcmp(sel->id, "recent") == 0) {
             n = NetHttpGet("/api/spotify/recently-played?limit=35", gHttpBuf, HTTP_BUF_SIZE);
@@ -2296,116 +2575,147 @@ static void LoadSelectedLeftItemIntoRightList(void)
     }
 }
 
-static void PopulateLeftColumnPlaylistsOnly(void)
+static Boolean LeftItemsMatch(const LeftItem *a, const LeftItem *b)
+{
+    if (!a || !b) return false;
+    if (strcmp(a->kind, b->kind) != 0) return false;
+    if (a->id[0] != '\0' && b->id[0] != '\0' && strcmp(a->id, b->id) == 0) return true;
+    if (a->uri[0] != '\0' && b->uri[0] != '\0' && strcmp(a->uri, b->uri) == 0) return true;
+    return false;
+}
+
+static void AppendLeftItemUnique(const char *kind, const char *id, const char *name, const char *uri)
+{
+    LeftItem cand;
+    short i;
+    if (gLeftCount >= MAX_LEFT_ITEMS) return;
+    SafeCopy(cand.kind, kind ? kind : "PLAYLIST", sizeof(cand.kind));
+    SafeCopy(cand.id,   id   ? id   : "",         sizeof(cand.id));
+    SafeCopy(cand.name, name ? name : "Untitled", sizeof(cand.name));
+    SafeCopy(cand.uri,  uri  ? uri  : "",         sizeof(cand.uri));
+
+    for (i = 0; i < gLeftCount; i++) {
+        if (LeftItemsMatch(&gLeftItems[i], &cand)) {
+            return;
+        }
+    }
+    gLeftItems[gLeftCount++] = cand;
+}
+
+static void PopulateLeftColumnItems(void)
 {
     long n;
-    gLeftCount    = 0;
-    gLeftSelected = 0;
-    gLeftScroll   = 0;
+    gLeftCount = 0;
 
-    SafeCopy(gLeftItems[0].kind, "LIKED", 16);
-    SafeCopy(gLeftItems[0].id,   "liked", 64);
-    SafeCopy(gLeftItems[0].name, "Liked", 64);
-    gLeftItems[0].uri[0] = '\0';
-    gLeftCount = 1;
+    /* Dedicated top slot for the actively entered Album or Playlist (regardless of tab) */
+    if (gHasPinnedLeftItem && gPinnedLeftItem.name[0] != '\0') {
+        gLeftItems[gLeftCount++] = gPinnedLeftItem;
+    }
 
-    if (NetHasServer() && gHttpBuf) {
-        n = NetHttpGet("/api/spotify/playlists?limit=35", gHttpBuf, HTTP_BUF_SIZE);
-        if (n > 0) {
-            const char *line = gHttpBuf;
-            while (line && *line && gLeftCount < MAX_LEFT_ITEMS) {
-                const char *nextLine = strchr(line, '\n');
-                char rowKind[16];
-                GetPipeField(line, 0, rowKind, sizeof(rowKind));
-                if (strcmp(rowKind, "PLAYLIST") == 0) {
-                    LeftItem *it = &gLeftItems[gLeftCount++];
-                    SafeCopy(it->kind, "PLAYLIST", sizeof(it->kind));
-                    GetPipeField(line, 1, it->id, sizeof(it->id));
-                    GetPipeField(line, 2, it->name, sizeof(it->name));
-                    GetPipeField(line, 5, it->uri, sizeof(it->uri));
+    if (gHomeMode) {
+        AppendLeftItemUnique("HOME_CAT", "recent", "Recently Played", "");
+        AppendLeftItemUnique("HOME_CAT", "top",    "Top Tracks",      "");
+        AppendLeftItemUnique("HOME_CAT", "albums", "Saved Albums",    "");
+        AppendLeftItemUnique("HOME_CAT", "new",    "New Releases",    "");
+
+        if (NetHasServer() && gHttpBuf) {
+            n = NetHttpGet("/api/spotify/home-suggestions", gHttpBuf, HTTP_BUF_SIZE);
+            if (n > 0) {
+                const char *line = gHttpBuf;
+                while (line && *line && gLeftCount < MAX_LEFT_ITEMS) {
+                    const char *nextLine = strchr(line, '\n');
+                    char rowKind[16], idBuf[64], nameBuf[64], uriBuf[96];
+                    GetPipeField(line, 0, rowKind, sizeof(rowKind));
+                    if (strcmp(rowKind, "PLAYLIST") == 0 ||
+                        strcmp(rowKind, "ALBUM") == 0 ||
+                        strcmp(rowKind, "ARTIST") == 0 ||
+                        strcmp(rowKind, "SHOW") == 0) {
+                        GetPipeField(line, 1, idBuf, sizeof(idBuf));
+                        GetPipeField(line, 2, nameBuf, sizeof(nameBuf));
+                        GetPipeField(line, 5, uriBuf, sizeof(uriBuf));
+                        AppendLeftItemUnique(rowKind, idBuf, nameBuf, uriBuf);
+                    }
+                    if (!nextLine) break;
+                    line = nextLine + 1;
                 }
-                if (!nextLine) break;
-                line = nextLine + 1;
+            }
+        }
+    } else {
+        AppendLeftItemUnique("LIKED", "liked", "Liked Songs", "");
+
+        if (NetHasServer() && gHttpBuf) {
+            n = NetHttpGet("/api/spotify/playlists?limit=35", gHttpBuf, HTTP_BUF_SIZE);
+            if (n > 0) {
+                const char *line = gHttpBuf;
+                while (line && *line && gLeftCount < MAX_LEFT_ITEMS) {
+                    const char *nextLine = strchr(line, '\n');
+                    char rowKind[16], idBuf[64], nameBuf[64], uriBuf[96];
+                    GetPipeField(line, 0, rowKind, sizeof(rowKind));
+                    if (strcmp(rowKind, "PLAYLIST") == 0) {
+                        GetPipeField(line, 1, idBuf, sizeof(idBuf));
+                        GetPipeField(line, 2, nameBuf, sizeof(nameBuf));
+                        GetPipeField(line, 5, uriBuf, sizeof(uriBuf));
+                        AppendLeftItemUnique("PLAYLIST", idBuf, nameBuf, uriBuf);
+                    }
+                    if (!nextLine) break;
+                    line = nextLine + 1;
+                }
             }
         }
     }
 }
 
 /*
- * Ensures the Playlists library column is active and highlights/selects the specified
- * playlist (inserting it right below "Liked" if it came from Search Results and wasn't
- * already in the user's top 35 library playlists).
+ * Dedicates the top position (index 0) on the left side — regardless of whether the user
+ * is in the Home tab or Playlists tab — to the actively entered Album or Playlist!
  */
-static void SelectOrInsertPlaylistInLeftColumn(const char *id, const char *name, const char *uri)
+static void PinActiveContextAtTopOfLeftColumn(const char *kind, const char *id, const char *name, const char *uri)
 {
-    short i, foundIdx = -1;
+    short i, dupIdx = -1;
 
-    if (gHomeMode || gLeftCount == 0) {
-        gHomeMode = false;
-        PopulateLeftColumnPlaylistsOnly();
-    }
+    gHasPinnedLeftItem = true;
+    SafeCopy(gPinnedLeftItem.kind, kind ? kind : "PLAYLIST", sizeof(gPinnedLeftItem.kind));
+    SafeCopy(gPinnedLeftItem.id,   id   ? id   : "",         sizeof(gPinnedLeftItem.id));
+    SafeCopy(gPinnedLeftItem.name, name ? name : "Untitled", sizeof(gPinnedLeftItem.name));
+    SafeCopy(gPinnedLeftItem.uri,  uri  ? uri  : "",         sizeof(gPinnedLeftItem.uri));
 
-    for (i = 0; i < gLeftCount; i++) {
-        if (strcmp(gLeftItems[i].kind, "PLAYLIST") == 0 &&
-            ((id && id[0] != '\0' && strcmp(gLeftItems[i].id, id) == 0) ||
-             (uri && uri[0] != '\0' && strcmp(gLeftItems[i].uri, uri) == 0))) {
-            foundIdx = i;
-            break;
+    if (gLeftCount == 0) {
+        PopulateLeftColumnItems();
+    } else {
+        /* If an existing row matches, remove it before placing at index 0 */
+        for (i = 0; i < gLeftCount; i++) {
+            if (LeftItemsMatch(&gLeftItems[i], &gPinnedLeftItem)) {
+                dupIdx = i;
+                break;
+            }
+        }
+        if (dupIdx == 0) {
+            gLeftItems[0] = gPinnedLeftItem;
+        } else if (dupIdx > 0) {
+            for (i = dupIdx; i > 0; i--) {
+                gLeftItems[i] = gLeftItems[i - 1];
+            }
+            gLeftItems[0] = gPinnedLeftItem;
+        } else {
+            if (gLeftCount < MAX_LEFT_ITEMS) {
+                gLeftCount++;
+            }
+            for (i = gLeftCount - 1; i > 0; i--) {
+                gLeftItems[i] = gLeftItems[i - 1];
+            }
+            gLeftItems[0] = gPinnedLeftItem;
         }
     }
 
-    if (foundIdx < 0) {
-        short insertAt = (gLeftCount >= 1) ? 1 : 0;
-        if (gLeftCount < MAX_LEFT_ITEMS) {
-            gLeftCount++;
-        }
-        for (i = gLeftCount - 1; i > insertAt; i--) {
-            gLeftItems[i] = gLeftItems[i - 1];
-        }
-        SafeCopy(gLeftItems[insertAt].kind, "PLAYLIST", sizeof(gLeftItems[insertAt].kind));
-        SafeCopy(gLeftItems[insertAt].id,   id ? id : "", sizeof(gLeftItems[insertAt].id));
-        SafeCopy(gLeftItems[insertAt].name, name ? name : "Playlist", sizeof(gLeftItems[insertAt].name));
-        SafeCopy(gLeftItems[insertAt].uri,  uri ? uri : "", sizeof(gLeftItems[insertAt].uri));
-        foundIdx = insertAt;
-    }
-
-    gLeftSelected = foundIdx;
-    if (gLeftSelected < gLeftScroll) {
-        gLeftScroll = gLeftSelected;
-    } else if (gLeftSelected >= gLeftScroll + VISIBLE_ROWS) {
-        gLeftScroll = gLeftSelected - VISIBLE_ROWS + 1;
-    }
-    if (gLeftScroll < 0) gLeftScroll = 0;
+    gLeftSelected = 0;
+    gLeftScroll   = 0;
 }
 
 static void LoadLeftColumn(void)
 {
-    gLeftCount    = 0;
     gLeftSelected = 0;
     gLeftScroll   = 0;
-
-    if (gHomeMode) {
-        SafeCopy(gLeftItems[0].kind, "HOME_CAT", 16);
-        SafeCopy(gLeftItems[0].id,   "recent",   64);
-        SafeCopy(gLeftItems[0].name, "Recently Played", 64);
-
-        SafeCopy(gLeftItems[1].kind, "HOME_CAT", 16);
-        SafeCopy(gLeftItems[1].id,   "top",      64);
-        SafeCopy(gLeftItems[1].name, "Top Tracks", 64);
-
-        SafeCopy(gLeftItems[2].kind, "HOME_CAT", 16);
-        SafeCopy(gLeftItems[2].id,   "albums",   64);
-        SafeCopy(gLeftItems[2].name, "Saved Albums", 64);
-
-        SafeCopy(gLeftItems[3].kind, "HOME_CAT", 16);
-        SafeCopy(gLeftItems[3].id,   "new",      64);
-        SafeCopy(gLeftItems[3].name, "New Releases", 64);
-
-        gLeftCount = 4;
-    } else {
-        PopulateLeftColumnPlaylistsOnly();
-    }
-
+    PopulateLeftColumnItems();
     LoadSelectedLeftItemIntoRightList();
 }
 
@@ -2420,9 +2730,15 @@ static void PlayRightItemAtIndex(short idx)
     it = &gRightItems[idx];
 
     if (strcmp(it->kind, "ALBUM") == 0) {
-        SafeCopy(gActiveContextUri, it->uri, sizeof(gActiveContextUri));
+        char albId[64], albName[64], albUri[96];
+        SafeCopy(albId,   it->id,   sizeof(albId));
+        SafeCopy(albName, it->name, sizeof(albName));
+        SafeCopy(albUri,  it->uri,  sizeof(albUri));
+
+        PinActiveContextAtTopOfLeftColumn("ALBUM", albId, albName, albUri);
+        SafeCopy(gActiveContextUri, albUri, sizeof(gActiveContextUri));
         SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
-        sprintf(path, "/api/spotify/album/%s/tracks?limit=50", it->id);
+        sprintf(path, "/api/spotify/album/%s/tracks?limit=50", albId);
         if (NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE) > 0) {
             ParseTracksResponseIntoRightList(gHttpBuf);
             RenderCanvas();
@@ -2609,6 +2925,7 @@ static void ExecuteSearchQuery(void)
     char path[192];
 
     if (!NetHasServer() || gSearchQuery[0] == '\0') return;
+    AddQueryToSearchHistory(gSearchQuery);
     UrlEncode(gSearchQuery, encQ, sizeof(encQ));
     sprintf(path, "/api/spotify/search?q=%s&type=all&limit=10", encQ);
 
@@ -2617,8 +2934,9 @@ static void ExecuteSearchQuery(void)
     } else {
         gSearchCount = 0;
     }
-    gSearchFocused  = false;
-    gSearchViewOpen = true;
+    gSearchFocused     = false;
+    gSearchHistoryOpen = false;
+    gSearchViewOpen    = true;
     RenderCanvas();
 }
 
@@ -2633,18 +2951,17 @@ static void ActivateSearchResultRow(short idx)
     s = &gSearchItems[idx];
 
     /* Single-click plays immediately and closes search view back to main UI */
-    gSearchViewOpen = false;
-    gSearchFocused  = false;
+    gSearchViewOpen    = false;
+    gSearchHistoryOpen = false;
+    gSearchFocused     = false;
 
     UrlEncode(s->uri[0] ? s->uri : s->id, encUri, sizeof(encUri));
     if (strcmp(s->kind, "ALBUM") == 0 || strcmp(s->kind, "PLAYLIST") == 0) {
         Boolean lockedFirstTrack = false;
         Boolean isPlaylist       = (strcmp(s->kind, "PLAYLIST") == 0);
 
-        /* Highlight and select the playlist in the left library column! */
-        if (isPlaylist) {
-            SelectOrInsertPlaylistInLeftColumn(s->id, s->title, s->uri);
-        }
+        /* Dedicate top position on the left side (regardless of current tab) to the active Album/Playlist! */
+        PinActiveContextAtTopOfLeftColumn(s->kind, s->id, s->title, s->uri);
 
         SafeCopy(gActiveContextUri, s->uri, sizeof(gActiveContextUri));
         SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
@@ -2702,7 +3019,9 @@ static void ActivateSearchResultRow(short idx)
         ResetPollTimersAfterAction();
         RenderCanvas();
     } else {
-        /* Populate right column with the search result songs so Next/Prev & track highlight work! */
+        /* Single song from search: leave nothing selected in the left panel! */
+        gHasPinnedLeftItem   = false;
+        gLeftSelected        = -1;
         gActiveContextUri[0] = '\0';
         SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
         gRightCount = 0;
@@ -2786,6 +3105,48 @@ static void LoadDevicesAndTogglePopover(void)
 
 static void ConnectAndLoadAll(void)
 {
+    /* If a last-used speaker was saved in SpotiMacPrefs, tell the Spotify API to use it on start! */
+    if (gSavedSpeakerId[0] != '\0' || gSavedSpeakerName[0] != '\0') {
+        char encId[96], encName[96], encClientId[64], encClientName[96], path[512];
+        if (gSavedSpeakerName[0] != '\0') {
+            SafeCopy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
+        }
+        gSpeakerLockUntilTicks = TickCount() + 900; /* 15s lock against post-launch speaker jump */
+        UrlEncode(gSavedSpeakerId, encId, sizeof(encId));
+        UrlEncode(gSavedSpeakerName, encName, sizeof(encName));
+        UrlEncode(gMyClientId, encClientId, sizeof(encClientId));
+        UrlEncode(gMySpeakerName, encClientName, sizeof(encClientName));
+        sprintf(
+            path,
+            "/api/spotify/transfer?device_id=%s&device_name=%s&startup=1&client_id=%s&client_name=%s",
+            encId,
+            encName,
+            encClientId,
+            encClientName
+        );
+        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+    }
+
+    /* Load server-side search history if local prefs didn't have any yet */
+    if (gSearchHistoryCount == 0 && NetHasServer() && gHttpBuf) {
+        if (NetHttpGet("/api/spotify/search-history", gHttpBuf, HTTP_BUF_SIZE) > 0) {
+            const char *line = gHttpBuf;
+            while (line && *line && gSearchHistoryCount < MAX_SEARCH_HISTORY) {
+                const char *nextLine = strchr(line, '\n');
+                char rowKind[16], qBuf[48];
+                GetPipeField(line, 0, rowKind, sizeof(rowKind));
+                if (strcmp(rowKind, "HISTORY") == 0) {
+                    GetPipeField(line, 1, qBuf, sizeof(qBuf));
+                    if (qBuf[0] != '\0') {
+                        SafeCopy(gSearchHistory[gSearchHistoryCount++], qBuf, 48);
+                    }
+                }
+                if (!nextLine) break;
+                line = nextLine + 1;
+            }
+        }
+    }
+
     RefreshNowPlaying(true);
     LoadLeftColumn();
     gInitialDataLoaded = true;
@@ -2942,6 +3303,18 @@ static void UpdateHoverState(void)
         }
         if (newSearchRow != gSearchHoverRow) {
             gSearchHoverRow = newSearchRow;
+            changed = true;
+        }
+    } else if (gSearchHistoryOpen) {
+        short newHistRow = -1;
+        if (pt.h >= 158 && pt.h <= 354 && pt.v >= 40 && pt.v < (40 + MAX_SEARCH_HISTORY * 17)) {
+            short r = (pt.v - 40) / 17;
+            if (r >= 0 && r < gSearchHistoryCount) {
+                newHistRow = r;
+            }
+        }
+        if (newHistRow != gSearchHistoryHoverRow) {
+            gSearchHistoryHoverRow = newHistRow;
             changed = true;
         }
     }
@@ -3208,14 +3581,19 @@ static void HandleCanvasClick(Point pt)
         if (pt.h >= 330 && pt.h <= 466 && pt.v >= popTop && pt.v <= 272) {
             short row = (pt.v - (popTop + 6)) / 18;
             if (row >= 0 && row < visibleDevs && row < gDeviceCount) {
-                char path[160];
-                char encId[96];
+                char path[240];
+                char encId[96], encName[96];
                 SafeCopy(gNowPlaying.deviceName, gDevices[row].name, sizeof(gNowPlaying.deviceName));
+                SafeCopy(gSavedSpeakerId,   gDevices[row].id,   sizeof(gSavedSpeakerId));
+                SafeCopy(gSavedSpeakerName, gDevices[row].name, sizeof(gSavedSpeakerName));
+                gSpeakerLockUntilTicks = TickCount() + 900; /* 15s speaker lock */
+                SaveServerPrefs(NetGetServerIP());
                 gSpeakerPopupOpen = false;
                 RenderCanvas();
 
                 UrlEncode(gDevices[row].id, encId, sizeof(encId));
-                sprintf(path, "/api/spotify/transfer?device_id=%s", encId);
+                UrlEncode(gDevices[row].name, encName, sizeof(encName));
+                sprintf(path, "/api/spotify/transfer?device_id=%s&device_name=%s", encId, encName);
                 NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
                 ResetPollTimersAfterAction();
                 SyncLocalAudioWithSpeaker();
@@ -3233,9 +3611,10 @@ static void HandleCanvasClick(Point pt)
     if (pt.v < 22) {
         /* Home / Playlists Toggle (90..138) */
         if (pt.h >= 90 && pt.h <= 138) {
-            gHomeMode = !gHomeMode;
-            gSearchFocused  = false;
-            gSearchViewOpen = false;
+            gHomeMode          = !gHomeMode;
+            gSearchFocused     = false;
+            gSearchViewOpen    = false;
+            gSearchHistoryOpen = false;
             LoadLeftColumn();
             RenderCanvas();
             return;
@@ -3244,9 +3623,11 @@ static void HandleCanvasClick(Point pt)
         if (pt.h >= 156 && pt.h <= 356) {
             /* Clear (X) icon on right side of search pill (340..356) */
             if (pt.h >= 340 && (gSearchViewOpen || gSearchQuery[0] != '\0')) {
-                gSearchQuery[0] = '\0';
-                gSearchViewOpen = false;
-                gSearchFocused  = false;
+                gSearchQuery[0]        = '\0';
+                gSearchViewOpen        = false;
+                gSearchFocused         = true;
+                gSearchHistoryOpen     = true;
+                gSearchHistoryHoverRow = -1;
                 RenderCanvas();
                 return;
             }
@@ -3256,15 +3637,49 @@ static void HandleCanvasClick(Point pt)
                 return;
             }
             gSearchFocused = true;
-            RenderCanvas();
+            if (gSearchQuery[0] != '\0') {
+                /* Clicking the search bar when a query is present immediately opens the search results window! */
+                gSearchHistoryOpen = false;
+                if (gSearchCount > 0) {
+                    gSearchViewOpen = true;
+                    RenderCanvas();
+                } else {
+                    ExecuteSearchQuery();
+                }
+            } else {
+                /* Empty search bar: open the 5-item Search History dropdown (ui/search-history.png) */
+                gSearchViewOpen        = false;
+                gSearchHistoryOpen     = true;
+                gSearchHistoryHoverRow = -1;
+                RenderCanvas();
+            }
             return;
         }
-        gSearchFocused = false;
+        gSearchFocused     = false;
+        gSearchHistoryOpen = false;
         RenderCanvas();
         return;
     }
 
     gSearchFocused = false;
+
+    /* 3B. Search History Dropdown Click (x = 156..356, y = 22..128) */
+    if (gSearchHistoryOpen && !gSearchViewOpen) {
+        if (pt.h >= 156 && pt.h <= 356 && pt.v >= 22 && pt.v <= 128) {
+            if (pt.v >= 40 && pt.v < (40 + MAX_SEARCH_HISTORY * 17)) {
+                short clickedHist = (pt.v - 40) / 17;
+                if (clickedHist >= 0 && clickedHist < gSearchHistoryCount &&
+                    gSearchHistory[clickedHist][0] != '\0') {
+                    SafeCopy(gSearchQuery, gSearchHistory[clickedHist], sizeof(gSearchQuery));
+                    gSearchHistoryOpen = false;
+                    ExecuteSearchQuery();
+                }
+            }
+            return;
+        }
+        gSearchHistoryOpen = false;
+        RenderCanvas();
+    }
 
     /* 4. Middle Content Area (y = 22..272) */
     if (pt.v >= 22 && pt.v < 273) {
@@ -3694,23 +4109,30 @@ static void HandleKeyPress(char ch)
         if (ch == '\r' || ch == 3) {
             ExecuteSearchQuery();
         } else if (ch == 27) {
-            gSearchFocused  = false;
-            gSearchViewOpen = false;
+            gSearchFocused     = false;
+            gSearchViewOpen    = false;
+            gSearchHistoryOpen = false;
             RenderCanvas();
         } else if (ch == 8 && len > 0) {
             gSearchQuery[len - 1] = '\0';
+            if (gSearchQuery[0] == '\0') {
+                gSearchViewOpen    = false;
+                gSearchHistoryOpen = true;
+            }
             RenderCanvas();
         } else if (ch >= 32 && ch < 127 && len < (short)(sizeof(gSearchQuery) - 2)) {
             gSearchQuery[len]     = ch;
             gSearchQuery[len + 1] = '\0';
+            gSearchHistoryOpen    = false;
             RenderCanvas();
         }
         return;
     }
 
     /* 3. Global Keyboard Shortcuts */
-    if (ch == 27 && gSearchViewOpen) {
-        gSearchViewOpen = false;
+    if (ch == 27 && (gSearchViewOpen || gSearchHistoryOpen)) {
+        gSearchViewOpen    = false;
+        gSearchHistoryOpen = false;
         RenderCanvas();
         return;
     }
@@ -3805,6 +4227,17 @@ static void HandleMenuChoice(long menuChoice)
                 if (gConnState == CONN_READY) {
                     if (gMiniPlayerMode) ExitMiniPlayerMode();
                     gSearchFocused = true;
+                    if (gSearchQuery[0] != '\0') {
+                        gSearchHistoryOpen = false;
+                        if (gSearchCount > 0) {
+                            gSearchViewOpen = true;
+                        } else {
+                            ExecuteSearchQuery();
+                        }
+                    } else {
+                        gSearchViewOpen    = false;
+                        gSearchHistoryOpen = true;
+                    }
                     RenderCanvas();
                 }
             } else if (itemID == iQuit) {
