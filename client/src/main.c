@@ -951,18 +951,15 @@ static void RenderSearchCenterPanel(void)
     /* Top-right circular (X) close button (485, 34) 15x15 */
     BlitIcon1Bit(gSearchCloseCircleBits, 15, 15, 485, 34, srcCopy);
 
-    /* Search Scrollbar at x = 469, y = 35..266 */
-    DrawVerticalDottedLine(469, 35, 266, true);
-    {
+    /* Search Scrollbar at x = 469, y = 35..266 (only shown when results exceed visible rows) */
+    if (gSearchCount > SEARCH_VISIBLE_ROWS) {
         short trackH = 231;
-        short thumbH = (gSearchCount > SEARCH_VISIBLE_ROWS)
-            ? (short)((long)trackH * SEARCH_VISIBLE_ROWS / gSearchCount)
-            : 57;
-        short maxScroll = (gSearchCount > SEARCH_VISIBLE_ROWS) ? (gSearchCount - SEARCH_VISIBLE_ROWS) : 1;
+        short thumbH = (short)((long)trackH * SEARCH_VISIBLE_ROWS / gSearchCount);
+        short maxScroll = gSearchCount - SEARCH_VISIBLE_ROWS;
         short thumbY;
         if (thumbH < 20) thumbH = 20;
         thumbY = 35 + (short)((long)(trackH - thumbH) * gSearchScroll / maxScroll);
-        if (gSearchCount <= SEARCH_VISIBLE_ROWS) thumbY = 48;
+        DrawVerticalDottedLine(469, 35, 266, true);
         SetRect(&thumbRect, 468, thumbY, 471, thumbY + thumbH);
         FillRect(&thumbRect, &qd.gray);
     }
@@ -1606,18 +1603,15 @@ static void RenderCanvas(void)
             DrawCStringTruncated(gLeftItems[itemIdx].name, 17);
         }
 
-        /* Left Scrollbar (x = 144, y = 35..266) */
-        DrawVerticalDottedLine(144, 35, 266, true);
-        {
+        /* Left Scrollbar (x = 144, y = 35..266) — hidden when list fits without scrolling */
+        if (gLeftCount > VISIBLE_ROWS) {
             short trackH = 231;
-            short thumbH = (gLeftCount > VISIBLE_ROWS)
-                ? (short)((long)trackH * VISIBLE_ROWS / gLeftCount)
-                : 57;
-            short maxScroll = (gLeftCount > VISIBLE_ROWS) ? (gLeftCount - VISIBLE_ROWS) : 1;
+            short thumbH = (short)((long)trackH * VISIBLE_ROWS / gLeftCount);
+            short maxScroll = gLeftCount - VISIBLE_ROWS;
             short thumbY;
             if (thumbH < 20) thumbH = 20;
             thumbY = 35 + (short)((long)(trackH - thumbH) * gLeftScroll / maxScroll);
-            if (gLeftCount <= VISIBLE_ROWS) thumbY = 64;
+            DrawVerticalDottedLine(144, 35, 266, true);
             SetRect(&thumbRect, 143, thumbY, 146, thumbY + thumbH);
             FillRect(&thumbRect, &qd.gray);
         }
@@ -1664,18 +1658,15 @@ static void RenderCanvas(void)
             DrawCStringTruncated(gRightItems[itemIdx].name, 19);
         }
 
-        /* Right Scrollbar (x = 504, y = 35..266) */
-        DrawVerticalDottedLine(504, 35, 266, true);
-        {
+        /* Right Scrollbar (x = 504, y = 35..266) — hidden when list fits without scrolling */
+        if (gRightCount > VISIBLE_ROWS) {
             short trackH = 231;
-            short thumbH = (gRightCount > VISIBLE_ROWS)
-                ? (short)((long)trackH * VISIBLE_ROWS / gRightCount)
-                : 57;
-            short maxScroll = (gRightCount > VISIBLE_ROWS) ? (gRightCount - VISIBLE_ROWS) : 1;
+            short thumbH = (short)((long)trackH * VISIBLE_ROWS / gRightCount);
+            short maxScroll = gRightCount - VISIBLE_ROWS;
             short thumbY;
             if (thumbH < 20) thumbH = 20;
             thumbY = 35 + (short)((long)(trackH - thumbH) * gRightScroll / maxScroll);
-            if (gRightCount <= VISIBLE_ROWS) thumbY = 64;
+            DrawVerticalDottedLine(504, 35, 266, true);
             SetRect(&thumbRect, 503, thumbY, 506, thumbY + thumbH);
             FillRect(&thumbRect, &qd.gray);
         }
@@ -2344,25 +2335,33 @@ static void PollDirectTimeline(void)
 
 static void RefreshNowPlaying(Boolean fetchArtIfChanged)
 {
-    long n, apiProgressMs;
+    long n, apiProgressMs, apiDurMs;
     unsigned long reqStartTicks, rttTicks;
     char field[96];
     char incomingTrackId[64];
     char prevTrackId[64];
-    char encId[64], encName[96], path[220];
-    Boolean trackLocked, seekLocked, sameTrack;
+    char encTrack[64], encId[64], encName[96], path[280];
+    Boolean trackLocked, seekLocked, sameTrack, prevWasPlaying;
 
     if (!NetHasServer() || !gHttpBuf) return;
 
+    prevWasPlaying = gNowPlaying.isPlaying;
     SafeCopy(prevTrackId, gNowPlaying.trackId, sizeof(prevTrackId));
+    UrlEncode((gNowPlaying.trackName[0] != '\0') ? gNowPlaying.trackId : "", encTrack, sizeof(encTrack));
     UrlEncode(gMyClientId, encId, sizeof(encId));
     UrlEncode(gMySpeakerName, encName, sizeof(encName));
-    sprintf(path, "/api/spotify/now-playing?client_id=%s&client_name=%s", encId, encName);
+    sprintf(
+        path,
+        "/api/spotify/poll?track_id=%s&client_id=%s&client_name=%s",
+        encTrack,
+        encId,
+        encName
+    );
 
     reqStartTicks = TickCount();
     n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     rttTicks = TickCount() - reqStartTicks;
-    if (n <= 0 || strncmp(gHttpBuf, "PLAYING|", 8) != 0) {
+    if (n <= 0 || strncmp(gHttpBuf, "POLL|", 5) != 0) {
         return;
     }
 
@@ -2396,15 +2395,25 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     }
 
     SafeCopy(gNowPlaying.trackId, incomingTrackId, sizeof(gNowPlaying.trackId));
-    GetPipeField(gHttpBuf, 3, gNowPlaying.trackName, sizeof(gNowPlaying.trackName));
-    GetPipeField(gHttpBuf, 4, gNowPlaying.artistName, sizeof(gNowPlaying.artistName));
-    GetPipeField(gHttpBuf, 5, gNowPlaying.albumName, sizeof(gNowPlaying.albumName));
+    if (!sameTrack || gNowPlaying.trackName[0] == '\0') {
+        GetPipeField(gHttpBuf, 10, field, sizeof(field));
+        if (field[0] != '\0' || !sameTrack) {
+            SafeCopy(gNowPlaying.trackName, field, sizeof(gNowPlaying.trackName));
+        }
+        GetPipeField(gHttpBuf, 11, field, sizeof(field));
+        if (field[0] != '\0' || !sameTrack) {
+            SafeCopy(gNowPlaying.artistName, field, sizeof(gNowPlaying.artistName));
+        }
+    }
 
-    GetPipeField(gHttpBuf, 7, field, sizeof(field));
-    gNowPlaying.durationMs = atol(field);
-    FormatMmSs(gNowPlaying.durationMs, gNowPlaying.durationMmSs);
+    GetPipeField(gHttpBuf, 4, field, sizeof(field));
+    apiDurMs = atol(field);
+    if (apiDurMs != gNowPlaying.durationMs) {
+        gNowPlaying.durationMs = apiDurMs;
+        FormatMmSs(gNowPlaying.durationMs, gNowPlaying.durationMmSs);
+    }
 
-    GetPipeField(gHttpBuf, 6, field, sizeof(field));
+    GetPipeField(gHttpBuf, 3, field, sizeof(field));
     apiProgressMs = atol(field);
     if (gNowPlaying.isPlaying) {
         /* Add half-RTT compensation for response transit time */
@@ -2426,29 +2435,43 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
             gNowPlaying.progressMs = curLocalMs;
             FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
         }
+    } else if (sameTrack && gNowPlaying.isPlaying && prevWasPlaying) {
+        /* While playing the same track, keep our drift-free 60.15 Hz hardware tick clock
+         * unless the cloud timecode differs by >1.5s (e.g. external seek). */
+        long curLocalMs = GetCurrentInterpolatedProgressMs();
+        long diff = apiProgressMs - curLocalMs;
+        if (diff < 0) diff = -diff;
+        if (diff > 1500) {
+            SetTimelinePosition(apiProgressMs);
+        } else {
+            gNowPlaying.progressMs = curLocalMs;
+            FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
+        }
     } else {
         SetTimelinePosition(apiProgressMs);
     }
 
-    GetPipeField(gHttpBuf, 10, field, sizeof(field));
+    GetPipeField(gHttpBuf, 5, field, sizeof(field));
     gNowPlaying.volumePct = (short)atoi(field);
 
-    GetPipeField(gHttpBuf, 11, gNowPlaying.shuffleMode, sizeof(gNowPlaying.shuffleMode));
-    GetPipeField(gHttpBuf, 12, gNowPlaying.repeatState, sizeof(gNowPlaying.repeatState));
+    GetPipeField(gHttpBuf, 6, gNowPlaying.shuffleMode, sizeof(gNowPlaying.shuffleMode));
+    GetPipeField(gHttpBuf, 7, gNowPlaying.repeatState, sizeof(gNowPlaying.repeatState));
 
-    GetPipeField(gHttpBuf, 13, field, sizeof(field));
+    GetPipeField(gHttpBuf, 8, field, sizeof(field));
     gNowPlaying.isLiked = (field[0] == '1');
 
-    GetPipeField(gHttpBuf, 14, field, sizeof(field));
+    GetPipeField(gHttpBuf, 9, field, sizeof(field));
     if (gSpeakerLockUntilTicks != 0 && (long)(gSpeakerLockUntilTicks - TickCount()) > 0) {
-        /* Keep user-selected / startup-restored speaker locked against cloud lag */
+        /* Keep user-selected / startup-restored speaker locked for 5s against cloud lag */
         if (gSavedSpeakerName[0] != '\0') {
             SafeCopy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
         }
-    } else if (field[0] != '\0') {
+    } else if (field[0] != '\0' && strcmp(field, "No Active Device") != 0) {
         SafeCopy(gNowPlaying.deviceName, field, sizeof(gNowPlaying.deviceName));
-        if (gSavedSpeakerName[0] == '\0') {
+        if (strcmp(field, gSavedSpeakerName) != 0) {
+            /* Another device changed the active speaker — respect & remember it! */
             SafeCopy(gSavedSpeakerName, field, sizeof(gSavedSpeakerName));
+            gSavedSpeakerId[0] = '\0';
             SaveServerPrefs(NetGetServerIP());
         }
     } else if (gNowPlaying.deviceName[0] == '\0' && gSavedSpeakerName[0] != '\0') {
@@ -2546,13 +2569,13 @@ static void LoadSelectedLeftItemIntoRightList(void)
             gRightSelected = 0;
         }
     } else if (strcmp(sel->kind, "ARTIST") == 0) {
-        SafeCopy(gActiveContextUri, sel->uri, sizeof(gActiveContextUri));
+        /* Leave gActiveContextUri empty so clicking an artist's popular track plays that exact track
+         * immediately and queues the artist's popular tracks (Spotify rejects offset on artist context). */
         UrlEncode(sel->name, encName, sizeof(encName));
         sprintf(path, "/api/spotify/artist/%s/top-tracks?name=%s", sel->id, encName);
         n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
         if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
     } else if (strcmp(sel->kind, "SHOW") == 0 || strcmp(sel->kind, "PODCAST") == 0) {
-        SafeCopy(gActiveContextUri, sel->uri, sizeof(gActiveContextUri));
         sprintf(path, "/api/spotify/show/%s/episodes?limit=30", sel->id);
         n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
         if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
@@ -3103,28 +3126,33 @@ static void LoadDevicesAndTogglePopover(void)
     RenderCanvas();
 }
 
+static Boolean gStartupSpeakerSent = false;
+
 static void ConnectAndLoadAll(void)
 {
-    /* If a last-used speaker was saved in SpotiMacPrefs, tell the Spotify API to use it on start! */
-    if (gSavedSpeakerId[0] != '\0' || gSavedSpeakerName[0] != '\0') {
-        char encId[96], encName[96], encClientId[64], encClientName[96], path[512];
-        if (gSavedSpeakerName[0] != '\0') {
-            SafeCopy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
+    /* Only set the Spotify Connect speaker to the saved (last-used) speaker ONCE, directly at launch! */
+    if (!gStartupSpeakerSent) {
+        gStartupSpeakerSent = true;
+        if (gSavedSpeakerId[0] != '\0' || gSavedSpeakerName[0] != '\0') {
+            char encId[96], encName[96], encClientId[64], encClientName[96], path[512];
+            if (gSavedSpeakerName[0] != '\0') {
+                SafeCopy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
+            }
+            gSpeakerLockUntilTicks = TickCount() + 300; /* 5s initial startup lock */
+            UrlEncode(gSavedSpeakerId, encId, sizeof(encId));
+            UrlEncode(gSavedSpeakerName, encName, sizeof(encName));
+            UrlEncode(gMyClientId, encClientId, sizeof(encClientId));
+            UrlEncode(gMySpeakerName, encClientName, sizeof(encClientName));
+            sprintf(
+                path,
+                "/api/spotify/transfer?device_id=%s&device_name=%s&startup=1&client_id=%s&client_name=%s",
+                encId,
+                encName,
+                encClientId,
+                encClientName
+            );
+            NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
         }
-        gSpeakerLockUntilTicks = TickCount() + 900; /* 15s lock against post-launch speaker jump */
-        UrlEncode(gSavedSpeakerId, encId, sizeof(encId));
-        UrlEncode(gSavedSpeakerName, encName, sizeof(encName));
-        UrlEncode(gMyClientId, encClientId, sizeof(encClientId));
-        UrlEncode(gMySpeakerName, encClientName, sizeof(encClientName));
-        sprintf(
-            path,
-            "/api/spotify/transfer?device_id=%s&device_name=%s&startup=1&client_id=%s&client_name=%s",
-            encId,
-            encName,
-            encClientId,
-            encClientName
-        );
-        NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     }
 
     /* Load server-side search history if local prefs didn't have any yet */
@@ -3586,7 +3614,7 @@ static void HandleCanvasClick(Point pt)
                 SafeCopy(gNowPlaying.deviceName, gDevices[row].name, sizeof(gNowPlaying.deviceName));
                 SafeCopy(gSavedSpeakerId,   gDevices[row].id,   sizeof(gSavedSpeakerId));
                 SafeCopy(gSavedSpeakerName, gDevices[row].name, sizeof(gSavedSpeakerName));
-                gSpeakerLockUntilTicks = TickCount() + 900; /* 15s speaker lock */
+                gSpeakerLockUntilTicks = TickCount() + 300; /* 5s speaker lock after explicit switch */
                 SaveServerPrefs(NetGetServerIP());
                 gSpeakerPopupOpen = false;
                 RenderCanvas();
@@ -4631,23 +4659,25 @@ int main(void)
                 }
                 /* If a playing track reaches its end, trigger an immediate poll so the next track loads fast */
                 if (gNowPlaying.durationMs > 0 && curMs >= gNowPlaying.durationMs &&
-                    (nowTicks - gLastPollTicks) >= 60) {
-                    gLastPollTicks = nowTicks - 240;
+                    (nowTicks - gLastPollTicks) >= 30) {
+                    gLastPollTicks = nowTicks - 60;
                 }
             }
         }
 
-        /* Poll /api/spotify/now-playing every ~4 seconds (240 ticks) */
-        if (NetHasServer() && !gAboutModalOpen && (nowTicks - gLastPollTicks) >= 240) {
+        /* Poll /api/spotify/poll every ~1 second (60 ticks) */
+        if (NetHasServer() && !gAboutModalOpen && (nowTicks - gLastPollTicks) >= 60) {
             NowPlayingState prevState = gNowPlaying;
             gLastPollTicks = nowTicks;
             RefreshNowPlaying(true);
-            if (!gVisualizerOpen ||
-                prevState.isPlaying != gNowPlaying.isPlaying ||
+            if (prevState.isPlaying != gNowPlaying.isPlaying ||
                 prevState.isLiked != gNowPlaying.isLiked ||
                 prevState.volumePct != gNowPlaying.volumePct ||
                 strcmp(prevState.trackId, gNowPlaying.trackId) != 0 ||
+                strcmp(prevState.trackName, gNowPlaying.trackName) != 0 ||
+                strcmp(prevState.artistName, gNowPlaying.artistName) != 0 ||
                 strcmp(prevState.progressMmSs, gNowPlaying.progressMmSs) != 0 ||
+                strcmp(prevState.durationMmSs, gNowPlaying.durationMmSs) != 0 ||
                 strcmp(prevState.shuffleMode, gNowPlaying.shuffleMode) != 0 ||
                 strcmp(prevState.repeatState, gNowPlaying.repeatState) != 0 ||
                 strcmp(prevState.deviceName, gNowPlaying.deviceName) != 0) {

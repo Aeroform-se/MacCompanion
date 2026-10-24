@@ -324,6 +324,30 @@ async function checkIsTrackLiked(trackIdOrUri) {
     });
   }
 
+  function syncActiveSpeakerFromCloud(raw) {
+    if (customFetch || !raw || !raw.device || !raw.device.name) return;
+    const now = Date.now();
+    // Only hold optimistic speaker name for 5 seconds right after an explicit /transfer
+    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 5000) {
+      return;
+    }
+    let cloudName = raw.device.name;
+    let cloudId = raw.device.id || '';
+    if (cloudName.toLowerCase().includes('macintosh 68k')) {
+      const activeMac = audioEngine.getActiveMacClient();
+      cloudName = activeMac ? activeMac.name : audioEngine.getActiveMacSpeakerName();
+      cloudId = activeMac ? activeMac.deviceId : cloudId;
+    }
+    optimisticState.deviceName = null;
+    const saved = store.load();
+    if (saved.lastSpeakerName !== cloudName || (cloudId && saved.lastSpeakerId !== cloudId)) {
+      store.save({
+        lastSpeakerId: cloudId || saved.lastSpeakerId,
+        lastSpeakerName: cloudName,
+      });
+    }
+  }
+
   function applyOptimisticOverrides(np) {
     if (!np) return np;
     // When Spotify's active speaker is our librespot receiver ("Macintosh 68k"),
@@ -364,14 +388,12 @@ async function checkIsTrackLiked(trackIdOrUri) {
     if (optimisticState.repeatState !== null && (now - optimisticState.repeatTs) < OPTIMISTIC_TTL_MS) {
       np.repeatState = optimisticState.repeatState;
     }
-    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 15000) {
+    if (optimisticState.deviceName !== null && (now - optimisticState.deviceNameTs) < 5000) {
       np.deviceName = optimisticState.deviceName;
-    } else if (!np.deviceName) {
+    } else if (!np.deviceName || np.deviceName === 'No Active Device') {
       const saved = store.load();
       if (saved && saved.lastSpeakerName) {
         np.deviceName = saved.lastSpeakerName;
-      } else if (optimisticState.deviceName) {
-        np.deviceName = optimisticState.deviceName;
       }
     }
     return np;
@@ -802,6 +824,7 @@ async function refreshNowPlayingCache() {
   try {
     const raw = await callSpotify('/me/player');
     const playerFetchedAt = Date.now();
+    syncActiveSpeakerFromCloud(raw);
     let isLiked = false;
     if (raw && raw.item && raw.item.id) {
       isLiked = await checkIsTrackLiked(raw.item.id);
@@ -816,6 +839,90 @@ async function refreshNowPlayingCache() {
   }
 }
 
+async function getFastNormalizedNowPlaying() {
+  let raw;
+  let isLiked = false;
+
+  if (!customFetch && nowPlayingCache.fetchedAt > 0 && (Date.now() - nowPlayingCache.fetchedAt) < 30000) {
+    // Serve immediately (<1ms) from cache and trigger background refresh if >900ms old
+    raw = nowPlayingCache.raw ? { ...nowPlayingCache.raw } : null;
+    if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
+      const elapsed = Math.max(0, Date.now() - nowPlayingCache.fetchedAt);
+      const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
+      raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
+    }
+    if (raw && raw.item && raw.item.uri) {
+      const cachedEntry = likedStatusMap.get(raw.item.uri);
+      isLiked = cachedEntry ? cachedEntry.liked : nowPlayingCache.isLiked;
+    } else {
+      isLiked = nowPlayingCache.isLiked;
+    }
+    if ((Date.now() - nowPlayingCache.fetchedAt) > 900) {
+      refreshNowPlayingCache();
+    }
+  } else {
+    raw = await callSpotify('/me/player');
+    const playerFetchedAt = Date.now();
+    syncActiveSpeakerFromCloud(raw);
+    if (raw && raw.item && raw.item.id) {
+      isLiked = await checkIsTrackLiked(raw.item.id);
+    }
+    if (!customFetch) {
+      nowPlayingCache.raw = raw ? { ...raw } : null;
+      nowPlayingCache.isLiked = isLiked;
+      nowPlayingCache.fetchedAt = playerFetchedAt;
+      if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
+        const elapsed = Math.max(0, Date.now() - playerFetchedAt);
+        const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
+        raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
+      }
+    }
+  }
+
+  const data = store.load();
+  return applyOptimisticOverrides(normalizeNowPlaying(raw, {
+    isLiked,
+    smartShuffleOverride: Boolean(data.smartShuffleActive && raw && raw.shuffle_state),
+  }));
+}
+
+/**
+ * GET /api/spotify/poll
+ * Ultra-lean 1-second status endpoint tailored specifically for the 68k client.
+ * Returns only the exact fields needed on every 1s tick (~65 bytes):
+ *   POLL|is_playing(1/0)|track_id|progress_ms|duration_ms|volume_pct|shuffle_mode|repeat_state|is_liked(1/0)|device_name[|track_name|artist_name]
+ * `track_name` and `artist_name` are omitted when `req.query.track_id` matches the active `track_id`,
+ * and automatically included when the track changes!
+ */
+router.get('/poll', async (req, res) => {
+  try {
+    registerMacFromRequest(req);
+    const np = await getFastNormalizedNowPlaying();
+    const knownTrackId = (req.query.track_id || '').trim();
+    const row = [
+      np.active ? 'POLL' : 'IDLE',
+      np.isPlaying ? '1' : '0',
+      np.trackId || '',
+      np.progressMs || 0,
+      np.durationMs || 0,
+      np.volumePercent ?? 100,
+      np.shuffleMode || 'off',
+      np.repeatState || 'off',
+      np.isLiked ? '1' : '0',
+      np.deviceName || '',
+    ];
+    if (!knownTrackId || knownTrackId !== np.trackId) {
+      row.push(np.trackName || '');
+      row.push(np.artistName || '');
+    }
+    const pipe = `${formatPipeRow(row)}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, data: np, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
 /**
  * GET /api/spotify/now-playing
  * Returns full playback status, timeline progress/duration (both ms & M:SS),
@@ -827,49 +934,7 @@ async function refreshNowPlayingCache() {
 router.get('/now-playing', async (req, res) => {
   try {
     registerMacFromRequest(req);
-    let raw;
-    let isLiked = false;
-
-    if (!customFetch && nowPlayingCache.fetchedAt > 0 && (Date.now() - nowPlayingCache.fetchedAt) < 30000) {
-      // Serve immediately (<1ms) from cache and trigger background refresh if >2.0s old
-      raw = nowPlayingCache.raw ? { ...nowPlayingCache.raw } : null;
-      if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
-        const elapsed = Math.max(0, Date.now() - nowPlayingCache.fetchedAt);
-        const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
-        raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
-      }
-      if (raw && raw.item && raw.item.uri) {
-        const cachedEntry = likedStatusMap.get(raw.item.uri);
-        isLiked = cachedEntry ? cachedEntry.liked : nowPlayingCache.isLiked;
-      } else {
-        isLiked = nowPlayingCache.isLiked;
-      }
-      if ((Date.now() - nowPlayingCache.fetchedAt) > 2000) {
-        refreshNowPlayingCache();
-      }
-    } else {
-      raw = await callSpotify('/me/player');
-      const playerFetchedAt = Date.now();
-      if (raw && raw.item && raw.item.id) {
-        isLiked = await checkIsTrackLiked(raw.item.id);
-      }
-      if (!customFetch) {
-        nowPlayingCache.raw = raw ? { ...raw } : null;
-        nowPlayingCache.isLiked = isLiked;
-        nowPlayingCache.fetchedAt = playerFetchedAt;
-        if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
-          const elapsed = Math.max(0, Date.now() - playerFetchedAt);
-          const dur = (raw.item && raw.item.duration_ms) || Number.MAX_SAFE_INTEGER;
-          raw.progress_ms = Math.min(dur, raw.progress_ms + elapsed);
-        }
-      }
-    }
-
-    const data = store.load();
-    const np = applyOptimisticOverrides(normalizeNowPlaying(raw, {
-      isLiked,
-      smartShuffleOverride: Boolean(data.smartShuffleActive && raw && raw.shuffle_state),
-    }));
+    const np = await getFastNormalizedNowPlaying();
     const pipe = `${formatPipeRow(nowPlayingToPipeRow(np))}\n`;
     if (req.query.format === 'json') {
       return res.json({ ok: true, data: np, pipe: pipe.trim() });
@@ -2148,7 +2213,8 @@ router.get('/artist/:id/albums', async (req, res) => {
 
 /**
  * GET /api/spotify/artist/:id/top-tracks
- * Lists an artist's popular tracks (falls back to search if Dev Mode restricts top-tracks).
+ * Lists an artist's popular tracks (falls back to parallel search batches with limit<=10
+ * if Spotify Development Mode restricts /artists/:id/top-tracks).
  */
 router.get('/artist/:id/top-tracks', async (req, res) => {
   try {
@@ -2170,12 +2236,37 @@ router.get('/artist/:id/top-tracks', async (req, res) => {
         } catch {}
       }
       if (q) {
-        const searchData = await callSpotify('/search', {
-          query: { q, type: 'track', limit: 25 },
-        });
-        tracks = (searchData && searchData.tracks && Array.isArray(searchData.tracks.items))
-          ? searchData.tracks.items
-          : [];
+        // Spotify Feb 2026 Dev Mode caps /search at limit=10; fetch two pages in parallel
+        const [page1, page2] = await Promise.allSettled([
+          callSpotify('/search', { query: { q: `artist:"${q}"`, type: 'track', limit: 10, offset: 0 } }),
+          callSpotify('/search', { query: { q, type: 'track', limit: 10, offset: 0 } }),
+        ]);
+        const rawCandidates = [];
+        if (page1.status === 'fulfilled' && page1.value && page1.value.tracks && Array.isArray(page1.value.tracks.items)) {
+          rawCandidates.push(...page1.value.tracks.items);
+        }
+        if (page2.status === 'fulfilled' && page2.value && page2.value.tracks && Array.isArray(page2.value.tracks.items)) {
+          rawCandidates.push(...page2.value.tracks.items);
+        }
+        const qLower = q.toLowerCase();
+        const seenIds = new Set();
+        const exactArtistMatches = [];
+        const otherMatches = [];
+        for (const t of rawCandidates) {
+          if (!t || !t.id || seenIds.has(t.id)) continue;
+          seenIds.add(t.id);
+          const hasArtist = Array.isArray(t.artists) && t.artists.some(
+            (a) => a && (a.id === artistId || (a.name && a.name.toLowerCase() === qLower))
+          );
+          if (hasArtist) {
+            exactArtistMatches.push(t);
+          } else {
+            otherMatches.push(t);
+          }
+        }
+        tracks = exactArtistMatches.length > 0
+          ? [...exactArtistMatches, ...otherMatches.slice(0, Math.max(0, 15 - exactArtistMatches.length))]
+          : otherMatches;
       }
     }
     const rows = tracks.filter(Boolean).map((t) => formatTrackRow('TRACK', t));
