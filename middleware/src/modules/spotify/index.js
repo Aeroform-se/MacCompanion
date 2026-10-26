@@ -258,13 +258,28 @@ async function checkIsTrackLiked(trackIdOrUri) {
   // Top Tracks, Search Results) so playing a track without a context_uri still loads
   // the full upcoming tracklist into Spotify's player for Next/Previous & auto-advance.
   let lastTrackListUris = [];
+  let lastTrackListTitles = [];
+  let lastTrackListHasSmartTail = false;
+
+  function normalizeTrackTitleKey(title) {
+    if (!title) return '';
+    return String(title)
+      .toLowerCase()
+      .replace(/\s*[-–—([].*$/, '')
+      .replace(/[^a-z0-9\u00c0-\u017f]+/g, ' ')
+      .trim();
+  }
+
   function recordTrackListRows(rows, { allLiked = false } = {}) {
     if (!Array.isArray(rows)) return;
-    const uris = rows
-      .filter((r) => Array.isArray(r) && (r[0] === 'TRACK' || r[0] === 'RECENT' || r[0] === 'TOP_TRACK') && typeof r[7] === 'string' && r[7].startsWith('spotify:track:'))
-      .map((r) => r[7]);
+    const validRows = rows.filter(
+      (r) => Array.isArray(r) && (r[0] === 'TRACK' || r[0] === 'RECENT' || r[0] === 'TOP_TRACK') && typeof r[7] === 'string' && r[7].startsWith('spotify:track:')
+    );
+    const uris = validRows.map((r) => r[7]);
     if (uris.length > 0) {
       lastTrackListUris = uris;
+      lastTrackListTitles = validRows.map((r) => r[2] || '');
+      lastTrackListHasSmartTail = false;
       if (!customFetch) {
         if (allLiked) {
           for (const u of uris) setCachedLikedStatus(u, true);
@@ -1068,11 +1083,20 @@ router.all('/play', async (req, res) => {
     let targetTrackId = null;
     if (contextUri) {
       const normCtx = normalizeSpotifyUri(contextUri, 'playlist');
-      body = { context_uri: normCtx.uri };
       if (offsetUri) {
         const normOff = normalizeSpotifyUri(offsetUri, 'track');
-        body.offset = { uri: normOff.uri };
         targetTrackId = normOff.id;
+        if (!customFetch && lastTrackListHasSmartTail && lastTrackListUris.includes(normOff.uri)) {
+          body = { uris: lastTrackListUris, offset: { uri: normOff.uri } };
+        } else {
+          body = { context_uri: normCtx.uri, offset: { uri: normOff.uri } };
+        }
+      } else if (!customFetch && lastTrackListHasSmartTail && lastTrackListUris.length > 1) {
+        const firstId = lastTrackListUris[0].split(':').pop();
+        targetTrackId = firstId;
+        body = { uris: lastTrackListUris, offset: { position: 0 } };
+      } else {
+        body = { context_uri: normCtx.uri };
       }
       optimisticState.progressMs = 0;
       optimisticState.progressTs = Date.now();
@@ -2000,6 +2024,165 @@ router.get('/queue', async (req, res) => {
     const rows = queue.map((t) => formatTrackRow('QUEUE', t));
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, queue, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/queue-tail?limit=6&playing_in_list=1&last_id=...&seed_artist=...&seed_track=...
+ * Returns the upcoming tracks that will play after the current track list:
+ *   1. If `playing_in_list=1`, inspects Spotify's `/me/player/queue`, skips past `last_id`
+ *      (the last track of the current list), and takes the exact upcoming queue tracks after it.
+ *   2. If fewer than `limit` tracks are available (e.g. a <8-track list was just loaded before
+ *      playback started, or Spotify's queue doesn't extend past `last_id`), fills the remaining
+ *      slots with smart related tracks seeded from `seed_artist` / `seed_track` and appends all
+ *      chosen track URIs to `lastTrackListUris` so they play in that exact order!
+ */
+router.get('/queue-tail', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(8, parseInt(req.query.limit || '6', 10) || 6));
+    const playingInList = req.query.playing_in_list === '1';
+    const lastId = (req.query.last_id || '').trim();
+    const seedArtist = (req.query.seed_artist || '').trim();
+    const seedTrack = (req.query.seed_track || '').trim();
+
+    const seenIds = new Set();
+    const seenTitleKeys = new Set();
+    for (const u of lastTrackListUris) {
+      const id = u.includes(':') ? u.split(':').pop() : u;
+      if (id) seenIds.add(id);
+    }
+    for (const title of lastTrackListTitles) {
+      const tk = normalizeTrackTitleKey(title);
+      if (tk) seenTitleKeys.add(tk);
+    }
+    if (lastId) seenIds.add(lastId);
+    if (seedTrack) {
+      const stk = normalizeTrackTitleKey(seedTrack);
+      if (stk) seenTitleKeys.add(stk);
+    }
+
+    const chosen = [];
+    const canAcceptTrack = (t) => {
+      if (!t || !t.id || seenIds.has(t.id)) return false;
+      const tk = normalizeTrackTitleKey(t.name);
+      if (tk && seenTitleKeys.has(tk)) return false;
+      seenIds.add(t.id);
+      if (tk) seenTitleKeys.add(tk);
+      return true;
+    };
+
+    // 1. If currently playing from this list, check Spotify's actual /me/player/queue after `lastId`
+    if (playingInList) {
+      try {
+        const qData = await callSpotify('/me/player/queue');
+        const rawQueue = (qData && Array.isArray(qData.queue)) ? qData.queue : [];
+        const curPlaying = qData && qData.currently_playing;
+        const curPlayingId = (curPlaying && curPlaying.id) || '';
+        if (curPlayingId) seenIds.add(curPlayingId);
+        if (curPlaying && curPlaying.name) {
+          const ctk = normalizeTrackTitleKey(curPlaying.name);
+          if (ctk) seenTitleKeys.add(ctk);
+        }
+
+        let startIdx = -1;
+        if (lastId && curPlayingId === lastId) {
+          // Currently playing the very last track of the list -> all of rawQueue comes right after!
+          startIdx = 0;
+        } else if (lastId) {
+          for (let i = 0; i < rawQueue.length; i++) {
+            if (rawQueue[i] && rawQueue[i].id === lastId) {
+              startIdx = i + 1;
+              break;
+            }
+          }
+        }
+        if (startIdx >= 0) {
+          for (let i = startIdx; i < rawQueue.length && chosen.length < limit; i++) {
+            const t = rawQueue[i];
+            if (canAcceptTrack(t)) {
+              chosen.push(t);
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // 2. If we still need tracks (e.g. <8-track list loaded before playing, or custom uris list),
+    //    fetch multiple search pages in parallel and deduplicate by both ID and normalized base title
+    if (chosen.length < limit) {
+      const primaryArtist = seedArtist.includes(',') ? seedArtist.split(',')[0].trim() : seedArtist;
+      const secondaryArtist = seedArtist.includes(',') ? (seedArtist.split(',')[1] || '').trim() : '';
+      const q = primaryArtist || seedTrack;
+      if (q) {
+        try {
+          const queries = [
+            callSpotify('/search', { query: { q, type: 'track', limit: 10, offset: 0 } }),
+            callSpotify('/search', { query: { q, type: 'track', limit: 10, offset: 10 } }),
+            callSpotify('/search', { query: { q, type: 'track', limit: 10, offset: 20 } }),
+          ];
+          if (secondaryArtist) {
+            queries.push(
+              callSpotify('/search', { query: { q: secondaryArtist, type: 'track', limit: 10, offset: 0 } })
+            );
+          } else if (primaryArtist && seedTrack && primaryArtist !== seedTrack) {
+            queries.push(
+              callSpotify('/search', { query: { q: `${primaryArtist} ${seedTrack}`, type: 'track', limit: 10, offset: 0 } })
+            );
+          }
+          const results = await Promise.allSettled(queries);
+          const allCandidates = [];
+          for (const resObj of results) {
+            if (resObj.status !== 'fulfilled' || !resObj.value || !resObj.value.tracks) continue;
+            const items = Array.isArray(resObj.value.tracks.items) ? resObj.value.tracks.items : [];
+            for (const t of items) {
+              if (t) allCandidates.push(t);
+            }
+          }
+          const normPrimary = primaryArtist.toLowerCase();
+          const normSecondary = secondaryArtist.toLowerCase();
+          const matchesSeedArtist = (t) => {
+            if (!normPrimary || !Array.isArray(t.artists)) return true;
+            return t.artists.some((a) => {
+              const n = ((a && a.name) || '').toLowerCase();
+              return n && (n.includes(normPrimary) || normPrimary.includes(n) || (normSecondary && n.includes(normSecondary)));
+            });
+          };
+          // Pass 1: Tracks by the seed artist or featured collaborator
+          for (const t of allCandidates) {
+            if (chosen.length >= limit) break;
+            if (matchesSeedArtist(t) && canAcceptTrack(t)) {
+              chosen.push(t);
+            }
+          }
+          // Pass 2: Any remaining search results if still under limit
+          for (const t of allCandidates) {
+            if (chosen.length >= limit) break;
+            if (canAcceptTrack(t)) {
+              chosen.push(t);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    const rows = chosen.map((t) => formatTrackRow('QUEUE', t));
+    for (const r of rows) {
+      const u = r[7];
+      const title = r[2] || '';
+      if (typeof u === 'string' && u.startsWith('spotify:track:') && !lastTrackListUris.includes(u)) {
+        lastTrackListUris.push(u);
+        lastTrackListTitles.push(title);
+      }
+    }
+    if (rows.length > 0) {
+      lastTrackListHasSmartTail = true;
+    }
+
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items: chosen, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
   } catch (err) {
     return handleRouteError(req, res, err);

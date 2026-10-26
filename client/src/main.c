@@ -226,6 +226,9 @@ static short           gRightSelected     = -1;
 static short           gRightScroll       = 0;
 static char            gActiveContextUri[96] = "";
 static char            gRightHeaderLabel[24] = "Tracks";
+static Boolean         gHasQueueSeparator        = false;
+static short           gQueueTailFetchedForCount = -1;
+static unsigned long   gLastQueueTailFetchTicks  = 0;
 
 /* Double-click detection */
 static unsigned long   gLastClickTicks     = 0;
@@ -616,6 +619,9 @@ static Boolean IsRightItemCurrentlyPlaying(short idx)
 
     return (idx == FindPlayingTrackIndexInRightList());
 }
+
+static void MaybeAppendSmartQueueToRightList(Boolean isInitialLoad);
+static void PlayRightItemAtIndex(short idx);
 
 static void SyncRightSelectionToPlayingTrack(void)
 {
@@ -1645,6 +1651,14 @@ static void RenderCanvas(void)
             short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
             if (itemIdx >= gRightCount) break;
 
+            if (strcmp(gRightItems[itemIdx].kind, "QUEUE_SEP") == 0) {
+                /* Smart queue separator line + 8x7 sparkle icon (ui/add-queue-separator.png) */
+                DrawHorizontalDottedLine(363, 419, rowTop + 6, true);
+                BlitIcon1Bit(gIconQueueSeparator, 8, 7, 424, rowTop + 2, srcBic);
+                DrawHorizontalDottedLine(435, 497, rowTop + 6, true);
+                continue;
+            }
+
             if (IsRightItemCurrentlyPlaying(itemIdx)) {
                 /* Rounded highlight pill + left play arrow icon on currently playing track (UI-update.png) */
                 SetRect(&r, 362, rowTop, 499, rowTop + 12);
@@ -2335,7 +2349,7 @@ static void PollDirectTimeline(void)
 
 static void RefreshNowPlaying(Boolean fetchArtIfChanged)
 {
-    long n, apiProgressMs, apiDurMs;
+    long n, apiProgressMs, apiDurMs, prevProgressMs;
     unsigned long reqStartTicks, rttTicks;
     char field[96];
     char incomingTrackId[64];
@@ -2346,6 +2360,7 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     if (!NetHasServer() || !gHttpBuf) return;
 
     prevWasPlaying = gNowPlaying.isPlaying;
+    prevProgressMs = GetCurrentInterpolatedProgressMs();
     SafeCopy(prevTrackId, gNowPlaying.trackId, sizeof(prevTrackId));
     UrlEncode((gNowPlaying.trackName[0] != '\0') ? gNowPlaying.trackId : "", encTrack, sizeof(encTrack));
     UrlEncode(gMyClientId, encId, sizeof(encId));
@@ -2486,17 +2501,141 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     }
 
     SyncRightSelectionToPlayingTrack();
+    MaybeAppendSmartQueueToRightList(false);
+
+    /*
+     * If a track in `gRightItems` just finished playing at the end of a queued batch
+     * (Spotify transitions from playing near the end of the track to stopped at 0:00
+     * on the same track while more smart-queue tracks exist below it), automatically
+     * continue playback into the next track in `gRightItems`!
+     */
+    if (prevWasPlaying && !gNowPlaying.isPlaying && !gTimelineFrozen &&
+        sameTrack && apiProgressMs <= 1000 && prevProgressMs >= 5000) {
+        short curIdx = FindPlayingTrackIndexInRightList();
+        if (curIdx >= 0) {
+            short nextIdx = curIdx + 1;
+            while (nextIdx < gRightCount && strcmp(gRightItems[nextIdx].kind, "QUEUE_SEP") == 0) {
+                nextIdx++;
+            }
+            if (nextIdx < gRightCount && strcmp(gRightItems[nextIdx].kind, "TRACK") == 0) {
+                PlayRightItemAtIndex(nextIdx);
+                return;
+            }
+        }
+    }
+
     SyncLocalAudioWithSpeaker();
+}
+
+/*
+ * Appends the smart queue separator (`QUEUE_SEP`) and 6 upcoming queue/recommended tracks
+ * to the end of `gRightItems` when either:
+ *   1. A track list is loaded with fewer than 8 entries (`isInitialLoad && gRightCount < 8`), or
+ *   2. Playback is approaching the end of a longer track list (`<= 4` songs left to play).
+ */
+static void MaybeAppendSmartQueueToRightList(Boolean isInitialLoad)
+{
+    short i, curIdx, remTracks = 0, lastTrackIdx = -1;
+    Boolean shouldFetch = false;
+    Boolean playingInList = false;
+    unsigned long nowTicks;
+    char encId[64], encArtist[96], encTrack[96], path[384];
+    long n;
+
+    if (!NetHasServer() || !gHttpBuf) return;
+    if (gRightCount <= 0 || gRightCount + 2 >= MAX_RIGHT_ITEMS) return;
+    if (strcmp(gRightItems[0].kind, "TRACK") != 0) return;
+
+    for (i = gRightCount - 1; i >= 0; i--) {
+        if (strcmp(gRightItems[i].kind, "TRACK") == 0) {
+            lastTrackIdx = i;
+            break;
+        }
+    }
+    if (lastTrackIdx < 0) return;
+
+    curIdx = FindPlayingTrackIndexInRightList();
+    if (curIdx >= 0) {
+        playingInList = true;
+        for (i = curIdx + 1; i < gRightCount; i++) {
+            if (strcmp(gRightItems[i].kind, "TRACK") == 0) {
+                remTracks++;
+            }
+        }
+    }
+
+    if (isInitialLoad && gRightCount < 8) {
+        shouldFetch = true;
+    } else if (!isInitialLoad && curIdx >= 0 && remTracks <= 4) {
+        shouldFetch = true;
+    }
+
+    if (!shouldFetch) return;
+    if (gQueueTailFetchedForCount == gRightCount) return;
+
+    nowTicks = TickCount();
+    if (!isInitialLoad && gLastQueueTailFetchTicks != 0 && (nowTicks - gLastQueueTailFetchTicks) < 120) {
+        return;
+    }
+
+    gQueueTailFetchedForCount = gRightCount;
+    gLastQueueTailFetchTicks  = nowTicks;
+
+    UrlEncode(gRightItems[lastTrackIdx].id,     encId,     sizeof(encId));
+    UrlEncode(gRightItems[lastTrackIdx].artist, encArtist, sizeof(encArtist));
+    UrlEncode(gRightItems[lastTrackIdx].name,   encTrack,  sizeof(encTrack));
+    sprintf(
+        path,
+        "/api/spotify/queue-tail?limit=6&playing_in_list=%d&last_id=%s&seed_artist=%s&seed_track=%s",
+        playingInList ? 1 : 0,
+        encId,
+        encArtist,
+        encTrack
+    );
+
+    n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+    if (n > 0 && strncmp(gHttpBuf, "QUEUE|", 6) == 0) {
+        const char *line = gHttpBuf;
+
+        if (!gHasQueueSeparator && gRightCount < MAX_RIGHT_ITEMS) {
+            RightItem *sep = &gRightItems[gRightCount++];
+            memset(sep, 0, sizeof(*sep));
+            SafeCopy(sep->kind, "QUEUE_SEP", sizeof(sep->kind));
+            gHasQueueSeparator = true;
+        }
+
+        while (line && *line && gRightCount < MAX_RIGHT_ITEMS) {
+            const char *nextLine = strchr(line, '\n');
+            char rowKind[16];
+            GetPipeField(line, 0, rowKind, sizeof(rowKind));
+            if (strcmp(rowKind, "QUEUE") == 0 || strcmp(rowKind, "TRACK") == 0) {
+                char durStr[24];
+                RightItem *it = &gRightItems[gRightCount++];
+                SafeCopy(it->kind, "TRACK", sizeof(it->kind));
+                GetPipeField(line, 1, it->id, sizeof(it->id));
+                GetPipeField(line, 2, it->name, sizeof(it->name));
+                GetPipeField(line, 3, it->artist, sizeof(it->artist));
+                GetPipeField(line, 5, durStr, sizeof(durStr));
+                it->durationMs = atol(durStr);
+                FormatMmSs(it->durationMs, it->durationMmSs);
+                GetPipeField(line, 7, it->uri, sizeof(it->uri));
+            }
+            if (!nextLine) break;
+            line = nextLine + 1;
+        }
+    }
 }
 
 static void ParseTracksResponseIntoRightList(const char *buf)
 {
     const char *line = buf;
-    gRightCount     = 0;
-    gRightSelected  = -1;
-    gRightScroll    = 0;
-    gLastClickedRow = -1;
-    gLastClickTicks = 0;
+    gRightCount               = 0;
+    gRightSelected            = -1;
+    gRightScroll              = 0;
+    gLastClickedRow           = -1;
+    gLastClickTicks           = 0;
+    gHasQueueSeparator        = false;
+    gQueueTailFetchedForCount = -1;
 
     while (line && *line && gRightCount < MAX_RIGHT_ITEMS) {
         const char *nextLine = strchr(line, '\n');
@@ -2533,6 +2672,7 @@ static void ParseTracksResponseIntoRightList(const char *buf)
     }
 
     SyncRightSelectionToPlayingTrack();
+    MaybeAppendSmartQueueToRightList(true);
 }
 
 static void LoadSelectedLeftItemIntoRightList(void)
@@ -2751,8 +2891,9 @@ static void PlayRightItemAtIndex(short idx)
     char encUri[128];
 
     if (!NetHasServer() || idx < 0 || idx >= gRightCount) return;
-    gRightSelected = idx;
     it = &gRightItems[idx];
+    if (strcmp(it->kind, "QUEUE_SEP") == 0) return;
+    gRightSelected = idx;
 
     if (strcmp(it->kind, "ALBUM") == 0) {
         char albId[64], albName[64], albUri[96];
@@ -2810,6 +2951,8 @@ static void PlayRightItemAtIndex(short idx)
         }
         /* 3. Heart / Liked status third */
         FetchTrackLikedStatus(gNowPlaying.trackId);
+        /* 4. If within 4 songs of the end of the track list, append 6 more smart-queue tracks */
+        MaybeAppendSmartQueueToRightList(false);
     }
     ResetPollTimersAfterAction();
     RenderCanvas();
@@ -2827,6 +2970,9 @@ static void TriggerNextTrack(void)
     if (curIdx >= 0 && gRightCount > 0 &&
         (gActiveContextUri[0] == '\0' || strcmp(gNowPlaying.shuffleMode, "off") == 0)) {
         short nextIdx = curIdx + 1;
+        while (nextIdx < gRightCount && strcmp(gRightItems[nextIdx].kind, "QUEUE_SEP") == 0) {
+            nextIdx++;
+        }
         if (nextIdx >= gRightCount && strcmp(gNowPlaying.repeatState, "off") != 0) {
             nextIdx = 0;
         }
@@ -2860,6 +3006,9 @@ static void TriggerPreviousTrack(void)
     if (curIdx >= 0 && gRightCount > 0 &&
         (gActiveContextUri[0] == '\0' || strcmp(gNowPlaying.shuffleMode, "off") == 0)) {
         short prevIdx = (curIdx > 0 && gNowPlaying.progressMs < 4000) ? (curIdx - 1) : curIdx;
+        while (prevIdx > 0 && strcmp(gRightItems[prevIdx].kind, "QUEUE_SEP") == 0) {
+            prevIdx--;
+        }
         if (prevIdx >= 0 && strcmp(gRightItems[prevIdx].kind, "TRACK") == 0) {
             PlayRightItemAtIndex(prevIdx);
             return;
@@ -3045,9 +3194,11 @@ static void ActivateSearchResultRow(short idx)
         RenderCanvas();
     } else {
         /* Single song from search: leave nothing selected in the left panel! */
-        gHasPinnedLeftItem   = false;
-        gLeftSelected        = -1;
-        gActiveContextUri[0] = '\0';
+        gHasPinnedLeftItem        = false;
+        gLeftSelected             = -1;
+        gActiveContextUri[0]      = '\0';
+        gHasQueueSeparator        = false;
+        gQueueTailFetchedForCount = -1;
         SafeCopy(gRightHeaderLabel, "Tracks", sizeof(gRightHeaderLabel));
         gRightCount = 0;
         for (i = 0; i < gSearchCount && gRightCount < MAX_RIGHT_ITEMS; i++) {
@@ -3852,6 +4003,9 @@ static void HandleCanvasClick(Point pt)
             short clickedRow = gRightScroll + (pt.v - LIST_TOP_Y) / ROW_HEIGHT;
             if (clickedRow >= 0 && clickedRow < gRightCount) {
                 unsigned long now = TickCount();
+                if (strcmp(gRightItems[clickedRow].kind, "QUEUE_SEP") == 0) {
+                    return;
+                }
                 /* Gracefully ignore the second click of a double-click on the same track row
                  * (gLastClickTicks is stamped AFTER PlayRightItemAtIndex finishes its HTTP calls,
                  * so a second click queued during network I/O or within ~600ms after is ignored). */
