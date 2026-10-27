@@ -40,6 +40,7 @@ static unsigned long  gBufferQueuedTick[NUM_AUDIO_BUFFERS]= { 0, 0 };
 static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0 };
 static short          gNextFillBuf       = 0;
 static Boolean        gPrebuffering      = true;
+static unsigned long  gLastEmptyStatusTick = 0;
 
 /*
  * Interrupt-safe Sound Manager callback:
@@ -171,6 +172,7 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
 {
     OSErr err;
     unsigned long startTicks = TickCount();
+    unsigned long lastIdleTick = 0;
 
     pb->ioCompletion = NULL;
     pb->ioCRefNum    = gMacTCPRef;
@@ -180,14 +182,23 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
     }
 
     while (pb->ioResult == inProgress) {
-        if (pumpAudioWhileWaiting && gAudioRunning) {
-            AudioStreamPump();
-        }
-        if (pumpAudioWhileWaiting && gIdleCallback) {
-            gIdleCallback();
+        unsigned long nowTicks = TickCount();
+        /*
+         * Throttle nested audio & visualizer pumps to at most once per VBL tick (60.15 Hz)
+         * so we never hammer MacTCP's internal queues or starve Ethernet/LocalTalk interrupts
+         * while waiting for an async TCP operation!
+         */
+        if (nowTicks != lastIdleTick) {
+            lastIdleTick = nowTicks;
+            if (pumpAudioWhileWaiting && gAudioRunning) {
+                AudioStreamPump();
+            }
+            if (pumpAudioWhileWaiting && gIdleCallback) {
+                gIdleCallback();
+            }
         }
         /* Safety timeout (8 seconds) */
-        if ((TickCount() - startTicks) > 480) {
+        if ((nowTicks - startTicks) > 480) {
             break;
         }
     }
@@ -598,6 +609,7 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     }
     gNextFillBuf  = 0;
     gPrebuffering = true;
+    gLastEmptyStatusTick = 0;
     gAudioRunning = true;
     return true;
 }
@@ -688,8 +700,22 @@ void AudioStreamPump(void)
 {
     TCPiopb pb;
     short attempts;
+    unsigned long nowTicks;
 
     if (!gAudioRunning || gAudioStream == 0 || !gSndChan) return;
+
+    /* Fast path: if both double-buffers are still playing in the Sound Manager,
+     * return immediately without calling MacTCP! */
+    if (!gPrebuffering && gBufferBusy[0] && gBufferBusy[1]) {
+        return;
+    }
+
+    /* If the last TCPStatus check on this tick had 0 unread bytes, wait until the next VBL tick
+     * before issuing another synchronous PBControlSync(TCPStatus) trap into MacTCP. */
+    nowTicks = TickCount();
+    if (gLastEmptyStatusTick != 0 && nowTicks == gLastEmptyStatusTick) {
+        return;
+    }
 
     /*
      * If the Sound Manager currently has no buffers playing and both buffers are
@@ -732,8 +758,10 @@ void AudioStreamPump(void)
 
         unread = pb.csParam.status.amtUnreadData;
         if (unread == 0) {
+            gLastEmptyStatusTick = nowTicks;
             break;
         }
+        gLastEmptyStatusTick = 0;
 
         needed = targetSize - gPcmFilled[idx];
         if (needed <= 0) {
