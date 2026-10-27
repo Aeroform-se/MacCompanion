@@ -179,8 +179,8 @@ resource 'SIZE' (-1) {
     reserved,
     reserved,
     reserved,
-    1048576,
-    524288
+    384 * 1024,
+    256 * 1024
 };
 
 resource 'MBAR' (128) {

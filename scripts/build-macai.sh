@@ -85,6 +85,8 @@ if [ -d "/Applications/Basillisk/driveshare" ]; then
     CURRENT_BUILD_RELEASES_DIR="$DRIVESHARE_DIR/current build releases"
     mkdir -p "$OLDER_RELEASES_DIR" "$CURRENT_BUILD_RELEASES_DIR"
 
+    rm -f "$DRIVESHARE_DIR/MacAI Prefs" "$DRIVESHARE_DIR/.finf/MacAI Prefs" "$DRIVESHARE_DIR/.rsrc/MacAI Prefs"
+    rm -f "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-"*
     cp "$BUILD_DIR/$APP_NAME.dsk" "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.dsk"
     cp "$BUILD_DIR/$APP_NAME.bin" "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.bin"
 

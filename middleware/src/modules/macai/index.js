@@ -742,6 +742,7 @@ router.all('/ask', async (req, res) => {
     const reqTier = normalizeTier(req.query.tier || (req.body && req.body.tier));
     const tier = reqTier || defaultTier;
     const wantTts = req.query.tts === '1' || (req.body && req.body.tts === true);
+    const isRetry = req.query.retry === '1' || (req.body && req.body.retry === true);
 
     let chatId = String(req.query.chat_id || (req.body && req.body.chat_id) || '').trim();
     const chats = Array.isArray(data.chats) ? [...data.chats] : [];
@@ -763,7 +764,17 @@ router.all('/ask', async (req, res) => {
 
     chat.provider = provider;
     chat.tier = tier;
-    chat.messages.push({ role: 'user', content: prompt, ts: Date.now() });
+    if (isRetry && Array.isArray(chat.messages) && chat.messages.length > 0) {
+      if (chat.messages[chat.messages.length - 1].role === 'assistant') {
+        chat.messages.pop();
+      }
+      const lastMsg = chat.messages[chat.messages.length - 1];
+      if (!lastMsg || lastMsg.role !== 'user' || lastMsg.content !== prompt) {
+        chat.messages.push({ role: 'user', content: prompt, ts: Date.now() });
+      }
+    } else {
+      chat.messages.push({ role: 'user', content: prompt, ts: Date.now() });
+    }
 
     const replyText = await generateProviderReply(provider, tier, chat.messages.slice(-12), data);
     chat.messages.push({ role: 'assistant', content: replyText, ts: Date.now() });

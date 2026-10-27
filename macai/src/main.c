@@ -12,6 +12,7 @@
 #include <Processes.h>
 #include <Files.h>
 #include <Folders.h>
+#include <Scrap.h>
 #include <Sound.h>
 #include <OSUtils.h>
 #include <string.h>
@@ -30,6 +31,8 @@
 #define MAX_WIN_H           768
 
 #define SIDEBAR_W           143
+#define MONACO_CHAR_W       6
+#define MAX_PROMPT_VIS_LINES 5
 
 #define mApple              128
 #define iAbout              1
@@ -66,6 +69,10 @@ typedef struct {
 typedef struct {
     Boolean isUser;
     char    text[MAX_MSG_TEXT];
+    short   cachedMaxW;
+    short   cachedLines;
+    short   cachedWidestPx;
+    short   cachedBubbleH;
 } ChatMessage;
 
 typedef struct {
@@ -87,6 +94,7 @@ static short          gOffscreenH       = 0;
 
 /* Connection & App State */
 static Boolean        gRunning          = true;
+static Boolean        gScanningServer   = true;
 static Boolean        gServerConnected  = false;
 static Boolean        gAwaitingLogin    = false;
 static Boolean        gAboutModalOpen   = false;
@@ -120,12 +128,16 @@ static short          gMessageCount     = 0;
 static short          gMsgScrollY       = 0;
 static short          gMsgMaxScrollY    = 0;
 static Boolean        gWaitingForAI     = false;
+static short          gCopiedMsgIdx     = -1;
+static unsigned long  gCopiedTick       = 0;
 
-/* Bottom Prompt Input State */
-static char           gPromptBuf[256]   = "";
+/* Bottom Prompt Input State (Multi-line auto-expanding up to 5 lines) */
+static char           gPromptBuf[1024]  = "";
 static Boolean        gPromptFocused    = false;
 static Boolean        gCaretVisible     = true;
 static unsigned long  gLastCaretTick    = 0;
+static short          gPromptScrollLine = 0;
+static short          gPrevPromptVisLines = 1;
 
 /* Search Modal State */
 static Boolean        gSearchModalOpen  = false;
@@ -147,12 +159,16 @@ static const Pattern kPatModalDim    = { { 0xAA, 0x00, 0x55, 0x00, 0xAA, 0x00, 0
 
 /* Forward Declarations */
 static void RenderWindow(void);
+static void RenderChatAreaOnly(void);
+static void RenderPromptBarOnly(void);
+static void SyncAIMenuState(void);
+static Boolean IsProviderEnabled(const char *id);
 static void FetchProvidersAndChats(void);
 static void LoadChatById(const char *chatId);
-static void SendPromptToAI(const char *promptText);
+static void SendPromptToAI(const char *promptText, Boolean isRetry);
 
 /* ============================================================================
- * Preferences File ("MacAI Prefs" with fallback to "SpotiMac Prefs")
+ * Preferences File ("MacAI Prefs" in System Folder:Preferences)
  * ============================================================================ */
 
 #define MACAI_PREFS_MAGIC     0x4D434131UL /* 'MCA1' */
@@ -163,56 +179,80 @@ typedef struct {
     ip_addr       serverIp;
 } HeaderPrefs;
 
+static Boolean GetPrefsFileSpec(FSSpec *outSpec, Boolean spotiMacFallback)
+{
+    short vRefNum = 0;
+    long  dirID   = 0;
+    OSErr err;
+    ConstStr255Param fileName = spotiMacFallback ? "\pSpotiMac Prefs" : "\pMacAI Prefs";
+
+    err = FindFolder(kOnSystemDisk, kPreferencesFolderType, kCreateFolder, &vRefNum, &dirID);
+    if (err != noErr) {
+        SysEnvRec theWorld;
+        if (SysEnvirons(1, &theWorld) == noErr && theWorld.sysVRefNum != 0) {
+            vRefNum = theWorld.sysVRefNum;
+            dirID   = 0;
+        } else {
+            return false;
+        }
+    }
+
+    err = FSMakeFSSpec(vRefNum, dirID, fileName, outSpec);
+    return (err == noErr || err == fnfErr);
+}
+
 static void SaveLastServerIP(ip_addr ip)
 {
-    short vRefNum = 0, refNum = 0;
-    long dirID = 0, count = sizeof(HeaderPrefs);
+    short refNum = 0;
+    long count = sizeof(HeaderPrefs);
     FSSpec spec;
     HeaderPrefs prefs;
+    OSErr err;
 
     if (ip == 0) return;
     prefs.magic    = MACAI_PREFS_MAGIC;
     prefs.serverIp = ip;
 
-    if (FindFolder(kOnSystemDisk, kPreferencesFolderType, kCreateFolder, &vRefNum, &dirID) == noErr) {
-        if (FSMakeFSSpec(vRefNum, dirID, "\pMacAI Prefs", &spec) == noErr || true) {
-            FSpCreate(&spec, 'MCAI', 'pref', smSystemScript);
-            if (FSpOpenDF(&spec, fsWrPerm, &refNum) == noErr) {
-                SetEOF(refNum, 0);
-                FSWrite(refNum, &count, &prefs);
-                FSClose(refNum);
-                return;
-            }
+    if (GetPrefsFileSpec(&spec, false)) {
+        FSpCreate(&spec, 'MCAI', 'pref', smSystemScript);
+        err = FSpOpenDF(&spec, fsWrPerm, &refNum);
+        if (err == noErr) {
+            SetEOF(refNum, 0);
+            FSWrite(refNum, &count, &prefs);
+            FSClose(refNum);
         }
     }
 }
 
 static Boolean LoadLastServerIP(ip_addr *outIP)
 {
-    short vRefNum = 0, refNum = 0;
-    long dirID = 0, count;
+    short refNum = 0;
+    long count;
     FSSpec spec;
     HeaderPrefs prefs;
     short attempt;
+    OSErr err;
 
     if (!outIP) return false;
     *outIP = 0;
 
-    if (FindFolder(kOnSystemDisk, kPreferencesFolderType, kCreateFolder, &vRefNum, &dirID) == noErr) {
-        for (attempt = 0; attempt < 2; attempt++) {
-            ConstStr255Param name = (attempt == 0) ? "\pMacAI Prefs" : "\pSpotiMac Prefs";
-            if (FSMakeFSSpec(vRefNum, dirID, name, &spec) == noErr) {
-                if (FSpOpenDF(&spec, fsRdPerm, &refNum) == noErr) {
-                    count = sizeof(HeaderPrefs);
-                    memset(&prefs, 0, sizeof(prefs));
-                    FSRead(refNum, &count, &prefs);
-                    FSClose(refNum);
-                    if (count >= (long)sizeof(HeaderPrefs) &&
-                        (prefs.magic == MACAI_PREFS_MAGIC || prefs.magic == SPOTIMAC_PREFS_MAGIC) &&
-                        prefs.serverIp != 0) {
-                        *outIP = prefs.serverIp;
-                        return true;
-                    }
+    /* Remove any legacy "MacAI Prefs" file sitting in the application folder from v0.1.0 */
+    FSDelete("\pMacAI Prefs", 0);
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        if (GetPrefsFileSpec(&spec, attempt == 1)) {
+            err = FSpOpenDF(&spec, fsRdPerm, &refNum);
+            if (err == noErr) {
+                count = sizeof(HeaderPrefs);
+                memset(&prefs, 0, sizeof(prefs));
+                err = FSRead(refNum, &count, &prefs);
+                FSClose(refNum);
+                if ((err == noErr || err == eofErr) &&
+                    count >= (long)sizeof(HeaderPrefs) &&
+                    (prefs.magic == MACAI_PREFS_MAGIC || prefs.magic == SPOTIMAC_PREFS_MAGIC) &&
+                    prefs.serverIp != 0) {
+                    *outIP = prefs.serverIp;
+                    return true;
                 }
             }
         }
@@ -281,39 +321,39 @@ static void DrawCString(const char *str)
 
 static short MeasureCString(const char *str)
 {
-    unsigned char pstr[256];
-    short len = 0;
     if (!str) return 0;
-    while (str[len] && len < 254) {
-        pstr[len + 1] = (unsigned char)str[len];
-        len++;
-    }
-    pstr[0] = (unsigned char)len;
-    return StringWidth(pstr);
+    return (short)strlen(str) * MONACO_CHAR_W;
 }
 
 static void DrawCStringTruncated(const char *str, short maxPx)
 {
     char buf[128];
-    short len;
+    short len, maxChars;
     if (!str) return;
-    if (MeasureCString(str) <= maxPx) {
+    len = (short)strlen(str);
+    maxChars = maxPx / MONACO_CHAR_W;
+    if (len <= maxChars) {
         DrawCString(str);
         return;
     }
-    strncpy(buf, str, sizeof(buf) - 4);
-    buf[sizeof(buf) - 4] = '\0';
-    len = (short)strlen(buf);
-    while (len > 1) {
-        buf[len] = '\0';
-        strcat(buf, "..");
-        if (MeasureCString(buf) <= maxPx) {
-            DrawCString(buf);
-            return;
-        }
-        len--;
-    }
+    if (maxChars <= 2) return;
+    if (maxChars > (short)(sizeof(buf) - 1)) maxChars = sizeof(buf) - 1;
+    memcpy(buf, str, maxChars - 2);
+    buf[maxChars - 2] = '.';
+    buf[maxChars - 1] = '.';
+    buf[maxChars]     = '\0';
     DrawCString(buf);
+}
+
+static void CopyTextToClipboard(const char *text)
+{
+    long len;
+    if (!text) return;
+    len = (long)strlen(text);
+    ZeroScrap();
+    if (len > 0) {
+        PutScrap(len, 'TEXT', (Ptr)text);
+    }
 }
 
 static void BlitBitmap(const unsigned char *bits, short rowBytes,
@@ -387,59 +427,93 @@ static const char *GetTierDisplayName(const char *tier)
 }
 
 /* ============================================================================
- * Word Wrapping Helper for Chat Bubbles
+ * Fast Monospace Word Wrapping & Cached Bubble Metrics
  * ============================================================================ */
 
 static short WrapMessageLines(const char *text, short maxWidthPx,
                               char lines[][96], short maxLines)
 {
     short lineCount = 0;
+    short maxChars = maxWidthPx / MONACO_CHAR_W;
     const char *p = text;
 
     if (!text || !*text) return 0;
+    if (maxChars < 6) maxChars = 6;
+    if (maxChars > 90) maxChars = 90;
 
     while (*p && lineCount < maxLines) {
-        char curLine[96];
         short curLen = 0;
         short lastSpaceInLine = -1;
         const char *lastSpacePtr = NULL;
         const char *scan = p;
 
         while (*scan && *scan != '\n' && curLen < 90) {
-            curLine[curLen] = *scan;
-            curLine[curLen + 1] = '\0';
             if (*scan == ' ') {
                 lastSpaceInLine = curLen;
                 lastSpacePtr = scan;
             }
-            if (MeasureCString(curLine) > maxWidthPx) {
+            if (curLen + 1 > maxChars) {
                 if (lastSpaceInLine > 0 && lastSpacePtr != NULL) {
-                    curLine[lastSpaceInLine] = '\0';
+                    if (lines) {
+                        memcpy(lines[lineCount], p, lastSpaceInLine);
+                        lines[lineCount][lastSpaceInLine] = '\0';
+                    }
                     p = lastSpacePtr + 1;
                 } else {
-                    if (curLen > 1) curLine[curLen] = '\0';
+                    short take = (curLen > 0) ? curLen : 1;
+                    if (lines) {
+                        memcpy(lines[lineCount], p, take);
+                        lines[lineCount][take] = '\0';
+                    }
                     p = scan;
                 }
-                goto commit_line;
+                lineCount++;
+                goto next_line;
             }
             curLen++;
             scan++;
         }
 
-        curLine[curLen] = '\0';
+        if (lines) {
+            memcpy(lines[lineCount], p, curLen);
+            lines[lineCount][curLen] = '\0';
+        }
+        lineCount++;
         if (*scan == '\n') {
             p = scan + 1;
+            if (*p == '\0' && lineCount < maxLines) {
+                if (lines) lines[lineCount][0] = '\0';
+                lineCount++;
+            }
         } else {
             p = scan;
         }
-
-commit_line:
-        strncpy(lines[lineCount], curLine, 95);
-        lines[lineCount][95] = '\0';
-        lineCount++;
+next_line:;
     }
 
     return (lineCount > 0) ? lineCount : 1;
+}
+
+static void EnsureMessageMetrics(ChatMessage *msg, short maxW)
+{
+    static char tmpWrapped[MAX_WRAPPED_LINES][96];
+    short nLines, L, widestPx = 40;
+
+    if (!msg) return;
+    if (msg->cachedMaxW == maxW && msg->cachedBubbleH > 0) {
+        return;
+    }
+
+    nLines = WrapMessageLines(msg->text, maxW, tmpWrapped, MAX_WRAPPED_LINES);
+    for (L = 0; L < nLines; L++) {
+        short lw = (short)strlen(tmpWrapped[L]) * MONACO_CHAR_W;
+        if (lw > widestPx) widestPx = lw;
+    }
+
+    msg->cachedMaxW     = maxW;
+    msg->cachedLines    = nLines;
+    msg->cachedWidestPx = widestPx;
+    msg->cachedBubbleH  = nLines * 12 + 12;
 }
 
 /* ============================================================================
@@ -478,7 +552,14 @@ static void DrawPreConnectOrLoginScreen(void)
     TextSize(9);
     TextFace(normal);
 
-    if (gServerConnected && gAwaitingLogin) {
+    if (gScanningServer) {
+        const char *s1 = "Searching for MacCompanion";
+        const char *s2 = "server on your network...";
+        MoveTo(cx - MeasureCString(s1) / 2, cardR.top + 104);
+        DrawCString(s1);
+        MoveTo(cx - MeasureCString(s2) / 2, cardR.top + 118);
+        DrawCString(s2);
+    } else if (gServerConnected && gAwaitingLogin) {
         /* Matches ui/MacAI/login-error.png */
         const char *l1 = "You have not logged";
         const char *l2 = "in to any AI services.";
@@ -551,6 +632,49 @@ static void DrawPreConnectOrLoginScreen(void)
  * Main Chat UI Rendering (Main UI.png, sidebar-collapsed.png, Search.png)
  * ============================================================================ */
 
+static short GetPromptTextMaxWidthPx(void)
+{
+    short chatLeft  = gSidebarCollapsed ? 0 : (SIDEBAR_W + 1);
+    short chatWidth = gWinW - chatLeft;
+    short pillW     = 220 + (gWinW - DEFAULT_WIN_W);
+    const char *tierLabel = GetTierDisplayName(gActiveTier);
+    short tierW     = MeasureCString(tierLabel) + 18;
+    short maxPx;
+
+    if (pillW < 190) pillW = 190;
+    if (pillW > chatWidth - 60) pillW = chatWidth - 60;
+
+    maxPx = pillW - tierW - 30;
+    if (maxPx < 60) maxPx = 60;
+    return maxPx;
+}
+
+static short WrapPromptInputLines(char outLines[][96], short maxLines, short *outVisLines)
+{
+    static char promptWithCaret[1032];
+    short maxPromptPx = GetPromptTextMaxWidthPx();
+    short totalLines;
+    short visLines;
+
+    if (gIsRecordingVoice) {
+        if (outLines) strcpy(outLines[0], "Listening... (click mic)");
+        if (outVisLines) *outVisLines = 1;
+        return 1;
+    }
+    if (!gPromptFocused && gPromptBuf[0] == '\0') {
+        if (outLines) strcpy(outLines[0], "Ask MacAI");
+        if (outVisLines) *outVisLines = 1;
+        return 1;
+    }
+
+    sprintf(promptWithCaret, "%s%s", gPromptBuf, (gPromptFocused && gCaretVisible) ? "|" : "");
+    totalLines = WrapMessageLines(promptWithCaret, maxPromptPx, outLines, maxLines);
+    if (totalLines < 1) totalLines = 1;
+    visLines = (totalLines > MAX_PROMPT_VIS_LINES) ? MAX_PROMPT_VIS_LINES : totalLines;
+    if (outVisLines) *outVisLines = visLines;
+    return totalLines;
+}
+
 static void GetPromptBarGeometry(Rect *outPillR, Rect *outTierR, Rect *outMicR)
 {
     short chatLeft  = gSidebarCollapsed ? 0 : (SIDEBAR_W + 1);
@@ -558,28 +682,128 @@ static void GetPromptBarGeometry(Rect *outPillR, Rect *outTierR, Rect *outMicR)
     short pillW     = 220 + (gWinW - DEFAULT_WIN_W);
     short totalW;
     short startX;
-    short topY      = gWinH - 43;
+    short visLines  = 1;
+    short pillH;
     short botY      = gWinH - 21;
+    short topY;
     const char *tierLabel = GetTierDisplayName(gActiveTier);
     short tierW;
 
     if (pillW < 190) pillW = 190;
     if (pillW > chatWidth - 60) pillW = chatWidth - 60;
 
+    WrapPromptInputLines(NULL, 32, &visLines);
+    pillH = 22 + (visLines - 1) * 12;
+    topY  = botY - pillH;
+
     totalW = pillW + (gHasMicHardware ? 27 : 0);
     startX = chatLeft + (chatWidth - totalW) / 2;
 
     SetRect(outPillR, startX, topY, startX + pillW, botY);
 
-    TextFont(kFontIDMonaco);
-    TextSize(9);
     tierW = MeasureCString(tierLabel) + 18;
-    SetRect(outTierR, outPillR->right - tierW - 6, topY + 2, outPillR->right - 4, botY - 2);
+    SetRect(outTierR, outPillR->right - tierW - 6, botY - 20, outPillR->right - 4, botY - 2);
 
     if (gHasMicHardware) {
-        SetRect(outMicR, outPillR->right + 4, topY, outPillR->right + 27, botY);
+        SetRect(outMicR, outPillR->right + 4, botY - 22, outPillR->right + 27, botY);
     } else {
         SetRect(outMicR, 0, 0, 0, 0);
+    }
+}
+
+static void SyncPromptExpansionWithScroll(void)
+{
+    short visLines = 1;
+    short totalLines = WrapPromptInputLines(NULL, 32, &visLines);
+
+    /* Keep prompt scroll pinned to bottom when typing unless scrolled manually */
+    if (totalLines > MAX_PROMPT_VIS_LINES) {
+        if (gPromptScrollLine > totalLines - MAX_PROMPT_VIS_LINES) {
+            gPromptScrollLine = totalLines - MAX_PROMPT_VIS_LINES;
+        }
+        if (gPromptScrollLine < 0) gPromptScrollLine = 0;
+    } else {
+        gPromptScrollLine = 0;
+    }
+
+    if (visLines != gPrevPromptVisLines) {
+        short deltaPx = (visLines - gPrevPromptVisLines) * 12;
+        gPrevPromptVisLines = visLines;
+        if (gMessageCount > 0 || gWaitingForAI) {
+            gMsgScrollY += deltaPx;
+            if (gMsgScrollY < 0) gMsgScrollY = 0;
+        }
+    }
+}
+
+static void DrawPromptBar(const Rect *pillR, const Rect *tierR, const Rect *micR)
+{
+    static char promptLines[32][96];
+    short visLines = 1;
+    short totalLines = WrapPromptInputLines(promptLines, 32, &visLines);
+    short i;
+
+    {
+        Rect pillShadow = *pillR;
+        OffsetRect(&pillShadow, 0, 2);
+        FillRoundRect(&pillShadow, 20, 20, &qd.black);
+        EraseRoundRect(pillR, 20, 20);
+        FrameRoundRect(pillR, 20, 20);
+    }
+
+    if (totalLines > MAX_PROMPT_VIS_LINES) {
+        if (gPromptScrollLine > totalLines - MAX_PROMPT_VIS_LINES) {
+            gPromptScrollLine = totalLines - MAX_PROMPT_VIS_LINES;
+        }
+        if (gPromptScrollLine < 0) gPromptScrollLine = 0;
+    } else {
+        gPromptScrollLine = 0;
+    }
+
+    for (i = 0; i < visLines; i++) {
+        short lineIdx = gPromptScrollLine + i;
+        if (lineIdx >= 0 && lineIdx < totalLines) {
+            MoveTo(pillR->left + 12, pillR->top + 14 + i * 12);
+            DrawCString(promptLines[lineIdx]);
+        }
+    }
+
+    /* Prompt input scrollbar when > 5 lines high */
+    if (totalLines > MAX_PROMPT_VIS_LINES) {
+        short sbX = tierR->left - 6;
+        short sbTop = pillR->top + 6;
+        short sbBot = pillR->bottom - 6;
+        short trackH = sbBot - sbTop;
+        short maxSc = totalLines - MAX_PROMPT_VIS_LINES;
+        short thumbH = 14;
+        short thumbTop = sbTop + (short)(((long)(trackH - thumbH) * gPromptScrollLine) / (maxSc > 0 ? maxSc : 1));
+        Rect thumbR;
+
+        DrawDottedVLine(sbX, sbTop, sbBot);
+        SetRect(&thumbR, sbX - 1, thumbTop, sbX + 2, thumbTop + thumbH);
+        FillRect(&thumbR, &qd.black);
+    }
+
+    /* Model Tier selector ("Pro v") anchored at bottom-right of prompt pill */
+    {
+        const char *tierName = GetTierDisplayName(gActiveTier);
+        short tw = MeasureCString(tierName);
+        MoveTo(tierR->left + 4, pillR->bottom - 8);
+        DrawCString(tierName);
+        DrawChevronDown(tierR->left + 4 + tw + 5, pillR->bottom - 12);
+    }
+
+    /* Conditional Microphone Button (hidden on Macs without Sound Input hardware!) */
+    if (gHasMicHardware) {
+        Rect micShadow = *micR;
+        OffsetRect(&micShadow, 0, 2);
+        FillOval(&micShadow, &qd.black);
+        EraseOval(micR);
+        FrameOval(micR);
+        BlitBitmap(kIconMic9x11, 2, 9, 11, micR->left + 7, micR->top + 5, srcOr);
+        if (gIsRecordingVoice) {
+            InvertOval(micR);
+        }
     }
 }
 
@@ -658,7 +882,7 @@ static void DrawSidebar(void)
         Rect thumbR;
 
         DrawDottedVLine(sbX, sbTop, sbBot);
-        SetRect(&thumbR, sbX - 1, thumbTop, sbX + 2, thumbTop + thumbH);
+        SetRect(&thumbR, sbX - 2, thumbTop, sbX + 3, thumbTop + thumbH);
         FillRect(&thumbR, &qd.black);
     }
 }
@@ -677,16 +901,21 @@ static void DrawCollapsedSidebarControls(void)
 
 static void DrawChatArea(void)
 {
+    static char wrapped[MAX_WRAPPED_LINES][96];
     short chatLeft  = gSidebarCollapsed ? 0 : (SIDEBAR_W + 1);
     short chatWidth = gWinW - chatLeft;
     Rect chatBgR, clipR, savedClip;
     Rect pillR, tierR, micR;
     short msgAreaTop = 8;
-    short msgAreaBot = gWinH - 50;
+    short msgAreaBot;
     short totalContentH = 0;
     short curY;
     short i, L;
     short userMaxW, aiMaxW, aiLeftX;
+
+    GetPromptBarGeometry(&pillR, &tierR, &micR);
+    msgAreaBot = pillR.top - 6;
+    if (msgAreaBot < 60) msgAreaBot = 60;
 
     SetRect(&chatBgR, chatLeft, 0, gWinW, gWinH);
     FillRect(&chatBgR, &kPatLightDither);
@@ -707,13 +936,12 @@ static void DrawChatArea(void)
     aiMaxW  = (gWinW - 22) - aiLeftX - 24;
     if (aiMaxW < 140) aiMaxW = 140;
 
-    /* Pass 1: Compute total height of all message bubbles for smooth scrolling */
+    /* Pass 1: Compute total height using cached bubble metrics (O(1) per message!) */
     for (i = 0; i < gMessageCount; i++) {
-        char wrapped[MAX_WRAPPED_LINES][96];
         short maxW = gMessages[i].isUser ? userMaxW : aiMaxW;
-        short nLines = WrapMessageLines(gMessages[i].text, maxW, wrapped, MAX_WRAPPED_LINES);
-        short bubbleH = nLines * 12 + 12;
-        totalContentH += bubbleH + 10;
+        EnsureMessageMetrics(&gMessages[i], maxW);
+        /* AI responses have 15px (~1 line height) extra space below for Copy & Retry buttons */
+        totalContentH += gMessages[i].cachedBubbleH + (gMessages[i].isUser ? 8 : 23);
     }
     if (gWaitingForAI) {
         totalContentH += 34;
@@ -753,21 +981,17 @@ static void DrawChatArea(void)
 
     curY = msgAreaTop - gMsgScrollY;
 
-    /* Pass 2: Render visible message bubbles */
+    /* Pass 2: Render ONLY visible message bubbles */
     for (i = 0; i < gMessageCount; i++) {
-        char wrapped[MAX_WRAPPED_LINES][96];
-        short maxW = gMessages[i].isUser ? userMaxW : aiMaxW;
-        short nLines = WrapMessageLines(gMessages[i].text, maxW, wrapped, MAX_WRAPPED_LINES);
-        short bubbleH = nLines * 12 + 12;
-        short widestLine = 40;
-        Rect bubbleR;
+        short maxW      = gMessages[i].isUser ? userMaxW : aiMaxW;
+        short bubbleH   = gMessages[i].cachedBubbleH;
+        short widestLine = gMessages[i].cachedWidestPx;
+        short stepH     = bubbleH + (gMessages[i].isUser ? 8 : 23);
 
-        for (L = 0; L < nLines; L++) {
-            short lw = MeasureCString(wrapped[L]);
-            if (lw > widestLine) widestLine = lw;
-        }
+        if (curY + stepH >= 0 && curY <= msgAreaBot) {
+            short nLines = WrapMessageLines(gMessages[i].text, maxW, wrapped, MAX_WRAPPED_LINES);
+            Rect bubbleR;
 
-        if (curY + bubbleH >= 0 && curY <= msgAreaBot) {
             if (gMessages[i].isUser) {
                 /* Right-aligned white pill bubble (Main UI.png) */
                 short bw = widestLine + 20;
@@ -783,6 +1007,8 @@ static void DrawChatArea(void)
                 /* Left-aligned bordered card bubble with 2px bottom shadow (Main UI.png) */
                 short bw = widestLine + 24;
                 Rect shadowR;
+                short actionY = curY + bubbleH + 5;
+                short retryX  = aiLeftX + 24;
                 if (bw < 100) bw = 100;
                 SetRect(&bubbleR, aiLeftX, curY, aiLeftX + bw, curY + bubbleH);
 
@@ -796,9 +1022,26 @@ static void DrawChatArea(void)
                     MoveTo(bubbleR.left + 12, curY + 14 + L * 12);
                     DrawCString(wrapped[L]);
                 }
+
+                /* Action row (1 line height below AI response): Copy to Clipboard + Retry */
+                {
+                    Rect actionBgR;
+                    Boolean showCopied = (gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 90);
+                    short bgW = showCopied ? 74 : 38;
+                    SetRect(&actionBgR, aiLeftX + 4, actionY - 1, aiLeftX + 4 + bgW, actionY + 12);
+                    EraseRoundRect(&actionBgR, 6, 6);
+
+                    BlitBitmap(kIconCopy10x11, 2, 10, 11, aiLeftX + 6, actionY, srcOr);
+                    if (showCopied) {
+                        MoveTo(aiLeftX + 19, actionY + 9);
+                        DrawCString("Copied");
+                        retryX = aiLeftX + 60;
+                    }
+                    BlitBitmap(kIconRetry10x10, 2, 10, 10, retryX, actionY, srcOr);
+                }
             }
         }
-        curY += bubbleH + 10;
+        curY += stepH;
     }
 
     if (gWaitingForAI) {
@@ -828,62 +1071,12 @@ static void DrawChatArea(void)
         Rect thumbR;
 
         DrawDottedVLine(sbX, sbTop, sbBot);
-        SetRect(&thumbR, sbX - 1, thumbTop, sbX + 2, thumbTop + thumbH);
+        SetRect(&thumbR, sbX - 2, thumbTop, sbX + 3, thumbTop + thumbH);
         FillRect(&thumbR, &qd.black);
     }
 
-    /* Bottom Prompt Bar ("Ask MacAI" + "Pro v" + Conditional Microphone Button) */
-    GetPromptBarGeometry(&pillR, &tierR, &micR);
-    {
-        Rect pillShadow = pillR;
-        OffsetRect(&pillShadow, 0, 2);
-        FillRoundRect(&pillShadow, 20, 20, &qd.black);
-        EraseRoundRect(&pillR, 20, 20);
-        FrameRoundRect(&pillR, 20, 20);
-    }
-
-    /* Prompt input text or placeholder */
-    {
-        short maxPromptPx = (tierR.left - pillR.left) - 18;
-        MoveTo(pillR.left + 12, pillR.top + 14);
-        if (gIsRecordingVoice) {
-            DrawCStringTruncated("Listening... (click mic)", maxPromptPx);
-        } else if (!gPromptFocused && gPromptBuf[0] == '\0') {
-            DrawCString("Ask MacAI");
-        } else {
-            char disp[264];
-            const char *caretStr = (gPromptFocused && gCaretVisible) ? "|" : "";
-            const char *visibleStart = gPromptBuf;
-            sprintf(disp, "%s%s", gPromptBuf, caretStr);
-            while (MeasureCString(disp) > maxPromptPx && *visibleStart) {
-                visibleStart++;
-                sprintf(disp, "%s%s", visibleStart, caretStr);
-            }
-            DrawCString(disp);
-        }
-    }
-
-    /* Model Tier selector ("Pro v") on right side of prompt pill */
-    {
-        const char *tierName = GetTierDisplayName(gActiveTier);
-        short tw = MeasureCString(tierName);
-        MoveTo(tierR.left + 4, pillR.top + 14);
-        DrawCString(tierName);
-        DrawChevronDown(tierR.left + 4 + tw + 5, pillR.top + 10);
-    }
-
-    /* Conditional Microphone Button (hidden on Macs without Sound Input hardware!) */
-    if (gHasMicHardware) {
-        Rect micShadow = micR;
-        OffsetRect(&micShadow, 0, 2);
-        FillOval(&micShadow, &qd.black);
-        EraseOval(&micR);
-        FrameOval(&micR);
-        BlitBitmap(kIconMic9x11, 2, 9, 11, micR.left + 7, micR.top + 5, srcOr);
-        if (gIsRecordingVoice) {
-            InvertOval(&micR);
-        }
-    }
+    /* Bottom Auto-Expanding Prompt Bar */
+    DrawPromptBar(&pillR, &tierR, &micR);
 
     /* Standard Mac OS Grow Icon indicator in bottom-right corner */
     MoveTo(gWinW - 11, gWinH - 3);
@@ -918,6 +1111,10 @@ static void DrawProviderPopup(void)
         if (!gProviders[i].enabled) {
             MoveTo(popR.right - 26, ry + 11);
             DrawCString("(--)");
+            PenPat(&qd.gray);
+            PenMode(patBic);
+            PaintRect(&rowR);
+            PenNormal();
         }
     }
 }
@@ -1064,8 +1261,91 @@ static void DrawAboutModal(void)
 }
 
 /* ============================================================================
- * Master Window Render (Offscreen GrafPort -> Window BitMap)
+ * Master Window Render & Fast Partial Redraws
  * ============================================================================ */
+
+static void RenderPromptBarOnly(void)
+{
+    GrafPtr savePort;
+    Rect pillR, tierR, micR, dirtyR;
+
+    if (!gMainWindow || !gServerConnected || gAwaitingLogin ||
+        gSearchModalOpen || gAboutModalOpen || gTierMenuOpen || gProviderMenuOpen) {
+        RenderWindow();
+        return;
+    }
+
+    GetPort(&savePort);
+    EnsureOffscreenBuffer(gWinW, gWinH);
+    GetPromptBarGeometry(&pillR, &tierR, &micR);
+
+    SetRect(&dirtyR, pillR.left - 2, pillR.top - 2,
+            (gHasMicHardware ? micR.right : pillR.right) + 3,
+            pillR.bottom + 4);
+
+    if (gHasOffscreen) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMainWindow);
+    }
+
+    PenNormal();
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+    TextMode(srcOr);
+
+    FillRect(&dirtyR, &kPatLightDither);
+    DrawPromptBar(&pillR, &tierR, &micR);
+
+    if (gHasOffscreen) {
+        SetPort(gMainWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &dirtyR, &dirtyR, srcCopy, NULL);
+    }
+
+    SetPort(savePort);
+}
+
+static void RenderChatAreaOnly(void)
+{
+    GrafPtr savePort;
+    Rect chatR;
+    short chatLeft = gSidebarCollapsed ? 0 : (SIDEBAR_W + 1);
+
+    if (!gMainWindow || !gServerConnected || gAwaitingLogin ||
+        gSearchModalOpen || gAboutModalOpen || gProviderMenuOpen) {
+        RenderWindow();
+        return;
+    }
+
+    GetPort(&savePort);
+    EnsureOffscreenBuffer(gWinW, gWinH);
+    SetRect(&chatR, chatLeft, 0, gWinW, gWinH);
+
+    if (gHasOffscreen) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMainWindow);
+    }
+
+    PenNormal();
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+    TextMode(srcOr);
+
+    DrawChatArea();
+    if (gTierMenuOpen) {
+        DrawTierPopup();
+    }
+
+    if (gHasOffscreen) {
+        SetPort(gMainWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &chatR, &chatR, srcCopy, NULL);
+    }
+
+    SetPort(savePort);
+}
 
 static void RenderWindow(void)
 {
@@ -1118,6 +1398,101 @@ static void RenderWindow(void)
     }
 
     SetPort(savePort);
+}
+
+/* ============================================================================
+ * Provider / Menu State Helpers & Clipboard / Retry Actions
+ * ============================================================================ */
+
+static Boolean IsProviderEnabled(const char *id)
+{
+    short k;
+    const char *normId = id;
+    if (!normId || !*normId) return false;
+    if (strcmp(normId, "openai") == 0) normId = "chatgpt";
+
+    for (k = 0; k < 3; k++) {
+        if (strcmp(gProviders[k].id, normId) == 0) {
+            return gProviders[k].enabled;
+        }
+    }
+    return false;
+}
+
+static void NormalizeTierName(const char *inTier, char *outTier, short maxLen)
+{
+    if (!inTier || !*inTier || maxLen < 2) return;
+    if (inTier[0] == 'f' || inTier[0] == 'F') {
+        strncpy(outTier, "Fast", maxLen - 1);
+    } else if (inTier[0] == 'p' || inTier[0] == 'P') {
+        strncpy(outTier, "Pro", maxLen - 1);
+    } else if (inTier[0] == 't' || inTier[0] == 'T') {
+        strncpy(outTier, "Thinking", maxLen - 1);
+    } else {
+        strncpy(outTier, inTier, maxLen - 1);
+    }
+    outTier[maxLen - 1] = '\0';
+}
+
+static void SyncAIMenuState(void)
+{
+    MenuHandle aiMenu = GetMenuHandle(mAI);
+    if (!aiMenu) return;
+
+    if (IsProviderEnabled("gemini")) EnableItem(aiMenu, iUseGemini);
+    else DisableItem(aiMenu, iUseGemini);
+
+    if (IsProviderEnabled("chatgpt")) EnableItem(aiMenu, iUseOpenAI);
+    else DisableItem(aiMenu, iUseOpenAI);
+
+    if (IsProviderEnabled("claude")) EnableItem(aiMenu, iUseClaude);
+    else DisableItem(aiMenu, iUseClaude);
+
+    CheckItem(aiMenu, iUseGemini, (strcmp(gActiveProvider, "gemini") == 0));
+    CheckItem(aiMenu, iUseOpenAI, (strcmp(gActiveProvider, "chatgpt") == 0 || strcmp(gActiveProvider, "openai") == 0));
+    CheckItem(aiMenu, iUseClaude, (strcmp(gActiveProvider, "claude") == 0));
+
+    CheckItem(aiMenu, iTierFast,     (gActiveTier[0] == 'F' || gActiveTier[0] == 'f'));
+    CheckItem(aiMenu, iTierPro,      (gActiveTier[0] == 'P' || gActiveTier[0] == 'p'));
+    CheckItem(aiMenu, iTierThinking, (gActiveTier[0] == 'T' || gActiveTier[0] == 't'));
+
+    CheckItem(aiMenu, iToggleTTS, gReadRepliesTTS);
+}
+
+static void CopyMessageToClipboard(short msgIdx)
+{
+    if (msgIdx < 0 || msgIdx >= gMessageCount) return;
+    CopyTextToClipboard(gMessages[msgIdx].text);
+    gCopiedMsgIdx = msgIdx;
+    gCopiedTick   = TickCount();
+    RenderChatAreaOnly();
+}
+
+static void RetryAIResponseAtIndex(short aiMsgIdx)
+{
+    static char userPrompt[MAX_MSG_TEXT];
+    short i;
+    short userIdx = -1;
+
+    if (gWaitingForAI || aiMsgIdx < 0 || aiMsgIdx >= gMessageCount) return;
+
+    for (i = aiMsgIdx - 1; i >= 0; i--) {
+        if (gMessages[i].isUser) {
+            userIdx = i;
+            break;
+        }
+    }
+    if (userIdx < 0) return;
+
+    strncpy(userPrompt, gMessages[userIdx].text, MAX_MSG_TEXT - 1);
+    userPrompt[MAX_MSG_TEXT - 1] = '\0';
+
+    /* Remove the AI response being retried (and any messages after it) */
+    gMessageCount = aiMsgIdx;
+    gCopiedMsgIdx = -1;
+    gMsgScrollY   = 30000;
+
+    SendPromptToAI(userPrompt, true);
 }
 
 /* ============================================================================
@@ -1215,7 +1590,7 @@ static void FetchProvidersAndChats(void)
                     if (p3) {
                         *p3++ = '\0';
                         strncpy(gActiveProvider, p1, sizeof(gActiveProvider) - 1);
-                        strncpy(gActiveTier, p3, sizeof(gActiveTier) - 1);
+                        NormalizeTierName(p3, gActiveTier, sizeof(gActiveTier));
                     }
                 }
             } else if (strncmp(row, "PROVIDER|", 9) == 0) {
@@ -1239,6 +1614,18 @@ static void FetchProvidersAndChats(void)
             line = next ? (next + 1) : NULL;
         }
     }
+
+    /* Ensure active provider is actually enabled */
+    if (!IsProviderEnabled(gActiveProvider)) {
+        short k;
+        for (k = 0; k < 3; k++) {
+            if (gProviders[k].enabled) {
+                strcpy(gActiveProvider, gProviders[k].id);
+                break;
+            }
+        }
+    }
+    SyncAIMenuState();
 
     RefreshChatList();
 
@@ -1281,12 +1668,24 @@ static void AttemptDiscoveryOrSavedConnect(void)
 {
     ip_addr savedIP = 0;
 
+    gScanningServer = true;
+    RenderWindow();
+
     if (LoadLastServerIP(&savedIP) && savedIP != 0) {
         NetSetServer(savedIP, DEFAULT_HTTP_PORT);
         FormatIPAddress(savedIP, gManualIPBuf);
         if (CheckServerAndLoginStatus()) {
+            gScanningServer = false;
             RenderWindow();
             return;
+        }
+    } else {
+        ip_addr ourIP = NetGetOurIP();
+        if (ourIP != 0 && (ourIP & 0xFFFFFF00UL) != 0x0A000200UL) {
+            unsigned char b0 = (unsigned char)((ourIP >> 24) & 0xFF);
+            unsigned char b1 = (unsigned char)((ourIP >> 16) & 0xFF);
+            unsigned char b2 = (unsigned char)((ourIP >> 8)  & 0xFF);
+            sprintf(gManualIPBuf, "%u.%u.%u.", b0, b1, b2);
         }
     }
 
@@ -1296,37 +1695,45 @@ static void AttemptDiscoveryOrSavedConnect(void)
     } else {
         gServerConnected = false;
     }
+    gScanningServer = false;
     RenderWindow();
 }
 
 static void SelectProviderOrTier(const char *provider, const char *tier)
 {
-    char path[128];
     if (provider && *provider) {
-        strncpy(gActiveProvider, provider, sizeof(gActiveProvider) - 1);
+        const char *normProv = (strcmp(provider, "openai") == 0) ? "chatgpt" : provider;
+        if (!IsProviderEnabled(normProv)) {
+            SysBeep(1);
+            SyncAIMenuState();
+            return;
+        }
+        strncpy(gActiveProvider, normProv, sizeof(gActiveProvider) - 1);
+        gActiveProvider[sizeof(gActiveProvider) - 1] = '\0';
     }
     if (tier && *tier) {
-        strncpy(gActiveTier, tier, sizeof(gActiveTier) - 1);
+        NormalizeTierName(tier, gActiveTier, sizeof(gActiveTier));
     }
-    sprintf(path, "/api/macai/select?provider=%s&tier=%s", gActiveProvider, gActiveTier);
-    if (gNetBuf && gServerConnected) {
-        NetHttpGet(path, gNetBuf, NET_BUF_SIZE);
-    }
+    SyncAIMenuState();
     RenderWindow();
 }
 
 static void StartNewChat(void)
 {
-    gActiveChatId[0] = '\0';
-    gSelectedChatIdx = -1;
-    gMessageCount    = 0;
-    gMsgScrollY      = 0;
-    gMsgMaxScrollY   = 0;
+    gActiveChatId[0]    = '\0';
+    gSelectedChatIdx    = -1;
+    gMessageCount       = 0;
+    gMsgScrollY         = 0;
+    gMsgMaxScrollY      = 0;
+    gCopiedMsgIdx       = -1;
+    gPromptScrollLine   = 0;
+    gPrevPromptVisLines = 1;
     RenderWindow();
 }
 
 static void LoadChatById(const char *chatId)
 {
+    static char row[MAX_MSG_TEXT + 32];
     char path[96];
     const char *line;
 
@@ -1337,11 +1744,11 @@ static void LoadChatById(const char *chatId)
 
     strncpy(gActiveChatId, chatId, sizeof(gActiveChatId) - 1);
     gMessageCount = 0;
+    gCopiedMsgIdx = -1;
 
     line = gNetBuf;
     while (line && *line && gMessageCount < MAX_MESSAGES) {
         const char *next = strchr(line, '\n');
-        char row[MAX_MSG_TEXT + 32];
         short len = next ? (short)(next - line) : (short)strlen(line);
         if (len > (short)(sizeof(row) - 1)) len = sizeof(row) - 1;
         memcpy(row, line, len);
@@ -1357,18 +1764,27 @@ static void LoadChatById(const char *chatId)
                     char *p4 = strchr(p3 + 1, '|');
                     if (p4) {
                         *p4 = '\0';
-                        strncpy(gActiveProvider, p3 + 1, sizeof(gActiveProvider) - 1);
-                        strncpy(gActiveTier, p4 + 1, sizeof(gActiveTier) - 1);
+                        if (IsProviderEnabled(p3 + 1)) {
+                            strncpy(gActiveProvider, p3 + 1, sizeof(gActiveProvider) - 1);
+                        }
+                        NormalizeTierName(p4 + 1, gActiveTier, sizeof(gActiveTier));
+                        SyncAIMenuState();
                     }
                 }
             }
         } else if (strncmp(row, "MSG|user|", 9) == 0) {
             gMessages[gMessageCount].isUser = true;
+            gMessages[gMessageCount].cachedMaxW = 0;
+            gMessages[gMessageCount].cachedBubbleH = 0;
             strncpy(gMessages[gMessageCount].text, row + 9, MAX_MSG_TEXT - 1);
+            gMessages[gMessageCount].text[MAX_MSG_TEXT - 1] = '\0';
             gMessageCount++;
         } else if (strncmp(row, "MSG|assistant|", 14) == 0) {
             gMessages[gMessageCount].isUser = false;
+            gMessages[gMessageCount].cachedMaxW = 0;
+            gMessages[gMessageCount].cachedBubbleH = 0;
             strncpy(gMessages[gMessageCount].text, row + 14, MAX_MSG_TEXT - 1);
+            gMessages[gMessageCount].text[MAX_MSG_TEXT - 1] = '\0';
             gMessageCount++;
         }
         line = next ? (next + 1) : NULL;
@@ -1386,22 +1802,28 @@ static void AppendMessage(Boolean isUser, const char *text)
         memmove(&gMessages[0], &gMessages[1], sizeof(ChatMessage) * (MAX_MESSAGES - 1));
         gMessageCount = MAX_MESSAGES - 1;
     }
-    gMessages[gMessageCount].isUser = isUser;
+    gMessages[gMessageCount].isUser        = isUser;
+    gMessages[gMessageCount].cachedMaxW    = 0;
+    gMessages[gMessageCount].cachedLines   = 0;
+    gMessages[gMessageCount].cachedWidestPx = 0;
+    gMessages[gMessageCount].cachedBubbleH = 0;
     strncpy(gMessages[gMessageCount].text, text, MAX_MSG_TEXT - 1);
     gMessages[gMessageCount].text[MAX_MSG_TEXT - 1] = '\0';
     gMessageCount++;
     gMsgScrollY = 30000;
 }
 
-static void SendPromptToAI(const char *promptText)
+static void SendPromptToAI(const char *promptText, Boolean isRetry)
 {
-    char encPrompt[600];
-    char path[768];
+    static char encPrompt[600];
+    static char path[768];
     long n;
 
     if (!promptText || !*promptText || !gNetBuf || !gServerConnected) return;
 
-    AppendMessage(true, promptText);
+    if (!isRetry) {
+        AppendMessage(true, promptText);
+    }
     gWaitingForAI = true;
     RenderWindow();
 
@@ -1410,8 +1832,8 @@ static void SendPromptToAI(const char *promptText)
     }
 
     UrlEncode(promptText, encPrompt, sizeof(encPrompt));
-    sprintf(path, "/api/macai/ask?chat_id=%s&provider=%s&tier=%s&tts=%d&q=%s",
-            gActiveChatId, gActiveProvider, gActiveTier, gReadRepliesTTS ? 1 : 0, encPrompt);
+    sprintf(path, "/api/macai/ask?chat_id=%s&provider=%s&tier=%s&tts=%d&retry=%d&q=%s",
+            gActiveChatId, gActiveProvider, gActiveTier, gReadRepliesTTS ? 1 : 0, isRetry ? 1 : 0, encPrompt);
 
     n = NetHttpGet(path, gNetBuf, NET_BUF_SIZE);
     gWaitingForAI = false;
@@ -1432,6 +1854,11 @@ static void SendPromptToAI(const char *promptText)
                     if (p5) {
                         *p5++ = '\0';
                         strncpy(gActiveChatId, p1, sizeof(gActiveChatId) - 1);
+                        if (IsProviderEnabled(p3)) {
+                            strncpy(gActiveProvider, p3, sizeof(gActiveProvider) - 1);
+                        }
+                        NormalizeTierName(p4, gActiveTier, sizeof(gActiveTier));
+                        SyncAIMenuState();
                         AppendMessage(false, p5);
                         RefreshChatList();
                     }
@@ -1537,10 +1964,15 @@ static void HandleContentClick(Point localPt)
         GetCenteredCardRect(&cardR);
         cx = (cardR.left + cardR.right) / 2;
 
-        if (gServerConnected && gAwaitingLogin) {
+        if (gScanningServer) {
+            return;
+        } else if (gServerConnected && gAwaitingLogin) {
             SetRect(&btnR, cx - 54, cardR.top + 140, cx + 54, cardR.top + 165);
             if (PtInRect(localPt, &btnR)) {
+                gScanningServer = true;
+                RenderWindow();
                 CheckServerAndLoginStatus();
+                gScanningServer = false;
                 RenderWindow();
             }
         } else {
@@ -1556,8 +1988,11 @@ static void HandleContentClick(Point localPt)
             } else if (PtInRect(localPt, &connR)) {
                 ip_addr manualIP = 0;
                 if (ParseIPAddress(gManualIPBuf, &manualIP)) {
+                    gScanningServer = true;
+                    RenderWindow();
                     NetSetServer(manualIP, DEFAULT_HTTP_PORT);
                     CheckServerAndLoginStatus();
+                    gScanningServer = false;
                     RenderWindow();
                 }
             }
@@ -1599,8 +2034,12 @@ static void HandleContentClick(Point localPt)
         if (PtInRect(localPt, &popR)) {
             short idx = (localPt.v - (popR.top + 2)) / 16;
             if (idx >= 0 && idx < 3) {
-                SelectProviderOrTier(gProviders[idx].id, NULL);
-                return;
+                if (gProviders[idx].enabled) {
+                    SelectProviderOrTier(gProviders[idx].id, NULL);
+                    return;
+                } else {
+                    SysBeep(1);
+                }
             }
         }
         RenderWindow();
@@ -1680,11 +2119,48 @@ static void HandleContentClick(Point localPt)
 
         /* Sidebar scrollbar or chat row selection */
         if (localPt.v >= 55 && localPt.v < gWinH - 8) {
-            if (localPt.h >= 131) {
-                short midY = (55 + gWinH - 8) / 2;
-                if (localPt.v < midY) gChatScroll -= 3;
-                else gChatScroll += 3;
-                RenderWindow();
+            if (localPt.h >= 129) {
+                short maxVis = (gWinH - 65) / 15;
+                short maxScroll;
+                if (maxVis < 1) maxVis = 1;
+                maxScroll = gChatCount - maxVis;
+                if (maxScroll > 0) {
+                    short trackTop = 55;
+                    short trackBot = gWinH - 8;
+                    short trackH   = trackBot - trackTop;
+                    short thumbH   = (trackH * maxVis) / gChatCount;
+                    short thumbY;
+                    if (thumbH < 18) thumbH = 18;
+                    if (thumbH > trackH) thumbH = trackH;
+                    thumbY = trackTop + (short)(((long)(trackH - thumbH) * gChatScroll) / maxScroll);
+
+                    if (localPt.v >= thumbY && localPt.v <= thumbY + thumbH) {
+                        short grabOff = localPt.v - thumbY;
+                        unsigned long lastTick = 0;
+                        while (StillDown()) {
+                            Point pt;
+                            short newThumbY, newScroll;
+                            GetMouse(&pt);
+                            newThumbY = pt.v - grabOff;
+                            if (newThumbY < trackTop) newThumbY = trackTop;
+                            if (newThumbY > trackBot - thumbH) newThumbY = trackBot - thumbH;
+                            newScroll = (trackH > thumbH)
+                                ? (short)(((long)(newThumbY - trackTop) * maxScroll + (trackH - thumbH) / 2) / (trackH - thumbH))
+                                : 0;
+                            if (newScroll != gChatScroll && TickCount() != lastTick) {
+                                gChatScroll = newScroll;
+                                lastTick = TickCount();
+                                RenderWindow();
+                            }
+                        }
+                    } else {
+                        if (localPt.v < thumbY) gChatScroll -= maxVis;
+                        else gChatScroll += maxVis;
+                        if (gChatScroll < 0) gChatScroll = 0;
+                        if (gChatScroll > maxScroll) gChatScroll = maxScroll;
+                        RenderWindow();
+                    }
+                }
             } else {
                 short row = (localPt.v - 55) / 15;
                 short idx = gChatScroll + row;
@@ -1697,10 +2173,14 @@ static void HandleContentClick(Point localPt)
         return;
     }
 
-    /* 7. Bottom Prompt Bar, Tier Selector, Mic Button, and Chat Scrollbar */
+    /* 7. Bottom Prompt Bar, Tier Selector, Mic Button, Scrollbars, and AI Bubble Actions */
     {
         Rect pillR, tierR, micR;
+        short totalLines = 1, maxScrollLine = 0;
         GetPromptBarGeometry(&pillR, &tierR, &micR);
+        totalLines = WrapPromptInputLines(NULL, 32, NULL);
+        maxScrollLine = totalLines - MAX_PROMPT_VIS_LINES;
+        if (maxScrollLine < 0) maxScrollLine = 0;
 
         if (PtInRect(localPt, &tierR)) {
             gTierMenuOpen = !gTierMenuOpen;
@@ -1711,23 +2191,152 @@ static void HandleContentClick(Point localPt)
             ToggleVoiceRecording();
             return;
         }
+
+        /* Prompt Input Field & Internal Scrollbar (when > 5 lines) */
         if (PtInRect(localPt, &pillR)) {
-            gPromptFocused = true;
-            gCaretVisible  = true;
-            gLastCaretTick = TickCount();
-            RenderWindow();
+            if (maxScrollLine > 0 && localPt.h >= tierR.left - 12 && localPt.h <= tierR.left - 2) {
+                short sbTop  = pillR.top + 4;
+                short sbBot  = pillR.bottom - 4;
+                short sbH    = sbBot - sbTop;
+                short thumbH = (sbH * MAX_PROMPT_VIS_LINES) / totalLines;
+                short thumbY;
+                if (thumbH < 12) thumbH = 12;
+                if (thumbH > sbH) thumbH = sbH;
+                thumbY = sbTop + (short)(((long)(sbH - thumbH) * gPromptScrollLine) / maxScrollLine);
+
+                if (localPt.v >= thumbY && localPt.v <= thumbY + thumbH) {
+                    short grabOff = localPt.v - thumbY;
+                    unsigned long lastTick = 0;
+                    while (StillDown()) {
+                        Point pt;
+                        short newThumbY, newScroll;
+                        GetMouse(&pt);
+                        newThumbY = pt.v - grabOff;
+                        if (newThumbY < sbTop) newThumbY = sbTop;
+                        if (newThumbY > sbBot - thumbH) newThumbY = sbBot - thumbH;
+                        newScroll = (sbH > thumbH)
+                            ? (short)(((long)(newThumbY - sbTop) * maxScrollLine + (sbH - thumbH) / 2) / (sbH - thumbH))
+                            : 0;
+                        if (newScroll != gPromptScrollLine && TickCount() != lastTick) {
+                            gPromptScrollLine = newScroll;
+                            lastTick = TickCount();
+                            RenderPromptBarOnly();
+                        }
+                    }
+                } else {
+                    if (localPt.v < thumbY) gPromptScrollLine -= 2;
+                    else gPromptScrollLine += 2;
+                    if (gPromptScrollLine < 0) gPromptScrollLine = 0;
+                    if (gPromptScrollLine > maxScrollLine) gPromptScrollLine = maxScrollLine;
+                    RenderPromptBarOnly();
+                }
+                return;
+            }
+
+            if (!gPromptFocused) {
+                gPromptFocused = true;
+                gCaretVisible  = true;
+                gLastCaretTick = TickCount();
+                RenderPromptBarOnly();
+            }
             return;
         }
+
         if (gPromptFocused && gPromptBuf[0] == '\0') {
             gPromptFocused = false;
-            RenderWindow();
+            RenderPromptBarOnly();
         }
-        if (gMsgMaxScrollY > 0 && localPt.h >= gWinW - 14 && localPt.v < gWinH - 50) {
-            short midY = (gWinH - 50) / 2;
-            if (localPt.v < midY) gMsgScrollY -= 60;
-            else gMsgScrollY += 60;
-            RenderWindow();
+
+        /* Main Chat Area Draggable Scrollbar */
+        if (gMsgMaxScrollY > 0 && localPt.h >= gWinW - 14 && localPt.v >= 10 && localPt.v < pillR.top - 6) {
+            short sbTop    = 10;
+            short sbBot    = pillR.top - 6;
+            short trackH   = sbBot - sbTop;
+            short msgAreaH = pillR.top - 12;
+            short totalH   = msgAreaH + gMsgMaxScrollY;
+            short thumbH   = (totalH > 0) ? (short)(((long)trackH * msgAreaH) / totalH) : trackH;
+            short thumbY;
+            if (thumbH < 20) thumbH = 20;
+            if (thumbH > trackH) thumbH = trackH;
+            thumbY = sbTop + (short)(((long)(trackH - thumbH) * gMsgScrollY) / gMsgMaxScrollY);
+
+            if (localPt.v >= thumbY && localPt.v <= thumbY + thumbH) {
+                /* Smooth thumb drag throttled to VBL ticks */
+                short grabOff = localPt.v - thumbY;
+                unsigned long lastTick = 0;
+                while (StillDown()) {
+                    Point pt;
+                    short newThumbY, newScrollY;
+                    GetMouse(&pt);
+                    newThumbY = pt.v - grabOff;
+                    if (newThumbY < sbTop) newThumbY = sbTop;
+                    if (newThumbY > sbBot - thumbH) newThumbY = sbBot - thumbH;
+                    newScrollY = (trackH > thumbH)
+                        ? (short)(((long)(newThumbY - sbTop) * gMsgMaxScrollY) / (trackH - thumbH))
+                        : 0;
+                    if (newScrollY < 0) newScrollY = 0;
+                    if (newScrollY > gMsgMaxScrollY) newScrollY = gMsgMaxScrollY;
+                    if (newScrollY != gMsgScrollY && TickCount() != lastTick) {
+                        gMsgScrollY = newScrollY;
+                        lastTick = TickCount();
+                        RenderChatAreaOnly();
+                    }
+                }
+            } else {
+                /* Page up / down click & hold in track */
+                Boolean pageUp = (localPt.v < thumbY);
+                unsigned long lastStepTick = 0;
+                do {
+                    if ((TickCount() - lastStepTick) >= 6) {
+                        lastStepTick = TickCount();
+                        if (pageUp) gMsgScrollY -= 80;
+                        else gMsgScrollY += 80;
+                        if (gMsgScrollY < 0) gMsgScrollY = 0;
+                        if (gMsgScrollY > gMsgMaxScrollY) gMsgScrollY = gMsgMaxScrollY;
+                        RenderChatAreaOnly();
+                    }
+                } while (StillDown());
+            }
             return;
+        }
+
+        /* Hit-test Copy & Retry buttons under AI response bubbles */
+        if (localPt.v >= 8 && localPt.v < pillR.top - 4) {
+            short chatLeft  = gSidebarCollapsed ? 0 : SIDEBAR_W;
+            short chatW     = gWinW - chatLeft;
+            short maxBubbleTextW = (chatW * 68) / 100;
+            short curY = 14;
+            short i;
+            if (maxBubbleTextW < 150) maxBubbleTextW = 150;
+
+            for (i = 0; i < gMessageCount; i++) {
+                short bubbleH, drawY;
+                EnsureMessageMetrics(&gMessages[i], maxBubbleTextW);
+                bubbleH = gMessages[i].cachedBubbleH;
+                drawY   = curY - gMsgScrollY;
+
+                if (!gMessages[i].isUser) {
+                    short bx = chatLeft + (gSidebarCollapsed ? 38 : 16);
+                    short actTop = drawY + bubbleH + 1;
+                    short actBot = drawY + bubbleH + 15;
+                    Rect copyHitR, retryHitR;
+
+                    SetRect(&copyHitR,  bx - 2,      actTop, bx + 42, actBot);
+                    SetRect(&retryHitR, bx + 43,     actTop, bx + 94, actBot);
+
+                    if (PtInRect(localPt, &copyHitR)) {
+                        CopyMessageToClipboard(i);
+                        return;
+                    }
+                    if (PtInRect(localPt, &retryHitR)) {
+                        RetryAIResponseAtIndex(i);
+                        return;
+                    }
+                    curY += bubbleH + 22;
+                } else {
+                    curY += bubbleH + 10;
+                }
+            }
         }
     }
 }
@@ -1769,11 +2378,52 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
             RenderWindow();
             return;
         }
+        if (key == 'c' || key == 'C') {
+            /* Cmd+C copies the latest AI response to the Clipboard */
+            short i;
+            for (i = gMessageCount - 1; i >= 0; i--) {
+                if (!gMessages[i].isUser) {
+                    CopyMessageToClipboard(i);
+                    break;
+                }
+            }
+            return;
+        }
+        if (key == 'v' || key == 'V') {
+            /* Cmd+V pastes text from Clipboard into prompt input */
+            if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen) {
+                Handle hScrap = NewHandle(0);
+                long offset = 0;
+                long scrapLen = GetScrap(hScrap, 'TEXT', &offset);
+                if (scrapLen > 0 && hScrap && *hScrap) {
+                    short curLen = (short)strlen(gPromptBuf);
+                    short i;
+                    HLock(hScrap);
+                    for (i = 0; i < scrapLen && curLen < (short)(sizeof(gPromptBuf) - 2); i++) {
+                        char ch = (*hScrap)[i];
+                        if (ch == '\r' || ch == '\n' || ch == '\t') ch = ' ';
+                        if (ch >= 32 && ch < 127) {
+                            gPromptBuf[curLen++] = ch;
+                        }
+                    }
+                    gPromptBuf[curLen] = '\0';
+                    HUnlock(hScrap);
+                    gPromptFocused = true;
+                    gCaretVisible  = true;
+                    gLastCaretTick = TickCount();
+                    SyncPromptExpansionWithScroll();
+                    RenderChatAreaOnly();
+                }
+                if (hScrap) DisposeHandle(hScrap);
+            }
+            return;
+        }
         if (key == '1') { SelectProviderOrTier("gemini", NULL); return; }
-        if (key == '2') { SelectProviderOrTier("openai", NULL); return; }
+        if (key == '2') { SelectProviderOrTier("chatgpt", NULL); return; }
         if (key == '3') { SelectProviderOrTier("claude", NULL); return; }
         if (key == 't' || key == 'T') {
             gReadRepliesTTS = !gReadRepliesTTS;
+            SyncAIMenuState();
             return;
         }
     }
@@ -1784,8 +2434,11 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
         if (key == '\r' || key == 3) {
             ip_addr manualIP = 0;
             if (ParseIPAddress(gManualIPBuf, &manualIP)) {
+                gScanningServer = true;
+                RenderWindow();
                 NetSetServer(manualIP, DEFAULT_HTTP_PORT);
                 CheckServerAndLoginStatus();
+                gScanningServer = false;
                 RenderWindow();
             }
         } else if (key == 8 && len > 0) {
@@ -1824,42 +2477,59 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
     /* Arrow keys for scrolling chat messages */
     if (key == 30) { /* Up arrow */
         gMsgScrollY -= 24;
-        RenderWindow();
+        if (gMsgScrollY < 0) gMsgScrollY = 0;
+        RenderChatAreaOnly();
         return;
     }
     if (key == 31) { /* Down arrow */
         gMsgScrollY += 24;
-        RenderWindow();
+        if (gMsgScrollY > gMsgMaxScrollY) gMsgScrollY = gMsgMaxScrollY;
+        RenderChatAreaOnly();
         return;
     }
 
-    /* Prompt input typing */
+    /* Prompt input typing (fast partial redraws!) */
     if (!gAwaitingLogin) {
         short len = (short)strlen(gPromptBuf);
         if (key == '\r' || key == 3) {
             if (gIsRecordingVoice) {
                 ToggleVoiceRecording();
             } else if (len > 0) {
-                char toSend[256];
-                strcpy(toSend, gPromptBuf);
-                gPromptBuf[0] = '\0';
-                gCaretVisible = true;
-                gLastCaretTick = TickCount();
-                SendPromptToAI(toSend);
+                static char toSend[sizeof(gPromptBuf)];
+                strncpy(toSend, gPromptBuf, sizeof(toSend) - 1);
+                toSend[sizeof(toSend) - 1] = '\0';
+                gPromptBuf[0]       = '\0';
+                gPromptScrollLine   = 0;
+                gPrevPromptVisLines = 1;
+                gCaretVisible       = true;
+                gLastCaretTick      = TickCount();
+                SendPromptToAI(toSend, false);
             }
         } else if (key == 8 && len > 0) {
+            short prevVis = gPrevPromptVisLines;
             gPromptFocused = true;
             gCaretVisible  = true;
             gLastCaretTick = TickCount();
             gPromptBuf[len - 1] = '\0';
-            RenderWindow();
+            SyncPromptExpansionWithScroll();
+            if (gPrevPromptVisLines != prevVis) {
+                RenderChatAreaOnly();
+            } else {
+                RenderPromptBarOnly();
+            }
         } else if (key >= 32 && key < 127 && len < (short)(sizeof(gPromptBuf) - 2)) {
+            short prevVis = gPrevPromptVisLines;
             gPromptFocused = true;
             gCaretVisible  = true;
             gLastCaretTick = TickCount();
             gPromptBuf[len] = key;
             gPromptBuf[len + 1] = '\0';
-            RenderWindow();
+            SyncPromptExpansionWithScroll();
+            if (gPrevPromptVisLines != prevVis) {
+                RenderChatAreaOnly();
+            } else {
+                RenderPromptBarOnly();
+            }
         }
     }
 }
@@ -1899,6 +2569,7 @@ static void HandleMenuChoice(long menuChoice)
                 break;
             case iReconnect:
                 gServerConnected = false;
+                gScanningServer  = false;
                 RenderWindow();
                 break;
             case iQuit:
@@ -1908,14 +2579,14 @@ static void HandleMenuChoice(long menuChoice)
     } else if (menuID == mAI) {
         switch (itemID) {
             case iUseGemini:    SelectProviderOrTier("gemini", NULL); break;
-            case iUseOpenAI:    SelectProviderOrTier("openai", NULL); break;
+            case iUseOpenAI:    SelectProviderOrTier("chatgpt", NULL); break;
             case iUseClaude:    SelectProviderOrTier("claude", NULL); break;
-            case iTierFast:     SelectProviderOrTier(NULL, "fast"); break;
-            case iTierPro:      SelectProviderOrTier(NULL, "pro"); break;
-            case iTierThinking: SelectProviderOrTier(NULL, "thinking"); break;
+            case iTierFast:     SelectProviderOrTier(NULL, "Fast"); break;
+            case iTierPro:      SelectProviderOrTier(NULL, "Pro"); break;
+            case iTierThinking: SelectProviderOrTier(NULL, "Thinking"); break;
             case iToggleTTS:
                 gReadRepliesTTS = !gReadRepliesTTS;
-                CheckItem(GetMenuHandle(mAI), iToggleTTS, gReadRepliesTTS);
+                SyncAIMenuState();
                 break;
         }
     }
@@ -1933,6 +2604,10 @@ int main(void)
     short scrW, scrH, winLeft, winTop;
     EventRecord ev;
 
+    MaxApplZone();
+    MoreMasters();
+    MoreMasters();
+
     InitGraf(&qd.thePort);
     InitFonts();
     InitWindows();
@@ -1940,8 +2615,7 @@ int main(void)
     TEInit();
     InitDialogs(NULL);
     InitCursor();
-    MaxApplZone();
-    MoreMasters();
+    FlushEvents(everyEvent, 0);
 
     gNetBuf = NewPtrClear(NET_BUF_SIZE);
 
@@ -1950,6 +2624,7 @@ int main(void)
     if (menuBar) {
         SetMenuBar(menuBar);
         AppendResMenu(GetMenuHandle(mApple), 'DRVR');
+        SyncAIMenuState();
         DrawMenuBar();
     }
 
@@ -1969,36 +2644,47 @@ int main(void)
     SetPort(gMainWindow);
 
     EnsureOffscreenBuffer(gWinW, gWinH);
-    RenderWindow();
 
     /* Discover or reconnect to MacCompanion Middleware Server */
     AttemptDiscoveryOrSavedConnect();
 
     while (gRunning) {
+        long sleepTicks = 6;
         SystemTask();
 
         if (AudioStreamIsRunning()) {
             AudioStreamPump();
+            sleepTicks = 1;
         }
-        if (gIsRecordingVoice && !SoundInputIsRecording()) {
-            /* Buffer filled (~4s), automatically finish and send voice clip */
-            ToggleVoiceRecording();
+        if (gIsRecordingVoice) {
+            sleepTicks = 1;
+            if (!SoundInputIsRecording()) {
+                /* Buffer filled (~4s), automatically finish and send voice clip */
+                ToggleVoiceRecording();
+            }
         }
-        if (gPromptFocused && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen) {
+        if (gCopiedMsgIdx >= 0 && (TickCount() - gCopiedTick) >= 90) {
+            gCopiedMsgIdx = -1;
+            if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
+                RenderChatAreaOnly();
+            }
+        }
+        if (gPromptFocused && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
             unsigned long nowTicks = TickCount();
             if ((nowTicks - gLastCaretTick) >= 30) {
                 gLastCaretTick = nowTicks;
                 gCaretVisible = !gCaretVisible;
-                RenderWindow();
+                RenderPromptBarOnly();
             }
         }
 
-        if (WaitNextEvent(everyEvent, &ev, 2, NULL)) {
+        if (WaitNextEvent(everyEvent, &ev, sleepTicks, NULL)) {
             switch (ev.what) {
                 case mouseDown: {
                     WindowPtr hitWin = NULL;
                     short part = FindWindow(ev.where, &hitWin);
                     if (part == inMenuBar) {
+                        SyncAIMenuState();
                         HandleMenuChoice(MenuSelect(ev.where));
                     } else if (part == inSysWindow) {
                         SystemClick(&ev, hitWin);

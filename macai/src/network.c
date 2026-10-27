@@ -39,6 +39,7 @@ static long           gPcmFilled[NUM_AUDIO_BUFFERS]       = { 0, 0 };
 static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0 };
 static short          gNextFillBuf       = 0;
 static Boolean        gPrebuffering      = true;
+static unsigned long  gLastEmptyStatusTick = 0;
 
 /* ============================================================================
  * Sound Input Manager (Microphone) State
@@ -47,7 +48,6 @@ static Boolean        gPrebuffering      = true;
 #define VOICE_MAX_BYTES     45000L  /* ~4 seconds at 11127 Hz 8-bit mono */
 #define kSIReadPermission   0
 #define kSIWritePermission  1
-#define kGestaltHasSndIn    0x00000020L
 
 typedef struct MacAISPB {
     long            inRefNum;
@@ -190,124 +190,146 @@ void NetSetIdleCallback(void (*callback)(void))
     gIdleCallback = callback;
 }
 
-static OSErr RunTCPControl(TCPiopb *pb, Boolean runIdle)
+static OSErr RunTCPControl(TCPiopb *pb, Boolean runIdle, unsigned long maxWaitTicks)
 {
-    pb->ioCRefNum = gMacTCPRef;
-    PBControlAsync((ParmBlkPtr)pb);
-    while (pb->ioResult > 0) {
-        SystemTask();
-        if (runIdle && gIdleCallback) {
-            gIdleCallback();
-        }
-        if (gAudioRunning) {
-            AudioStreamPump();
-        }
-    }
-    return pb->ioResult;
-}
+    unsigned long startTicks = TickCount();
+    unsigned long lastIdleTick = startTicks;
+    OSErr err;
 
-static OSErr RunUDPControl(UDPiopb *pb)
-{
-    pb->ioCRefNum = gMacTCPRef;
-    PBControlAsync((ParmBlkPtr)pb);
-    while (pb->ioResult > 0) {
-        SystemTask();
+    pb->ioCRefNum    = gMacTCPRef;
+    pb->ioCompletion = NULL;
+    err = PBControlAsync((ParmBlkPtr)pb);
+    if (err != noErr && err != inProgress) {
+        return err;
     }
-    return pb->ioResult;
+
+    while (pb->ioResult == inProgress) {
+        unsigned long nowTicks = TickCount();
+        if (nowTicks != lastIdleTick) {
+            lastIdleTick = nowTicks;
+            SystemTask();
+            if (runIdle && gIdleCallback) {
+                gIdleCallback();
+            }
+            if (gAudioRunning) {
+                AudioStreamPump();
+            }
+        }
+        if ((nowTicks - startTicks) > maxWaitTicks) {
+            if (pb->tcpStream != 0 && pb->csCode != TCPAbort && pb->csCode != TCPRelease) {
+                TCPiopb abortPb;
+                memset(&abortPb, 0, sizeof(abortPb));
+                abortPb.ioCRefNum = gMacTCPRef;
+                abortPb.csCode    = TCPAbort;
+                abortPb.tcpStream = pb->tcpStream;
+                PBControlSync((ParmBlkPtr)&abortPb);
+            }
+            break;
+        }
+    }
+    return (pb->ioResult == inProgress) ? commandTimeout : pb->ioResult;
 }
 
 Boolean NetDiscoverServer(void)
 {
     UDPiopb pb;
+    Ptr udpRcvBuf;
     StreamPtr udpStream = 0;
-    Ptr rcvBuf = NULL;
-    const char *discoverMsg = "MACCOMPANION_DISCOVER";
     wdsEntry wds[2];
+    const char *magic = "MACCOMPANION_DISCOVER";
     ip_addr targets[4];
-    int numTargets = 0;
-    int i, attempt;
+    short i;
     Boolean found = false;
 
     if (!NetInit()) return false;
 
-    rcvBuf = NewPtr(2048);
-    if (!rcvBuf) return false;
+    udpRcvBuf = NewPtr(2048);
+    if (!udpRcvBuf) return false;
 
     memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum                 = gMacTCPRef;
     pb.csCode                    = UDPCreate;
-    pb.csParam.create.rcvBuff    = rcvBuf;
+    pb.csParam.create.rcvBuff    = udpRcvBuf;
     pb.csParam.create.rcvBuffLen = 2048;
     pb.csParam.create.notifyProc = NULL;
     pb.csParam.create.localPort  = 0;
-    if (RunUDPControl(&pb) != noErr) {
-        DisposePtr(rcvBuf);
+    if (PBControlSync((ParmBlkPtr)&pb) != noErr) {
+        DisposePtr(udpRcvBuf);
         return false;
     }
     udpStream = pb.udpStream;
 
-    targets[numTargets++] = (gOurIP & (unsigned long)gOurNetMask) | (~((unsigned long)gOurNetMask));
-    targets[numTargets++] = (ip_addr)0xFFFFFFFF;
-    targets[numTargets++] = (gOurIP & (unsigned long)gOurNetMask) | 0x00000001;
-    targets[numTargets++] = (ip_addr)0x0A000202; /* Basilisk II SLIRP host 10.0.2.2 */
+    /* Candidate discovery destinations on local subnet + broadcast (matches SpotiMac):
+     *  0: Subnet host .2 (10.0.2.2 in Basilisk II / QEMU slirp)
+     *  1: Subnet gateway .1
+     *  2: Subnet broadcast (e.g. 192.168.1.255)
+     *  3: Global broadcast (255.255.255.255)
+     */
+    targets[0] = (gOurIP & (ip_addr)gOurNetMask) | 2;
+    targets[1] = (gOurIP & (ip_addr)gOurNetMask) | 1;
+    targets[2] = gOurIP | ~(ip_addr)gOurNetMask;
+    targets[3] = (ip_addr)0xFFFFFFFF;
 
-    for (attempt = 0; attempt < 2 && !found; attempt++) {
-        for (i = 0; i < numTargets; i++) {
-            wds[0].length = (unsigned short)strlen(discoverMsg);
-            wds[0].ptr    = (Ptr)discoverMsg;
-            wds[1].length = 0;
-            wds[1].ptr    = NULL;
-
-            memset(&pb, 0, sizeof(pb));
-            pb.csCode                     = UDPWrite;
-            pb.udpStream                  = udpStream;
-            pb.csParam.send.remoteHost    = targets[i];
-            pb.csParam.send.remotePort    = DEFAULT_UDP_PORT;
-            pb.csParam.send.wdsPtr        = (Ptr)wds;
-            pb.csParam.send.checkSum      = 1;
-            pb.csParam.send.sendLength    = 0;
-            RunUDPControl(&pb);
-        }
-
+    for (i = 0; i < 4; i++) {
         memset(&pb, 0, sizeof(pb));
-        pb.csCode                        = UDPRead;
-        pb.udpStream                     = udpStream;
-        pb.csParam.receive.timeOut       = 2;
-        pb.csParam.receive.secondTimeStamp = 0;
-        if (RunUDPControl(&pb) == noErr && pb.csParam.receive.rcvBuffLen > 0) {
-            char reply[256];
-            short copyLen = pb.csParam.receive.rcvBuffLen;
-            ip_addr senderIP = pb.csParam.receive.remoteHost;
+        wds[0].length = (unsigned short)strlen(magic);
+        wds[0].ptr    = (Ptr)magic;
+        wds[1].length = 0;
+        wds[1].ptr    = NULL;
 
-            if (copyLen > (short)(sizeof(reply) - 1)) copyLen = sizeof(reply) - 1;
-            memcpy(reply, pb.csParam.receive.rcvBuff, copyLen);
-            reply[copyLen] = '\0';
+        pb.ioCRefNum               = gMacTCPRef;
+        pb.csCode                  = UDPWrite;
+        pb.udpStream               = udpStream;
+        pb.csParam.send.remoteHost = targets[i];
+        pb.csParam.send.remotePort = DEFAULT_UDP_PORT;
+        pb.csParam.send.wdsPtr     = (Ptr)wds;
+        pb.csParam.send.checkSum   = true;
+        pb.csParam.send.sendLength = 0;
+        PBControlSync((ParmBlkPtr)&pb);
+    }
 
-            memset(&pb, 0, sizeof(pb));
-            pb.csCode = UDPBfrReturn;
-            pb.udpStream = udpStream;
-            RunUDPControl(&pb);
+    /* Wait up to 2 seconds for MACCOMPANION_SERVER|<ip>|<port>|<modules> */
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum               = gMacTCPRef;
+    pb.csCode                  = UDPRead;
+    pb.udpStream               = udpStream;
+    pb.csParam.receive.timeOut = 2;
+    if (PBControlSync((ParmBlkPtr)&pb) == noErr && pb.csParam.receive.rcvBuffLen > 0) {
+        char reply[256];
+        short copyLen = pb.csParam.receive.rcvBuffLen;
+        ip_addr responderIP = pb.csParam.receive.remoteHost;
 
-            if (strncmp(reply, "MACCOMPANION_SERVER|", 20) == 0) {
-                char *p1 = reply + 20;
-                char *p2 = strchr(p1, '|');
-                unsigned short port = DEFAULT_HTTP_PORT;
-                if (p2) {
-                    *p2 = '\0';
-                    port = (unsigned short)atoi(p2 + 1);
+        if (copyLen > (short)(sizeof(reply) - 1)) copyLen = sizeof(reply) - 1;
+        memcpy(reply, pb.csParam.receive.rcvBuff, copyLen);
+        reply[copyLen] = '\0';
+
+        /* Return the UDP buffer to MacTCP (preserving pb.csParam.receive.rcvBuff) */
+        pb.csCode = UDPBfrReturn;
+        PBControlSync((ParmBlkPtr)&pb);
+
+        if (strncmp(reply, "MACCOMPANION_SERVER|", 20) == 0) {
+            char *p1 = strchr(reply + 20, '|');
+            unsigned short port = DEFAULT_HTTP_PORT;
+            if (p1) {
+                int parsedPort = atoi(p1 + 1);
+                if (parsedPort > 0 && parsedPort < 65536) {
+                    port = (unsigned short)parsedPort;
                 }
-                gServerIP       = senderIP;
-                gServerHttpPort = (port > 0) ? port : DEFAULT_HTTP_PORT;
+            }
+            if (responderIP != 0) {
+                NetSetServer(responderIP, port);
                 found = true;
             }
         }
     }
 
     memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum = gMacTCPRef;
     pb.csCode    = UDPRelease;
     pb.udpStream = udpStream;
-    RunUDPControl(&pb);
+    PBControlSync((ParmBlkPtr)&pb);
 
-    DisposePtr(rcvBuf);
+    DisposePtr(udpRcvBuf);
     return found;
 }
 
@@ -350,6 +372,8 @@ static long NetHttpRequestInternal(const char *method, const char *path,
     long bodyLen = -1;
     Boolean headerStripped = false;
     long expectedBodyLen = -1;
+    unsigned long openMaxTicks = ((unsigned long)openTimeoutSec + 1UL) * 60UL;
+    unsigned long rcvMaxTicks  = ((unsigned long)rcvTimeoutSec + 2UL) * 60UL;
 
     if (!outBody || maxLen <= 1) return -1;
     outBody[0] = '\0';
@@ -364,7 +388,7 @@ static long NetHttpRequestInternal(const char *method, const char *path,
     pb.csParam.create.rcvBuff    = tcpRcvBuf;
     pb.csParam.create.rcvBuffLen = 8192;
     pb.csParam.create.notifyProc = NULL;
-    err = RunTCPControl(&pb, true);
+    err = RunTCPControl(&pb, true, 180);
     if (err != noErr) {
         DisposePtr(tcpRcvBuf);
         return -1;
@@ -382,7 +406,7 @@ static long NetHttpRequestInternal(const char *method, const char *path,
     pb.csParam.open.remotePort          = gServerHttpPort;
     pb.csParam.open.localPort           = 0;
 
-    err = RunTCPControl(&pb, true);
+    err = RunTCPControl(&pb, true, openMaxTicks);
     if (err != noErr) {
         goto cleanup;
     }
@@ -428,7 +452,7 @@ static long NetHttpRequestInternal(const char *method, const char *path,
     pb.csParam.send.urgentFlag    = 0;
     pb.csParam.send.wdsPtr        = (Ptr)wds;
 
-    err = RunTCPControl(&pb, true);
+    err = RunTCPControl(&pb, true, openMaxTicks);
     if (err != noErr) {
         goto close_conn;
     }
@@ -442,7 +466,7 @@ static long NetHttpRequestInternal(const char *method, const char *path,
         pb.csParam.receive.rcvBuff             = outBody + totalRead;
         pb.csParam.receive.rcvBuffLen          = chunkAsk;
 
-        err = RunTCPControl(&pb, true);
+        err = RunTCPControl(&pb, true, rcvMaxTicks);
         if (err == noErr && pb.csParam.receive.rcvBuffLen > 0) {
             totalRead += pb.csParam.receive.rcvBuffLen;
 
@@ -480,13 +504,13 @@ close_conn:
     memset(&pb, 0, sizeof(pb));
     pb.csCode    = TCPAbort;
     pb.tcpStream = stream;
-    RunTCPControl(&pb, true);
+    RunTCPControl(&pb, true, 120);
 
 cleanup:
     memset(&pb, 0, sizeof(pb));
     pb.csCode    = TCPRelease;
     pb.tcpStream = stream;
-    RunTCPControl(&pb, true);
+    RunTCPControl(&pb, true, 120);
 
     DisposePtr(tcpRcvBuf);
     return bodyLen;
@@ -494,16 +518,18 @@ cleanup:
 
 long NetHttpGet(const char *path, char *outBody, long maxLen)
 {
-    /* AI /api/macai/ask calls may take up to 25s for Thinking models */
-    Byte rcvTimeout = (strstr(path, "/ask") != NULL || strstr(path, "/tts") != NULL) ? 30 : 6;
-    return NetHttpRequestInternal("GET", path, NULL, NULL, 0, outBody, maxLen, 10, rcvTimeout);
+    Boolean isPing = (strstr(path, "/ping") != NULL);
+    Boolean isSlowAI = (strstr(path, "/ask") != NULL || strstr(path, "/tts") != NULL);
+    Byte openTimeout = isPing ? 3 : 4;
+    Byte rcvTimeout  = isSlowAI ? 30 : (isPing ? 3 : 6);
+    return NetHttpRequestInternal("GET", path, NULL, NULL, 0, outBody, maxLen, openTimeout, rcvTimeout);
 }
 
 long NetHttpPost(const char *path, const char *contentType,
                  const void *postBody, long postLen,
                  char *outBody, long maxLen)
 {
-    return NetHttpRequestInternal("POST", path, contentType, postBody, postLen, outBody, maxLen, 15, 30);
+    return NetHttpRequestInternal("POST", path, contentType, postBody, postLen, outBody, maxLen, 5, 30);
 }
 
 void UrlEncode(const char *src, char *dst, short maxDst)
@@ -615,7 +641,7 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     pb.csParam.create.rcvBuff    = gAudioTcpRcvBuf;
     pb.csParam.create.rcvBuffLen = AUDIO_TCP_RCV_SIZE;
     pb.csParam.create.notifyProc = NULL;
-    if (RunTCPControl(&pb, false) != noErr) {
+    if (RunTCPControl(&pb, false, 180) != noErr) {
         SndDisposeChannel(gSndChan, true);
         gSndChan = NULL;
         return false;
@@ -625,18 +651,18 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     memset(&pb, 0, sizeof(pb));
     pb.csCode                           = TCPActiveOpen;
     pb.tcpStream                        = gAudioStream;
-    pb.csParam.open.ulpTimeoutValue     = 10;
+    pb.csParam.open.ulpTimeoutValue     = 5;
     pb.csParam.open.ulpTimeoutAction    = 1;
     pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
     pb.csParam.open.commandTimeoutValue = 5;
     pb.csParam.open.remoteHost          = gServerIP;
     pb.csParam.open.remotePort          = DEFAULT_AUDIO_PORT;
     pb.csParam.open.localPort           = 0;
-    if (RunTCPControl(&pb, false) != noErr) {
+    if (RunTCPControl(&pb, false, 300) != noErr) {
         memset(&pb, 0, sizeof(pb));
         pb.csCode    = TCPRelease;
         pb.tcpStream = gAudioStream;
-        RunTCPControl(&pb, false);
+        RunTCPControl(&pb, false, 120);
         gAudioStream = 0;
         SndDisposeChannel(gSndChan, true);
         gSndChan = NULL;
@@ -676,12 +702,12 @@ void AudioStreamStop(void)
         memset(&pb, 0, sizeof(pb));
         pb.csCode    = TCPAbort;
         pb.tcpStream = gAudioStream;
-        RunTCPControl(&pb, false);
+        RunTCPControl(&pb, false, 120);
 
         memset(&pb, 0, sizeof(pb));
         pb.csCode    = TCPRelease;
         pb.tcpStream = gAudioStream;
-        RunTCPControl(&pb, false);
+        RunTCPControl(&pb, false, 120);
         gAudioStream = 0;
     }
 
@@ -704,6 +730,10 @@ void AudioStreamPump(void)
 
     if (!gAudioRunning || gAudioStream == 0 || !gSndChan) return;
 
+    if (gBufferBusy[0] && gBufferBusy[1]) return;
+
+    if (TickCount() == gLastEmptyStatusTick) return;
+
     for (attempts = 0; attempts < 2; attempts++) {
         short target = gNextFillBuf;
         unsigned short spaceLeft;
@@ -713,9 +743,10 @@ void AudioStreamPump(void)
         if (!gPcmBuffers[target]) break;
 
         memset(&pb, 0, sizeof(pb));
+        pb.ioCRefNum = gMacTCPRef;
         pb.csCode    = TCPStatus;
         pb.tcpStream = gAudioStream;
-        if (RunTCPControl(&pb, false) != noErr) {
+        if (PBControlSync((ParmBlkPtr)&pb) != noErr) {
             AudioStreamStop();
             return;
         }
@@ -727,6 +758,7 @@ void AudioStreamPump(void)
 
         avail = pb.csParam.status.amtUnreadData;
         if (avail == 0) {
+            gLastEmptyStatusTick = TickCount();
             /* If we have a partial TTS tail sitting in target buffer and neither buffer is busy, flush it! */
             if (gPcmFilled[target] > 0 && !gBufferBusy[0] && !gBufferBusy[1]) {
                 QueueSoundBuffer(target);
@@ -740,13 +772,14 @@ void AudioStreamPump(void)
 
         if (toRead > 0) {
             memset(&pb, 0, sizeof(pb));
+            pb.ioCRefNum                           = gMacTCPRef;
             pb.csCode                              = TCPRcv;
             pb.tcpStream                           = gAudioStream;
             pb.csParam.receive.commandTimeoutValue = 1;
             pb.csParam.receive.rcvBuff             = gPcmBuffers[target] + gPcmFilled[target];
             pb.csParam.receive.rcvBuffLen          = toRead;
 
-            if (RunTCPControl(&pb, false) == noErr && pb.csParam.receive.rcvBuffLen > 0) {
+            if (PBControlSync((ParmBlkPtr)&pb) == noErr && pb.csParam.receive.rcvBuffLen > 0) {
                 gPcmFilled[target] += pb.csParam.receive.rcvBuffLen;
             } else {
                 break;
@@ -769,8 +802,6 @@ void AudioStreamPump(void)
 Boolean SoundInputHasHardware(void)
 {
     long sndAttr = 0;
-    long inRefNum = 0;
-    OSErr err;
 
     if (gSoundInputChecked) {
         return gSoundInputPresent;
@@ -778,22 +809,17 @@ Boolean SoundInputHasHardware(void)
     gSoundInputChecked = true;
     gSoundInputPresent = false;
 
-    /* 1. Check Gestalt sound attributes for gestaltHasSoundInputDevice (0x20) */
+    /* Check Gestalt sound attributes for both Sound Input Manager and a Sound Input device */
     if (Gestalt(gestaltSoundAttr, &sndAttr) != noErr) {
         return false;
     }
-    if ((sndAttr & kGestaltHasSndIn) == 0) {
+    if ((sndAttr & (1L << gestaltSoundIOMgrPresent)) == 0 ||
+        (sndAttr & (1L << gestaltHasSoundInputDevice)) == 0) {
         return false;
     }
 
-    /* 2. Verify a default Sound Input driver/device can actually be opened */
-    err = SPBOpenDevice("\p", kSIReadPermission, &inRefNum);
-    if (err == noErr && inRefNum != 0) {
-        SPBCloseDevice(inRefNum);
-        gSoundInputPresent = true;
-    }
-
-    return gSoundInputPresent;
+    gSoundInputPresent = true;
+    return true;
 }
 
 Boolean SoundInputStartRecording(unsigned short *outSampleRateHz)
