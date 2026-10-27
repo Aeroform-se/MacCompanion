@@ -69,11 +69,12 @@
 #define SEARCH_ROW_H        40
 #define SEARCH_TOP_Y        34
 
-/* Pre-connection Server Screen states (Server1.png, Server2.png, Server3.png) */
+/* Pre-connection Server Screen states (Server1.png, Server2.png, Server3.png, login-error.png) */
 #define CONN_SEARCHING      1
 #define CONN_FAILED         2
 #define CONN_FOUND          3
 #define CONN_READY          4
+#define CONN_LOGIN_ERROR    5
 
 /* Hover / Pressed button identifiers (button-states-2.png + Mini-player.png) */
 #define BTN_NONE            0
@@ -141,6 +142,14 @@ typedef struct {
     Boolean isActive;
     short   volumePct;
 } DeviceItem;
+
+typedef struct {
+    char slotId[24];
+    char title[32];
+    char line1[32];
+    char line2[32];
+    char imageUrl[160];
+} ForYouItem;
 
 typedef struct {
     Boolean isPlaying;
@@ -236,7 +245,7 @@ static short           gLastClickedRow     = -1;
 static unsigned long   gLastLeftClickTicks = 0;
 static short           gLastLeftClickedRow = -1;
 
-/* Now Playing, Artwork & Visualizer state */
+/* Now Playing, Artwork, "For You" & Visualizer state */
 static NowPlayingState gNowPlaying;
 static Boolean         gTimelineFrozen       = false;
 static unsigned long   gTrackLockUntilTicks  = 0;
@@ -249,6 +258,11 @@ static Boolean         gVizHover             = false;
 static short           gVizMode              = VIZ_MODE_EQ;
 static unsigned long   gLastVizTicks         = 0;
 static unsigned short  gAudioSampleRateHz    = 22255;
+
+#define FOR_YOU_COUNT  4
+static Boolean         gForYouViewOpen       = true;
+static ForYouItem      gForYouItems[FOR_YOU_COUNT];
+static unsigned char   gForYouIconBits[FOR_YOU_COUNT][282];
 
 /* Timing for periodic state & tick-anchored timeline updates */
 static unsigned long   gLastPollTicks        = 0;
@@ -487,14 +501,102 @@ static void SafeCopy(char *dst, const char *src, short maxLen)
     }
     while (src[i] != '\0' && i < (maxLen - 1)) {
         unsigned char c = (unsigned char)src[i];
-        if (c >= 0x80) {
-            dst[i] = '-';
+        if (c < 0x20 || c == 0x7F) {
+            dst[i] = ' ';
         } else {
             dst[i] = (char)c;
         }
         i++;
     }
     dst[i] = '\0';
+}
+
+static char MapUnicodeToMacRomanOrAscii(unsigned int cp)
+{
+    switch (cp) {
+        /* Swedish / Nordic / German / French / Spanish MacRoman characters */
+        case 0x00C4: return (char)0x80; /* Ä */
+        case 0x00C5: return (char)0x81; /* Å */
+        case 0x00C7: return (char)0x82; /* Ç */
+        case 0x00C9: return (char)0x83; /* É */
+        case 0x00D1: return (char)0x84; /* Ñ */
+        case 0x00D6: return (char)0x85; /* Ö */
+        case 0x00DC: return (char)0x86; /* Ü */
+        case 0x00E1: return (char)0x87; /* á */
+        case 0x00E0: return (char)0x88; /* à */
+        case 0x00E2: return (char)0x89; /* â */
+        case 0x00E4: return (char)0x8A; /* ä */
+        case 0x00E3: return (char)0x8B; /* ã */
+        case 0x00E5: return (char)0x8C; /* å */
+        case 0x00E7: return (char)0x8D; /* ç */
+        case 0x00E9: return (char)0x8E; /* é */
+        case 0x00E8: return (char)0x8F; /* è */
+        case 0x00EA: return (char)0x90; /* ê */
+        case 0x00EB: return (char)0x91; /* ë */
+        case 0x00ED: return (char)0x92; /* í */
+        case 0x00EC: return (char)0x93; /* ì */
+        case 0x00EE: return (char)0x94; /* î */
+        case 0x00EF: return (char)0x95; /* ï */
+        case 0x00F1: return (char)0x96; /* ñ */
+        case 0x00F3: return (char)0x97; /* ó */
+        case 0x00F2: return (char)0x98; /* ò */
+        case 0x00F4: return (char)0x99; /* ô */
+        case 0x00F6: return (char)0x9A; /* ö */
+        case 0x00F5: return (char)0x9B; /* õ */
+        case 0x00FA: return (char)0x9C; /* ú */
+        case 0x00F9: return (char)0x9D; /* ù */
+        case 0x00FB: return (char)0x9E; /* û */
+        case 0x00FC: return (char)0x9F; /* ü */
+        case 0x00DF: return (char)0xA7; /* ß */
+        case 0x00C6: return (char)0xAE; /* Æ */
+        case 0x00D8: return (char)0xAF; /* Ø */
+        case 0x00E6: return (char)0xBE; /* æ */
+        case 0x00F8: return (char)0xBF; /* ø */
+        case 0x00C0: return (char)0xCB; /* À */
+        case 0x00C3: return (char)0xCC; /* Ã */
+        case 0x00D5: return (char)0xCD; /* Õ */
+        case 0x0152: return (char)0xCE; /* Œ */
+        case 0x0153: return (char)0xCF; /* œ */
+        case 0x00D2: return (char)0xF1; /* Ò */
+        case 0x00DA: return (char)0xF2; /* Ú */
+        case 0x00DB: return (char)0xF3; /* Û */
+        case 0x00D9: return (char)0xF4; /* Ù */
+        /* Additional Latin-1 & Latin Extended-A transliterations */
+        case 0x00C1: case 0x00C2: case 0x0100: case 0x0102: case 0x0104: return 'A';
+        case 0x0101: case 0x0103: case 0x0105: return 'a';
+        case 0x0106: case 0x0108: case 0x010A: case 0x010C: return 'C';
+        case 0x0107: case 0x0109: case 0x010B: case 0x010D: return 'c';
+        case 0x00D0: case 0x010E: case 0x0110: return 'D';
+        case 0x00F0: case 0x010F: case 0x0111: return 'd';
+        case 0x00C8: case 0x00CA: case 0x00CB: case 0x0112: case 0x0116: case 0x0118: case 0x011A: return 'E';
+        case 0x0113: case 0x0117: case 0x0119: case 0x011B: return 'e';
+        case 0x011E: return 'G';
+        case 0x011F: return 'g';
+        case 0x00CC: case 0x00CD: case 0x00CE: case 0x00CF: case 0x012A: case 0x0130: return 'I';
+        case 0x012B: case 0x0131: return 'i';
+        case 0x0141: return 'L';
+        case 0x0142: return 'l';
+        case 0x0143: case 0x0147: return 'N';
+        case 0x0144: case 0x0148: return 'n';
+        case 0x00D3: case 0x00D4: case 0x014C: case 0x0150: return 'O';
+        case 0x014D: case 0x0151: return 'o';
+        case 0x0158: return 'R';
+        case 0x0159: return 'r';
+        case 0x015A: case 0x015E: case 0x0160: return 'S';
+        case 0x015B: case 0x015F: case 0x0161: return 's';
+        case 0x0162: case 0x0164: return 'T';
+        case 0x0163: case 0x0165: return 't';
+        case 0x016A: case 0x016E: case 0x0170: return 'U';
+        case 0x016B: case 0x016F: case 0x0171: return 'u';
+        case 0x00DD: case 0x0178: return 'Y';
+        case 0x00FD: case 0x00FF: return 'y';
+        case 0x0179: case 0x017B: case 0x017D: return 'Z';
+        case 0x017A: case 0x017C: case 0x017E: return 'z';
+        case 0x2013: case 0x2014: return '-';
+        case 0x2018: case 0x2019: return '\'';
+        case 0x201C: case 0x201D: return '"';
+        default: return 0;
+    }
 }
 
 /*
@@ -522,17 +624,33 @@ static void GetPipeField(const char *line, short fieldIndex, char *outBuf, short
             if (c < 0x80) {
                 outBuf[outIdx++] = (char)c;
             } else if ((c & 0xE0) == 0xC0 && ((unsigned char)p[1] & 0xC0) == 0x80) {
-                unsigned int cp = ((c & 0x1F) << 6) | (p[1] & 0x3F);
-                /* Map Swedish åäöÅÄÖé to MacRoman for authentic display */
-                if (cp == 0xE5) outBuf[outIdx++] = (char)0x8C;      /* å */
-                else if (cp == 0xE4) outBuf[outIdx++] = (char)0x8A; /* ä */
-                else if (cp == 0xF6) outBuf[outIdx++] = (char)0x9A; /* ö */
-                else if (cp == 0xC5) outBuf[outIdx++] = (char)0x81; /* Å */
-                else if (cp == 0xC4) outBuf[outIdx++] = (char)0x80; /* Ä */
-                else if (cp == 0xD6) outBuf[outIdx++] = (char)0x85; /* Ö */
-                else if (cp == 0xE9) outBuf[outIdx++] = (char)0x8E; /* é */
-                else outBuf[outIdx++] = '-';
+                unsigned int cp = ((c & 0x1F) << 6) | ((unsigned char)p[1] & 0x3F);
+                char mapped = MapUnicodeToMacRomanOrAscii(cp);
+                if (mapped != 0) {
+                    outBuf[outIdx++] = mapped;
+                }
                 p++;
+            } else if ((c & 0xF0) == 0xE0 &&
+                       ((unsigned char)p[1] & 0xC0) == 0x80 &&
+                       ((unsigned char)p[2] & 0xC0) == 0x80) {
+                unsigned int cp = ((c & 0x0F) << 12) |
+                                  (((unsigned char)p[1] & 0x3F) << 6) |
+                                  ((unsigned char)p[2] & 0x3F);
+                if (cp == 0x2026) {
+                    if (outIdx < (maxOut - 3)) {
+                        outBuf[outIdx++] = '.';
+                        outBuf[outIdx++] = '.';
+                        outBuf[outIdx++] = '.';
+                    }
+                } else {
+                    char mapped = MapUnicodeToMacRomanOrAscii(cp);
+                    if (mapped != 0) {
+                        outBuf[outIdx++] = mapped;
+                    }
+                }
+                p += 2;
+            } else if ((c & 0xF8) == 0xF0 && p[1] && p[2] && p[3]) {
+                p += 3;
             }
         }
         p++;
@@ -827,6 +945,9 @@ static const unsigned char *GetLeftItemIconBits(const LeftItem *it)
     if (strcmp(it->kind, "ARTIST") == 0) {
         return gIconLibArtist;
     }
+    if (strcmp(it->kind, "FOR_YOU") == 0) {
+        return gIconLibForYou;
+    }
     if (strcmp(it->kind, "HOME_CAT") == 0) {
         if (strcmp(it->id, "recent") == 0) return gIconLibRecent;
         if (strcmp(it->id, "top") == 0)    return gIconLibTopTracks;
@@ -914,11 +1035,20 @@ static void RenderSearchHistoryDropdown(void)
  * Main UI Rendering (Exact 512 x 322 PSD / UI-update.png Layout)
  * ============================================================================ */
 
+static void DrawCenteredCardText(const char *str, short yBaseline)
+{
+    short len = (short)strlen(str);
+    short w   = TextWidth(str, 0, len);
+    MoveTo(256 - (w / 2), yBaseline);
+    DrawText(str, 0, len);
+}
+
 static void RenderPreConnectionScreen(void)
 {
-    Rect fullRect, ipBox, countBox;
+    Rect fullRect, ipBox, countBox, innerBox;
     char ipField[40];
     char secStr[16];
+    char visitLine[64];
 
     SetRect(&fullRect, 0, 0, CANVAS_W, CANVAS_H);
     FillRect(&fullRect, &qd.gray);
@@ -946,7 +1076,57 @@ static void RenderPreConnectionScreen(void)
         TextMode(srcOr);
         MoveTo(248, 236);
         DrawText(secStr, 0, 1);
+    } else if (gConnState == CONN_LOGIN_ERROR) {
+        /* Middleware login status error screen (ui/login-error.png) */
+        BlitIcon1Bit(gServerCard1Bits, 236, 199, 140, 63, srcCopy);
+        SetRect(&innerBox, 150, 128, 366, 248);
+        EraseRect(&innerBox);
+        TextMode(srcOr);
+        DrawCenteredCardText("You have not logged", 141);
+        DrawCenteredCardText("in to Spotify.", 152);
+        sprintf(visitLine, "Please visit %s:6800", gIpInput[0] ? gIpInput : "127.0.0.1");
+        DrawCenteredCardText(visitLine, 176);
+        DrawCenteredCardText("from a modern browser to login.", 188);
+        BlitIcon1Bit(gLoginErrorBtnBits, 108, 27, 204, 203, srcCopy);
     }
+}
+
+/*
+ * Renders the "For You" center panel (Discover Weekly, DJ, Daily Mix 01, Daily Mix 02)
+ * matching `ui/foryou.png` with four 45x45 icons inside a 1px white outline (47x47 total).
+ */
+static void RenderForYouCenterPanel(void)
+{
+    static const short kRowTops[FOR_YOU_COUNT] = { 56, 110, 164, 218 };
+    short row;
+
+    /* 1. "Tune in" rounded white header pill at (222, 38) 68x12 */
+    BlitIcon1Bit(gForYouHeaderPillBits, 68, 12, 222, 38, srcCopy);
+
+    /* 2. Close (X) button at (337, 38) 12x12 — hidden on initial view if nothing is playing */
+    if (gNowPlaying.trackId[0] != '\0' || gVisualizerOpen) {
+        BlitIcon1Bit(gForYouCloseCircleBits, 12, 12, 337, 38, srcCopy);
+    }
+
+    /* 3. Four 47x47 (45x45 + 1px white outline) icons + Heading & 2-line description (ui/tune-in.png) */
+    TextMode(srcBic); /* White text on black background */
+    for (row = 0; row < FOR_YOU_COUNT; row++) {
+        short yTop = kRowTops[row];
+        BlitIcon1Bit(gForYouIconBits[row], 47, 47, 156, yTop, srcCopy);
+
+        MoveTo(210, yTop + 15);
+        DrawCStringTruncated(gForYouItems[row].title, 25);
+
+        if (gForYouItems[row].line1[0] != '\0') {
+            MoveTo(210, yTop + 27);
+            DrawCStringTruncated(gForYouItems[row].line1, 25);
+        }
+        if (gForYouItems[row].line2[0] != '\0') {
+            MoveTo(210, yTop + 39);
+            DrawCStringTruncated(gForYouItems[row].line2, 25);
+        }
+    }
+    TextMode(srcOr);
 }
 
 static void RenderSearchCenterPanel(void)
@@ -1581,7 +1761,11 @@ static void RenderCanvas(void)
     SetRect(&r, 0, 22, CANVAS_W, 273);
     PaintRect(&r);
 
-    if (gSearchViewOpen) {
+    if (!gInitialDataLoaded) {
+        /* Before library & playback status finish loading: show `ui/loading.png` */
+        BlitIcon1Bit(gLoadingCardBits, 66, 66, 224, 93, srcCopy);
+        BlitIcon1Bit(gLoadingTaglineBits, 238, 23, 138, 169, srcCopy);
+    } else if (gSearchViewOpen) {
         RenderSearchCenterPanel();
     } else {
         /* 2A. Left Column: Library / Home Items with 9x9 Icons (ui/library.png & library-icons.psd) */
@@ -1622,27 +1806,31 @@ static void RenderCanvas(void)
             FillRect(&thumbRect, &qd.gray);
         }
 
-        /* 2B. Center Column: 200x200 1-Bit Album Artwork or Visualizer at (156, 35)-(356, 235) */
-        if (gVisualizerOpen) {
-            BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
-            if (gVizHover && !gSearchHistoryOpen) {
-                /* Fullscreen icon on hover: 8px down from top (35+8=43) and 8px in from right (356-8-12=336) */
-                DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
+        /* 2B. Center Column: "For You" Page, Visualizer, or 200x200 1-Bit Album Artwork */
+        if (gForYouViewOpen || (!gVisualizerOpen && gNowPlaying.trackId[0] == '\0')) {
+            RenderForYouCenterPanel();
+        } else {
+            if (gVisualizerOpen) {
+                BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
+                if (gVizHover && !gSearchHistoryOpen) {
+                    /* Fullscreen icon on hover: 8px down from top (35+8=43) and 8px in from right (356-8-12=336) */
+                    DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
+                }
+            } else {
+                BlitIcon1Bit(gCurrentArtworkBits, 200, 200, 156, 35, srcCopy);
             }
-        } else {
-            BlitIcon1Bit(gCurrentArtworkBits, 200, 200, 156, 35, srcCopy);
-        }
 
-        /* Two-line Artist (y = 249) and Track Title (y = 261) centered below artwork (UI-update.png) */
-        if (gNowPlaying.trackName[0] != '\0') {
-            DrawCenteredLineBelowArt(
-                gNowPlaying.artistName[0] != '\0' ? gNowPlaying.artistName : "SpotiMac",
-                249
-            );
-            DrawCenteredLineBelowArt(gNowPlaying.trackName, 261);
-        } else {
-            DrawCenteredLineBelowArt("SpotiMac", 249);
-            DrawCenteredLineBelowArt("Party like it's 1984", 261);
+            /* Two-line Artist (y = 249) and Track Title (y = 261) centered below artwork */
+            if (gNowPlaying.trackName[0] != '\0') {
+                DrawCenteredLineBelowArt(
+                    gNowPlaying.artistName[0] != '\0' ? gNowPlaying.artistName : "SpotiMac",
+                    249
+                );
+                DrawCenteredLineBelowArt(gNowPlaying.trackName, 261);
+            } else {
+                DrawCenteredLineBelowArt("SpotiMac", 249);
+                DrawCenteredLineBelowArt("Party like it's 1984", 261);
+            }
         }
 
         /* 2C. Right Column: Tracks List (x = 362..499, y = 35..243) */
@@ -1999,7 +2187,7 @@ static void RenderCanvas(void)
 static void RenderVisualizerFastFrame(void)
 {
     GrafPtr savePort;
-    if (!gVisualizerOpen || gMiniPlayerMode || gSearchViewOpen || gConnState != CONN_READY) return;
+    if (!gVisualizerOpen || !gInitialDataLoaded || gForYouViewOpen || gMiniPlayerMode || gSearchViewOpen || gConnState != CONN_READY) return;
     if (!gMainWindow) return;
 
     if (gSpeakerPopupOpen || gAboutModalOpen) {
@@ -2069,7 +2257,7 @@ static void RenderVisualizerFastFrame(void)
 static void VisualizerNetworkIdlePump(void)
 {
     unsigned long nowTicks;
-    if (!gVisualizerOpen || gMiniPlayerMode || gSearchViewOpen || gAboutModalOpen || gConnState != CONN_READY) {
+    if (!gVisualizerOpen || !gInitialDataLoaded || gForYouViewOpen || gMiniPlayerMode || gSearchViewOpen || gAboutModalOpen || gConnState != CONN_READY) {
         return;
     }
     nowTicks = TickCount();
@@ -2131,10 +2319,11 @@ static void BlankCurrentArtwork(void)
  */
 static void LockOptimisticTrackSelection(const char *id, const char *name, const char *artist, long durationMs)
 {
-    gTimelineFrozen      = false;
-    gPauseSynced         = false;
-    gSeekLockUntilTicks  = 0;
+    gTimelineFrozen       = false;
+    gPauseSynced          = false;
+    gSeekLockUntilTicks   = 0;
     gNowPlaying.isPlaying = true;
+    gForYouViewOpen       = false;
 
     if (durationMs > 0) {
         gNowPlaying.durationMs = durationMs;
@@ -2494,10 +2683,16 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     }
 
     if (gNowPlaying.trackId[0] == '\0') {
-        memcpy(gCurrentArtworkBits, gInitialArtworkBits, 5200);
+        memset(gCurrentArtworkBits, 0xFF, 5200);
         gLoadedArtTrackId[0] = '\0';
-    } else if (fetchArtIfChanged && !gVisualizerOpen && strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
-        FetchCurrentArtwork();
+    } else {
+        if (prevTrackId[0] == '\0') {
+            /* If API reports a playing track on launch (or playback starts from idle), show artwork instead of For You */
+            gForYouViewOpen = false;
+        }
+        if (fetchArtIfChanged && !gVisualizerOpen && strcmp(gNowPlaying.trackId, gLoadedArtTrackId) != 0) {
+            FetchCurrentArtwork();
+        }
     }
 
     SyncRightSelectionToPlayingTrack();
@@ -2721,6 +2916,10 @@ static void LoadSelectedLeftItemIntoRightList(void)
         sprintf(path, "/api/spotify/show/%s/episodes?limit=30", sel->id);
         n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
         if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
+    } else if (strcmp(sel->kind, "FOR_YOU") == 0) {
+        sprintf(path, "/api/spotify/for-you/%s/tracks", sel->id);
+        n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        if (n > 0) ParseTracksResponseIntoRightList(gHttpBuf);
     } else if (strcmp(sel->kind, "HOME_CAT") == 0) {
         if (strcmp(sel->id, "recent") == 0) {
             n = NetHttpGet("/api/spotify/recently-played?limit=35", gHttpBuf, HTTP_BUF_SIZE);
@@ -2778,6 +2977,8 @@ static void PopulateLeftColumnItems(void)
     }
 
     if (gHomeMode) {
+        /* Pin "Liked Songs" at the top of the Home library view */
+        AppendLeftItemUnique("LIKED",    "liked",  "Liked Songs",     "");
         AppendLeftItemUnique("HOME_CAT", "recent", "Recently Played", "");
         AppendLeftItemUnique("HOME_CAT", "top",    "Top Tracks",      "");
         AppendLeftItemUnique("HOME_CAT", "albums", "Saved Albums",    "");
@@ -2806,8 +3007,6 @@ static void PopulateLeftColumnItems(void)
             }
         }
     } else {
-        AppendLeftItemUnique("LIKED", "liked", "Liked Songs", "");
-
         if (NetHasServer() && gHttpBuf) {
             n = NetHttpGet("/api/spotify/playlists?limit=35", gHttpBuf, HTTP_BUF_SIZE);
             if (n > 0) {
@@ -3281,6 +3480,42 @@ static void LoadDevicesAndTogglePopover(void)
 
 static Boolean gStartupSpeakerSent = false;
 
+static void InitForYouDefaults(void)
+{
+    short i;
+    /* 1. Hot 100: https://open.spotify.com/playlist/6UeSakyzhiEt4NB3UAd6NQ */
+    SafeCopy(gForYouItems[0].slotId,   "6UeSakyzhiEt4NB3UAd6NQ", sizeof(gForYouItems[0].slotId));
+    SafeCopy(gForYouItems[0].title,    "Hot 100", sizeof(gForYouItems[0].title));
+    SafeCopy(gForYouItems[0].line1,    "This weeks most popular", sizeof(gForYouItems[0].line1));
+    SafeCopy(gForYouItems[0].line2,    "songs.", sizeof(gForYouItems[0].line2));
+    SafeCopy(gForYouItems[0].imageUrl, "spotify:playlist:6UeSakyzhiEt4NB3UAd6NQ", sizeof(gForYouItems[0].imageUrl));
+
+    /* 2. Release Radar: https://open.spotify.com/playlist/5MZ9NB8TxCE9MVeHM0NAl1 */
+    SafeCopy(gForYouItems[1].slotId,   "5MZ9NB8TxCE9MVeHM0NAl1", sizeof(gForYouItems[1].slotId));
+    SafeCopy(gForYouItems[1].title,    "Release Radar", sizeof(gForYouItems[1].title));
+    SafeCopy(gForYouItems[1].line1,    "The latest releases,", sizeof(gForYouItems[1].line1));
+    SafeCopy(gForYouItems[1].line2,    "updated each Friday.", sizeof(gForYouItems[1].line2));
+    SafeCopy(gForYouItems[1].imageUrl, "spotify:playlist:5MZ9NB8TxCE9MVeHM0NAl1", sizeof(gForYouItems[1].imageUrl));
+
+    /* 3. Trending: https://open.spotify.com/playlist/3QSmfNR2XtpoADu0QPGVJK */
+    SafeCopy(gForYouItems[2].slotId,   "3QSmfNR2XtpoADu0QPGVJK", sizeof(gForYouItems[2].slotId));
+    SafeCopy(gForYouItems[2].title,    "Trending", sizeof(gForYouItems[2].title));
+    SafeCopy(gForYouItems[2].line1,    "Find the future chart", sizeof(gForYouItems[2].line1));
+    SafeCopy(gForYouItems[2].line2,    "smashers here.", sizeof(gForYouItems[2].line2));
+    SafeCopy(gForYouItems[2].imageUrl, "spotify:playlist:3QSmfNR2XtpoADu0QPGVJK", sizeof(gForYouItems[2].imageUrl));
+
+    /* 4. Hit songs: https://open.spotify.com/playlist/4ANVDtJVtVMVc2Nk79VU1M */
+    SafeCopy(gForYouItems[3].slotId,   "4ANVDtJVtVMVc2Nk79VU1M", sizeof(gForYouItems[3].slotId));
+    SafeCopy(gForYouItems[3].title,    "Hit songs", sizeof(gForYouItems[3].title));
+    SafeCopy(gForYouItems[3].line1,    "The latest hit songs", sizeof(gForYouItems[3].line1));
+    SafeCopy(gForYouItems[3].line2,    "right now.", sizeof(gForYouItems[3].line2));
+    SafeCopy(gForYouItems[3].imageUrl, "spotify:playlist:4ANVDtJVtVMVc2Nk79VU1M", sizeof(gForYouItems[3].imageUrl));
+
+    for (i = 0; i < 4; i++) {
+        memcpy(gForYouIconBits[i], gForYouDefaultIconBits[i], 282);
+    }
+}
+
 static void ConnectAndLoadAll(void)
 {
     /* Only set the Spotify Connect speaker to the saved (last-used) speaker ONCE, directly at launch! */
@@ -3328,7 +3563,10 @@ static void ConnectAndLoadAll(void)
         }
     }
 
+    InitForYouDefaults();
     RefreshNowPlaying(true);
+    /* Show "Tune in" center panel upon launch ONLY when nothing is currently playing */
+    gForYouViewOpen = (gNowPlaying.trackId[0] == '\0');
     LoadLeftColumn();
     gInitialDataLoaded = true;
 }
@@ -3341,8 +3579,21 @@ static Boolean VerifyServerReachable(void)
     return (n > 0 && strncmp(gHttpBuf, "MACCOMPANION_SERVER|", 20) == 0);
 }
 
+static Boolean VerifySpotifyLoggedIn(void)
+{
+    long n;
+    if (!NetHasServer() || !gHttpBuf) return false;
+    n = NetHttpGet("/api/spotify/ping", gHttpBuf, HTTP_BUF_SIZE);
+    return (n > 0 && strncmp(gHttpBuf, "SPOTIFY|1|", 10) == 0);
+}
+
 static void TransitionToServerFound(void)
 {
+    if (!VerifySpotifyLoggedIn()) {
+        gConnState = CONN_LOGIN_ERROR;
+        RenderCanvas();
+        return;
+    }
     gConnState         = CONN_FOUND;
     gFoundCountdownSec = 3;
     gFoundStartTicks   = TickCount();
@@ -3585,8 +3836,31 @@ static void HandleCanvasClick(Point pt)
         return;
     }
 
-    /* 1. Pre-Connection Server Screens (Server1.png, Server2.png, Server3.png) */
+    /* 1. Pre-Connection Server Screens (Server1.png, Server2.png, Server3.png, login-error.png) */
     if (gConnState != CONN_READY) {
+        if (gConnState == CONN_LOGIN_ERROR) {
+            /* "Done! Retry!" button (204, 203)-(311, 229) in login-error.png */
+            if (pt.h >= 200 && pt.h <= 315 && pt.v >= 199 && pt.v <= 233) {
+                if (VerifyServerReachable()) {
+                    if (VerifySpotifyLoggedIn()) {
+                        SaveServerPrefs(NetGetServerIP());
+                        gConnState         = CONN_READY;
+                        gInitialDataLoaded = false;
+                        RenderCanvas();
+                        ConnectAndLoadAll();
+                        RenderCanvas();
+                    } else {
+                        gConnState = CONN_LOGIN_ERROR;
+                        RenderCanvas();
+                    }
+                } else {
+                    gConnState = CONN_FAILED;
+                    RenderCanvas();
+                }
+            }
+            return;
+        }
+
         if (gConnState == CONN_FOUND) {
             /* "Let's party!" button (204, 154)-(311, 180) skips remaining countdown */
             if (pt.h >= 200 && pt.h <= 315 && pt.v >= 150 && pt.v <= 184) {
@@ -3812,9 +4086,17 @@ static void HandleCanvasClick(Point pt)
                 RenderCanvas();
                 return;
             }
-            /* Magnifying glass icon on left side of search pill (156..172) triggers search if query non-empty */
-            if (pt.h <= 172 && gSearchQuery[0] != '\0') {
-                ExecuteSearchQuery();
+            /* Left smiley icon inside search pill (156..170) opens/toggles the "For You" view (ui/foryou.png) */
+            if (pt.h <= 170) {
+                gSearchFocused     = false;
+                gSearchHistoryOpen = false;
+                if (gSearchViewOpen || !gForYouViewOpen) {
+                    gSearchViewOpen = false;
+                    gForYouViewOpen = true;
+                } else if (gNowPlaying.trackId[0] != '\0' || gVisualizerOpen) {
+                    gForYouViewOpen = false;
+                }
+                RenderCanvas();
                 return;
             }
             gSearchFocused = true;
@@ -4022,8 +4304,34 @@ static void HandleCanvasClick(Point pt)
             }
             return;
         }
+        /* Center Panel: "Tune in" View (ui/tune-in.png) */
+        if (gForYouViewOpen || (!gVisualizerOpen && gNowPlaying.trackId[0] == '\0')) {
+            /* Top-right Close Circle (X) at (337, 38) 12x12 (only active when a track is playing or visualizer is open) */
+            if ((gNowPlaying.trackId[0] != '\0' || gVisualizerOpen) &&
+                pt.h >= 333 && pt.h <= 353 && pt.v >= 34 && pt.v <= 54) {
+                gForYouViewOpen = false;
+                RenderCanvas();
+                return;
+            }
+            /* Clicking one of the 4 "Tune in" playlists (x = 156..350, y = 56..265) */
+            if (pt.h >= 156 && pt.h <= 350 && pt.v >= 56 && pt.v <= 265) {
+                short slot = (pt.v < 106) ? 0 : (pt.v < 160) ? 1 : (pt.v < 214) ? 2 : 3;
+                ForYouItem *fy = &gForYouItems[slot];
+                PinActiveContextAtTopOfLeftColumn("PLAYLIST", fy->slotId, fy->title, fy->imageUrl);
+                gLeftSelected = 0;
+                gLeftScroll   = 0;
+                RenderCanvas();
+                LoadSelectedLeftItemIntoRightList();
+                RenderCanvas();
+                if (gRightCount > 0 && strcmp(gRightItems[0].kind, "TRACK") == 0) {
+                    PlayRightItemAtIndex(0);
+                }
+                return;
+            }
+            return;
+        }
         /* Clicking inside the 200x200 Visualizer box: top-right icon enters fullscreen, else cycles preset (1..7) */
-        if (gVisualizerOpen && pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235) {
+        if (gVisualizerOpen && !gForYouViewOpen && pt.h >= 156 && pt.h < 356 && pt.v >= 35 && pt.v < 235) {
             /* Top-right fullscreen icon at (336, 43) 12x12 (8px down from 35, 8px in from 356) */
             if (pt.h >= (356 - 8 - 12 - 4) && pt.h <= 354 &&
                 pt.v >= (35 + 8 - 4) && pt.v <= (35 + 8 + 12 + 4)) {
@@ -4049,6 +4357,7 @@ static void HandleCanvasClick(Point pt)
         if (pt.v >= 276 && pt.v <= 300) {
             /* Album Art / Visualizations Toggle (16..70) */
             if (pt.h >= 16 && pt.h <= 70) {
+                gForYouViewOpen = false;
                 if (pt.h <= 30 && gVisualizerOpen) {
                     gVisualizerOpen = false;
                 } else if (pt.h >= 54 && !gVisualizerOpen) {
@@ -4072,7 +4381,8 @@ static void HandleCanvasClick(Point pt)
                     TrackTransportButtonPress(BTN_LIKE);
                     NetHttpGet("/api/spotify/toggle-like", gHttpBuf, HTTP_BUF_SIZE);
                     ResetPollTimersAfterAction();
-                    if (!gHomeMode && gLeftSelected == 0) {
+                    if (gLeftSelected >= 0 && gLeftSelected < gLeftCount &&
+                        strcmp(gLeftItems[gLeftSelected].kind, "LIKED") == 0) {
                         LoadSelectedLeftItemIntoRightList();
                         RenderCanvas();
                     }
@@ -4255,6 +4565,27 @@ static void HandleKeyPress(char ch)
     /* 1. Pre-Connection Server Screens Typing */
     if (gConnState != CONN_READY) {
         short len = (short)strlen(gIpInput);
+        if (gConnState == CONN_LOGIN_ERROR) {
+            if (ch == '\r' || ch == 3 || ch == ' ') {
+                if (VerifyServerReachable()) {
+                    if (VerifySpotifyLoggedIn()) {
+                        SaveServerPrefs(NetGetServerIP());
+                        gConnState         = CONN_READY;
+                        gInitialDataLoaded = false;
+                        RenderCanvas();
+                        ConnectAndLoadAll();
+                        RenderCanvas();
+                    } else {
+                        gConnState = CONN_LOGIN_ERROR;
+                        RenderCanvas();
+                    }
+                } else {
+                    gConnState = CONN_FAILED;
+                    RenderCanvas();
+                }
+            }
+            return;
+        }
         if (gConnState == CONN_FOUND) {
             if (ch == '\r' || ch == 3 || ch == ' ') {
                 SaveServerPrefs(NetGetServerIP());
@@ -4331,6 +4662,11 @@ static void HandleKeyPress(char ch)
         RenderCanvas();
         return;
     }
+    if (ch == 27 && gForYouViewOpen && (gNowPlaying.trackId[0] != '\0' || gVisualizerOpen)) {
+        gForYouViewOpen = false;
+        RenderCanvas();
+        return;
+    }
 
     if (ch == ' ') {
         PerformTogglePlayPause(false);
@@ -4340,11 +4676,54 @@ static void HandleKeyPress(char ch)
         } else if (gRightSelected >= 0 && gRightSelected < gRightCount) {
             PlayRightItemAtIndex(gRightSelected);
         }
-    } else if (ch == 30) { /* Up Arrow */
-        TriggerPreviousTrack();
-    } else if (ch == 31) { /* Down Arrow */
-        TriggerNextTrack();
+    } else if (ch == 30 || ch == 31) {
+        /* Up / Down Arrow (and emulator mouse-wheel scroll):
+         * ONLY scroll the visible list — NEVER trigger track changes or playback! */
+        short delta = (ch == 30) ? -1 : 1;
+        Point mousePt;
+        if (gMainWindow) {
+            SetPort(gMainWindow);
+            GetMouse(&mousePt);
+        } else {
+            mousePt.h = 400;
+            mousePt.v = 100;
+        }
+        if (gSearchViewOpen) {
+            short maxScroll = gSearchCount - SEARCH_VISIBLE_ROWS;
+            if (maxScroll > 0) {
+                short newScroll = gSearchScroll + delta;
+                if (newScroll < 0) newScroll = 0;
+                if (newScroll > maxScroll) newScroll = maxScroll;
+                if (newScroll != gSearchScroll) {
+                    gSearchScroll = newScroll;
+                    RenderCanvas();
+                }
+            }
+        } else if (mousePt.h < 156) {
+            short maxScroll = gLeftCount - VISIBLE_ROWS;
+            if (maxScroll > 0) {
+                short newScroll = gLeftScroll + delta;
+                if (newScroll < 0) newScroll = 0;
+                if (newScroll > maxScroll) newScroll = maxScroll;
+                if (newScroll != gLeftScroll) {
+                    gLeftScroll = newScroll;
+                    RenderCanvas();
+                }
+            }
+        } else {
+            short maxScroll = gRightCount - VISIBLE_ROWS;
+            if (maxScroll > 0) {
+                short newScroll = gRightScroll + delta;
+                if (newScroll < 0) newScroll = 0;
+                if (newScroll > maxScroll) newScroll = maxScroll;
+                if (newScroll != gRightScroll) {
+                    gRightScroll = newScroll;
+                    RenderCanvas();
+                }
+            }
+        }
     } else if (ch >= '1' && ch <= '7') {
+        gForYouViewOpen = false;
         gVisualizerOpen = true;
         gVizMode = (short)(ch - '1');
         SaveServerPrefs(NetGetServerIP());
@@ -4368,6 +4747,7 @@ static void HandleKeyPress(char ch)
             RenderCanvas();
         }
     } else if (ch == 'v' || ch == 'V') {
+        gForYouViewOpen = false;
         gVisualizerOpen = !gVisualizerOpen;
         if (!gVisualizerOpen) {
             gVizFullscreen = false;
@@ -4640,8 +5020,8 @@ int main(void)
     NetSetIdleCallback(VisualizerNetworkIdlePump);
 
     gHttpBuf = NewPtrClear(HTTP_BUF_SIZE);
-    /* Start with initial.png placeholder graphic ("Party like it's 1984") */
-    memcpy(gCurrentArtworkBits, gInitialArtworkBits, 5200);
+    memset(gCurrentArtworkBits, 0xFF, sizeof(gCurrentArtworkBits));
+    InitForYouDefaults();
     memset(&gNowPlaying, 0, sizeof(gNowPlaying));
     SafeCopy(gNowPlaying.progressMmSs, "00:00", sizeof(gNowPlaying.progressMmSs));
     SafeCopy(gNowPlaying.durationMmSs, "00:00", sizeof(gNowPlaying.durationMmSs));
@@ -4703,20 +5083,26 @@ int main(void)
      * Startup Server Connection Flow:
      * If the user has already seen the server screen at least once and we have a saved
      * Server IP in "System Folder:Preferences:MaciSpot Prefs", immediately open the
-     * full UI on that IP and verify/load in the background. If the server does not
-     * respond at the saved IP, fall back to the server connection screen.
+     * loading screen (`loading.png`) on that IP and verify/load in the background.
+     * If the server is reachable but Spotify is not logged in, display `login-error.png`.
      */
     {
         ip_addr savedIp = 0;
         if (LoadSavedServerPrefs(&savedIp)) {
             FormatIPAddress(savedIp, gIpInput);
             NetSetServer(savedIp, DEFAULT_HTTP_PORT);
-            gConnState = CONN_READY;
+            gConnState         = CONN_READY;
+            gInitialDataLoaded = false;
             RenderCanvas();
 
             if (VerifyServerReachable()) {
-                ConnectAndLoadAll();
-                RenderCanvas();
+                if (VerifySpotifyLoggedIn()) {
+                    ConnectAndLoadAll();
+                    RenderCanvas();
+                } else {
+                    gConnState = CONN_LOGIN_ERROR;
+                    RenderCanvas();
+                }
             } else {
                 RunInitialDiscovery();
             }
@@ -4751,9 +5137,15 @@ int main(void)
                 case keyDown:
                 case autoKey:
                     if ((ev.modifiers & cmdKey) != 0) {
-                        HandleMenuChoice(MenuKey((char)(ev.message & charCodeMask)));
+                        if (ev.what == keyDown) {
+                            HandleMenuChoice(MenuKey((char)(ev.message & charCodeMask)));
+                        }
                     } else {
-                        HandleKeyPress((char)(ev.message & charCodeMask));
+                        char ch = (char)(ev.message & charCodeMask);
+                        /* Only allow autoKey repeat for Backspace (8) and Scroll/Arrow keys (30, 31) */
+                        if (ev.what == keyDown || ch == 8 || ch == 30 || ch == 31 || gSearchFocused || gConnState != CONN_READY) {
+                            HandleKeyPress(ch);
+                        }
                     }
                     break;
 

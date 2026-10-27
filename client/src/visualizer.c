@@ -2630,8 +2630,8 @@ static void RenderMode4Tunnel_FS(unsigned char *bits)
     unsigned char depthScroll = (unsigned char)(gFrameCount * 5 + (gBassPulse >> 1));
     unsigned char twistScroll = (unsigned char)(gFrameCount * 2);
 
-    short camOx = 16 + ((FAST_SIN((unsigned char)(gFrameCount * 2)) * 12) >> 7);
-    short camOy = 24 + ((FAST_COS((unsigned char)(gFrameCount * 3)) * 12) >> 7);
+    short camOx = (FAST_SIN((unsigned char)(gFrameCount * 2)) * 10) >> 7;
+    short camOy = 24 + ((FAST_COS((unsigned char)(gFrameCount * 3)) * 10) >> 7);
 
     if (!gTunnelAngle || !gTunnelDepth || !gTunnelFog) {
         RenderMode2Plasma_FS(bits);
@@ -2652,16 +2652,20 @@ static void RenderMode4Tunnel_FS(unsigned char *bits)
         short ry = y & 7;
 
         for (x = 0; x < 128; x++) {
-            short lutX = ((x * 3) >> 2) + camOx;
-            unsigned char ang = angPtr[lutX];
-            unsigned char dep = depPtr[lutX];
-            unsigned char fog = fogPtr[lutX];
-            unsigned char bandVal = eqMod[(ang >> 4) & 15];
+            short lutX = x + camOx;
+            unsigned char ang, dep, fog, bandVal, u, v, tex;
+            unsigned short lit;
+            if (lutX < 0) lutX = 0;
+            if (lutX > 127) lutX = 127;
+            ang = angPtr[lutX];
+            dep = depPtr[lutX];
+            fog = fogPtr[lutX];
+            bandVal = eqMod[(ang >> 4) & 15];
 
-            unsigned char u = (unsigned char)(ang * 2 + (dep >> 1) + twistScroll);
-            unsigned char v = (unsigned char)(dep + depthScroll - bandVal);
-            unsigned char tex = gPlasmaLut[(unsigned char)(u ^ v)] + (bandVal >> 1);
-            unsigned short lit = (unsigned short)(tex * fog) >> 6;
+            u = (unsigned char)(ang * 2 + (dep >> 1) + twistScroll);
+            v = (unsigned char)(dep + depthScroll - bandVal);
+            tex = gPlasmaLut[(unsigned char)(u ^ v)] + (bandVal >> 1);
+            lit = (unsigned short)(tex * fog) >> 6;
 
             if (lit > 63) lit = 63;
             rowVals[x] = (unsigned char)lit;
@@ -2678,7 +2682,7 @@ static void RenderMode4Tunnel_FS(unsigned char *bits)
     }
 
     {
-        short eyeX = ((64 - camOx) * 8) / 3;
+        short eyeX = (64 - camOx) * 2;
         short eyeY = (64 - camOy) * 2;
         for (b = 0; b < 16; b++) {
             unsigned char rayAng = (unsigned char)(b * 16 + gFrameCount * 2);
@@ -2719,8 +2723,8 @@ static void RenderMode5FireScope_FS(unsigned char *bits)
     {
         unsigned char pA = (unsigned char)(gFrameCount * 4);
         unsigned char pB = (unsigned char)(gFrameCount * 7 + 40);
-        short radX = 28 + (gBassPulse >> 2);
-        short radY = 22 + (gAudioEnergy >> 3);
+        short radX = 18 + (gBassPulse >> 3);
+        short radY = 28 + ((gBassPulse * 3) >> 3);
 
         for (i = 0; i < 64; i++) {
             unsigned char t = (unsigned char)(i * 4);
@@ -2938,16 +2942,17 @@ static void RenderMode7VoxelCanyon_FS(unsigned char *bits)
         }
     }
 
-    sunRadius = 16 + (gBassPulse >> 3);
+    sunRadius = 20 + (gBassPulse >> 3);
     for (y = 0; y < 100; y++) {
         unsigned char *row = colBuf + y * 100;
-        short dySun = y - 24;
+        short dySun = y - 26;
         short skyShade = (y < 48) ? (y >> 2) : 12;
         memset(row, skyShade, 100);
 
         if (abs(dySun) < sunRadius && (dySun < 2 || (y & 1) == 0)) {
             for (x = 50 - sunRadius; x <= 50 + sunRadius; x++) {
-                short dxSun = x - 50;
+                /* Aspect-correct x (5.12 screen px/col) vs y (3.22 screen px/row) by 8/5 so sun is 1:1 circular */
+                short dxSun = ((x - 50) * 8) / 5;
                 if (dxSun * dxSun + dySun * dySun < sunRadius * sunRadius) {
                     row[x] = (unsigned char)(58 - (dySun > 0 ? dySun : 0));
                 }

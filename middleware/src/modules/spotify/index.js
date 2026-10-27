@@ -1,6 +1,6 @@
 const express = require('express');
 const { createModuleStore } = require('../../core/storage');
-const { formatPipeRow, formatPipeTable, sendPipeResponse } = require('../../core/format68k');
+const { hasRenderableLatinText, sanitizeField, formatPipeRow, formatPipeTable, sendPipeResponse } = require('../../core/format68k');
 const {
   generateCodeVerifier,
   generateCodeChallenge,
@@ -538,13 +538,27 @@ function handleRouteError(req, res, err) {
   return sendPipeResponse(req, res, pipeMsg);
 }
 
+function ensureMacReadableTitle(rawTitle, artistOrFallback, fallbackLabel = 'Untitled') {
+  const cleaned = sanitizeField(rawTitle);
+  if (cleaned && hasRenderableLatinText(cleaned)) {
+    return cleaned;
+  }
+  const cleanArtist = sanitizeField(artistOrFallback);
+  if (cleanArtist && hasRenderableLatinText(cleanArtist)) {
+    return `${cleanArtist} (${fallbackLabel})`;
+  }
+  return fallbackLabel;
+}
+
 function formatTrackRow(prefix, t) {
+  const artistStr = Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : '';
+  const albumStr = t.album ? t.album.name : '';
   return [
     prefix,
     t.id || '',
-    t.name || 'Unknown',
-    Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : '',
-    t.album ? t.album.name : '',
+    ensureMacReadableTitle(t.name, artistStr, 'Track'),
+    ensureMacReadableTitle(artistStr, '', 'Unknown Artist'),
+    albumStr ? ensureMacReadableTitle(albumStr, artistStr, 'Album') : '',
     t.duration_ms || 0,
     formatTimeMmSs(t.duration_ms || 0),
     t.uri || (t.id ? `spotify:track:${t.id}` : ''),
@@ -1124,11 +1138,30 @@ router.all('/play', async (req, res) => {
 
     optimisticState.isPlaying = true;
     optimisticState.isPlayingTs = Date.now();
-    await callPlayerCommand('/me/player/play', {
-      method: 'PUT',
-      query: deviceId ? { device_id: deviceId } : undefined,
-      body,
-    });
+    try {
+      await callPlayerCommand('/me/player/play', {
+        method: 'PUT',
+        query: deviceId ? { device_id: deviceId } : undefined,
+        body,
+      });
+    } catch (playErr) {
+      if (body && body.context_uri && !customFetch && lastTrackListUris.length > 0) {
+        const fallbackBody = {
+          uris: lastTrackListUris,
+          offset: body.offset && body.offset.uri && lastTrackListUris.includes(body.offset.uri)
+            ? { uri: body.offset.uri }
+            : { position: 0 },
+        };
+        if (body.position_ms !== undefined) fallbackBody.position_ms = body.position_ms;
+        await callPlayerCommand('/me/player/play', {
+          method: 'PUT',
+          query: deviceId ? { device_id: deviceId } : undefined,
+          body: fallbackBody,
+        });
+      } else {
+        throw playErr;
+      }
+    }
     // Reset progressTs to the exact moment Spotify accepted the play command
     if (optimisticState.progressMs !== null) {
       optimisticState.progressTs = Date.now();
@@ -1943,6 +1976,7 @@ router.get('/playlist/:id/tracks', async (req, res) => {
       .map((t) => formatTrackRow('TRACK', t));
 
     // Fallback for followed third-party playlists restricted by Spotify Dev Mode Web API
+    let usedEmbedFallback = false;
     if (rows.length === 0 && !customFetch) {
       try {
         const fetchFn = getFetchImpl();
@@ -1961,6 +1995,7 @@ router.get('/playlist/:id/tracks', async (req, res) => {
               nextData.props.pageProps.state.data.entity &&
               nextData.props.pageProps.state.data.entity.trackList;
             if (Array.isArray(trackList) && trackList.length > 0) {
+              usedEmbedFallback = true;
               rows = trackList.slice(offset, offset + limit).map((tr) => {
                 const uri = tr.uri || '';
                 const id = uri.includes(':') ? uri.split(':').pop() : uri;
@@ -1983,6 +2018,9 @@ router.get('/playlist/:id/tracks', async (req, res) => {
     }
 
     recordTrackListRows(rows);
+    if (usedEmbedFallback && lastTrackListUris.length > 1) {
+      lastTrackListHasSmartTail = true;
+    }
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -2300,29 +2338,127 @@ router.get('/albums', async (req, res) => {
 });
 
 /**
+ * Fetches new release albums & singles:
+ * 1. Tries `/browse/new-releases` first (when available).
+ * 2. When Spotify Development Mode blocks `/browse/new-releases`, dynamically builds a
+ *    personalized New Releases list by querying the latest albums & singles from the
+ *    user's top and recently played artists (`/artists/:id/albums` + `/search?type=album`),
+ *    filtering out non-Latin scripts and sorting newest release_date first.
+ */
+let newReleasesCache = { items: null, ts: 0 };
+
+async function fetchNewReleaseAlbums(limit = 20) {
+  if (!customFetch && newReleasesCache.items && (Date.now() - newReleasesCache.ts) < 120000) {
+    return newReleasesCache.items.slice(0, limit);
+  }
+
+  const seenIds = new Set();
+  const seenTitleKeys = new Set();
+  const accepted = [];
+
+  const addAlbumIfValid = (a) => {
+    if (!a || !a.id || seenIds.has(a.id)) return false;
+    const rawName = String(a.name || '').trim();
+    if (!hasRenderableLatinText(rawName)) return false;
+    const cleanName = sanitizeField(rawName);
+    if (!cleanName || !hasRenderableLatinText(cleanName)) return false;
+    const artistName = Array.isArray(a.artists) && a.artists[0] ? String(a.artists[0].name || '') : '';
+    const titleKey = `${normalizeTrackTitleKey(cleanName)}::${artistName.toLowerCase().trim()}`;
+    if (titleKey !== '::' && seenTitleKeys.has(titleKey)) return false;
+    seenIds.add(a.id);
+    if (titleKey !== '::') seenTitleKeys.add(titleKey);
+    accepted.push(a);
+    return true;
+  };
+
+  try {
+    const data = await callSpotify('/browse/new-releases', { query: { limit } });
+    const browseItems = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
+    for (const a of browseItems) {
+      addAlbumIfValid(a);
+    }
+  } catch {}
+
+  if (accepted.length < limit) {
+    try {
+      const fy = await loadForYouData();
+      const seedArtists = fy.artists.slice(0, 8);
+      if (seedArtists.length > 0) {
+        const queries = seedArtists.map((ar) => {
+          if (ar.id) {
+            return callSpotify(`/artists/${encodeURIComponent(ar.id)}/albums`, {
+              query: { include_groups: 'album,single', limit: 4 },
+            }).catch(() =>
+              callSpotify('/search', {
+                query: { q: `artist:"${ar.name}"`, type: 'album', limit: 6 },
+              })
+            );
+          }
+          return callSpotify('/search', {
+            query: { q: `artist:"${ar.name}"`, type: 'album', limit: 6 },
+          });
+        });
+
+        const results = await Promise.allSettled(queries);
+        const candidates = [];
+        for (const resObj of results) {
+          if (resObj.status !== 'fulfilled' || !resObj.value) continue;
+          const list = Array.isArray(resObj.value.items)
+            ? resObj.value.items
+            : (resObj.value.albums && Array.isArray(resObj.value.albums.items) ? resObj.value.albums.items : []);
+          for (const a of list) {
+            if (a) candidates.push(a);
+          }
+        }
+        // Sort newest release_date first so the user sees the latest releases from their artists
+        candidates.sort((a, b) => String(b.release_date || '').localeCompare(String(a.release_date || '')));
+        for (const a of candidates) {
+          if (accepted.length >= Math.max(limit, 20)) break;
+          addAlbumIfValid(a);
+        }
+      }
+    } catch {}
+  }
+
+  // Fallback if user has no listening history yet
+  if (accepted.length === 0) {
+    try {
+      const data = await callSpotify('/search', {
+        query: { q: 'year:2025-2026', type: 'album', limit: Math.min(10, limit) },
+      });
+      const items = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
+      for (const a of items) {
+        addAlbumIfValid(a);
+      }
+    } catch {}
+  }
+
+  if (!customFetch && accepted.length > 0) {
+    newReleasesCache = { items: accepted, ts: Date.now() };
+  }
+  return accepted.slice(0, limit);
+}
+
+/**
  * GET /api/spotify/new-releases?limit=20
  * Lists newly released albums.
  */
 router.get('/new-releases', async (req, res) => {
   try {
     const limit = Math.min(50, parseInt(req.query.limit || '20', 10));
-    let items = [];
-    try {
-      const data = await callSpotify('/browse/new-releases', { query: { limit } });
-      items = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
-    } catch {
-      const data = await callSpotify('/search', { query: { q: 'tag:new', type: 'album', limit: Math.min(10, limit) } });
-      items = (data && data.albums && Array.isArray(data.albums.items)) ? data.albums.items : [];
-    }
-    const rows = items.filter(Boolean).map((a) => [
-      'ALBUM',
-      a.id || '',
-      a.name || 'Untitled',
-      Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '',
-      a.total_tracks || 0,
-      a.release_date || '',
-      a.uri || '',
-    ]);
+    const items = await fetchNewReleaseAlbums(limit);
+    const rows = items.filter(Boolean).map((a) => {
+      const artistStr = Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '';
+      return [
+        'ALBUM',
+        a.id || '',
+        ensureMacReadableTitle(a.name, artistStr, 'Album'),
+        ensureMacReadableTitle(artistStr, '', 'Unknown Artist'),
+        a.total_tracks || 0,
+        a.release_date || '',
+        a.uri || '',
+      ];
+    });
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -2346,16 +2482,19 @@ router.get('/album/:id/tracks', async (req, res) => {
     });
     const items = (data && Array.isArray(data.items)) ? data.items : [];
     const albumName = (albumObj && albumObj.name) || '';
-    const rows = items.map((t) => [
-      'TRACK',
-      t.id || '',
-      t.name || 'Unknown',
-      Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : '',
-      albumName,
-      t.duration_ms || 0,
-      formatTimeMmSs(t.duration_ms || 0),
-      t.uri || '',
-    ]);
+    const rows = items.map((t) => {
+      const artistStr = Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : '';
+      return [
+        'TRACK',
+        t.id || '',
+        ensureMacReadableTitle(t.name, artistStr, 'Track'),
+        ensureMacReadableTitle(artistStr, '', 'Unknown Artist'),
+        albumName ? ensureMacReadableTitle(albumName, artistStr, 'Album') : '',
+        t.duration_ms || 0,
+        formatTimeMmSs(t.duration_ms || 0),
+        t.uri || '',
+      ];
+    });
     recordTrackListRows(rows);
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, album: albumObj, items, pipe: pipe.trim() });
@@ -2377,15 +2516,18 @@ router.get('/artist/:id/albums', async (req, res) => {
       query: { limit, include_groups: 'album,single' },
     });
     const items = (data && Array.isArray(data.items)) ? data.items : [];
-    const rows = items.map((a) => [
-      'ALBUM',
-      a.id || '',
-      a.name || 'Untitled',
-      Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '',
-      a.total_tracks || 0,
-      a.release_date || '',
-      a.uri || '',
-    ]);
+    const rows = items.map((a) => {
+      const artistStr = Array.isArray(a.artists) ? a.artists.map((ar) => ar.name).join(', ') : '';
+      return [
+        'ALBUM',
+        a.id || '',
+        ensureMacReadableTitle(a.name, artistStr, 'Album'),
+        ensureMacReadableTitle(artistStr, '', 'Unknown Artist'),
+        a.total_tracks || 0,
+        a.release_date || '',
+        a.uri || '',
+      ];
+    });
     const pipe = formatPipeTable(rows);
     if (req.query.format === 'json') return res.json({ ok: true, items, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
@@ -2515,17 +2657,19 @@ router.get('/home-suggestions', async (req, res) => {
       callSpotify('/me/top/artists', { query: { time_range: 'short_term', limit: 4 } }),
       callSpotify('/me/albums', { query: { limit: 5 } }),
       callSpotify('/me/shows', { query: { limit: 3 } }),
-      callSpotify('/browse/new-releases', { query: { limit: 4 } }),
+      fetchNewReleaseAlbums(4),
     ]);
 
     const seenUris = new Set();
     const rows = [];
     const pushUnique = (kind, id, name, subtitle, count, uri) => {
-      if (!id || !name) return;
+      if (!id || !name || !hasRenderableLatinText(name)) return;
+      const cleanName = sanitizeField(name);
+      if (!cleanName || !hasRenderableLatinText(cleanName)) return;
       const key = uri || `${kind}:${id}`;
       if (seenUris.has(key)) return;
       seenUris.add(key);
-      rows.push([kind, id, name, subtitle || '', count || 0, uri || `spotify:${kind.toLowerCase()}:${id}`]);
+      rows.push([kind, id, cleanName, subtitle || '', count || 0, uri || `spotify:${kind.toLowerCase()}:${id}`]);
     };
 
     const userPlaylists = (playlistsRes.status === 'fulfilled' && playlistsRes.value && Array.isArray(playlistsRes.value.items))
@@ -2600,8 +2744,8 @@ router.get('/home-suggestions', async (req, res) => {
     }
 
     // 6. New Release Albums (up to 3)
-    if (newRelRes.status === 'fulfilled' && newRelRes.value && newRelRes.value.albums && Array.isArray(newRelRes.value.albums.items)) {
-      for (const a of newRelRes.value.albums.items.slice(0, 3)) {
+    if (newRelRes.status === 'fulfilled' && Array.isArray(newRelRes.value)) {
+      for (const a of newRelRes.value.slice(0, 3)) {
         if (a && a.id && a.name) {
           const artist = Array.isArray(a.artists) && a.artists[0] ? a.artists[0].name : '';
           pushUnique('ALBUM', a.id, a.name, artist, a.total_tracks || 0, a.uri);
@@ -2615,6 +2759,209 @@ router.get('/home-suggestions', async (req, res) => {
     }
     const pipe = formatPipeTable(capped);
     if (req.query.format === 'json') return res.json({ ok: true, rows: capped, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * Helper to split a description string into two lines of at most `maxChars` characters
+ * for the "For You" center panel in SpotiMac (ui/foryou.png).
+ */
+function splitTwoLines(text, maxChars = 21) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return ['', ''];
+  if (clean.length <= maxChars) return [clean, ''];
+
+  let splitIdx = clean.lastIndexOf(' ', maxChars);
+  if (splitIdx <= 4) splitIdx = maxChars;
+  const line1 = clean.slice(0, splitIdx).trim();
+  let line2 = clean.slice(splitIdx).trim();
+  if (line2.length > maxChars) {
+    line2 = `${line2.slice(0, maxChars - 3).trim()} ..`;
+  }
+  return [line1, line2];
+}
+
+let forYouCache = { rows: null, artists: [], ts: 0 };
+
+async function loadForYouData() {
+  if (!customFetch && forYouCache.rows && (Date.now() - forYouCache.ts) < 120000) {
+    return forYouCache;
+  }
+
+  const [topShortRes, topMedRes, recentRes] = await Promise.allSettled([
+    callSpotify('/me/top/artists', { query: { time_range: 'short_term', limit: 8 } }),
+    callSpotify('/me/top/artists', { query: { time_range: 'medium_term', limit: 8 } }),
+    callSpotify('/me/player/recently-played', { query: { limit: 25 } }),
+  ]);
+
+  const artists = [];
+  const seenArtistNames = new Set();
+  const addArtist = (id, name, imageUrl) => {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (seenArtistNames.has(key)) return;
+    seenArtistNames.add(key);
+    artists.push({ id: id || '', name: trimmed, imageUrl: imageUrl || '' });
+  };
+
+  for (const resObj of [topShortRes, topMedRes]) {
+    if (resObj.status === 'fulfilled' && resObj.value && Array.isArray(resObj.value.items)) {
+      for (const a of resObj.value.items) {
+        if (!a || !a.name) continue;
+        const imgs = Array.isArray(a.images) ? a.images : [];
+        const chosen = imgs.find((im) => im.width && im.width <= 300) || imgs[0];
+        addArtist(a.id, a.name, chosen ? chosen.url : '');
+      }
+    }
+  }
+
+  if (recentRes.status === 'fulfilled' && recentRes.value && Array.isArray(recentRes.value.items)) {
+    for (const entry of recentRes.value.items) {
+      const tr = entry && entry.track;
+      if (!tr || !Array.isArray(tr.artists) || !tr.artists[0]) continue;
+      const albImgs = (tr.album && Array.isArray(tr.album.images)) ? tr.album.images : [];
+      const chosen = albImgs.find((im) => im.width && im.width <= 300) || albImgs[0];
+      addArtist(tr.artists[0].id, tr.artists[0].name, chosen ? chosen.url : '');
+    }
+  }
+
+  const mix1Artists = artists.slice(0, 3).map((a) => a.name);
+  const mix2Artists = artists.slice(3, 6).map((a) => a.name);
+  const mix1Desc = mix1Artists.length > 0 ? `${mix1Artists.join(', ')}.` : 'Your top artists & favorites.';
+  const mix2Desc = mix2Artists.length > 0 ? `${mix2Artists.join(', ')}.` : 'More artists you love.';
+  const [mix1Line1, mix1Line2] = splitTwoLines(mix1Desc, 21);
+  const [mix2Line1, mix2Line2] = splitTwoLines(mix2Desc, 21);
+
+  const rows = [
+    ['FOR_YOU', 'discover_weekly', 'Discover Weekly', 'Your shortcut to', 'hidden gems & more ..', ''],
+    ['FOR_YOU', 'dj',              'DJ',              'All kinds of music,', 'picked by your DJ.', ''],
+    ['FOR_YOU', 'daily_mix_1',     'Daily Mix 01',    mix1Line1, mix1Line2, (artists[0] && artists[0].imageUrl) || ''],
+    ['FOR_YOU', 'daily_mix_2',     'Daily Mix 02',    mix2Line1, mix2Line2, (artists[3] && artists[3].imageUrl) || ''],
+  ];
+
+  forYouCache = { rows, artists, ts: Date.now() };
+  return forYouCache;
+}
+
+/**
+ * GET /api/spotify/for-you
+ * Returns the 4 "For You" items (Discover Weekly, DJ, Daily Mix 01, Daily Mix 02):
+ *   FOR_YOU|<slot_id>|<title>|<line1>|<line2>|<image_url>
+ */
+router.get('/for-you', async (req, res) => {
+  try {
+    const data = await loadForYouData();
+    const pipe = formatPipeTable(data.rows);
+    if (req.query.format === 'json') return res.json({ ok: true, rows: data.rows, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * GET /api/spotify/for-you/:slot/tracks
+ * Generates and returns the personalized track list for one of the 4 "For You" cards:
+ *   - `discover_weekly`
+ *   - `dj`
+ *   - `daily_mix_1`
+ *   - `daily_mix_2`
+ */
+router.get('/for-you/:slot/tracks', async (req, res) => {
+  try {
+    const slot = String(req.params.slot || '').toLowerCase().trim();
+    const fy = await loadForYouData();
+    const artists = fy.artists.map((a) => a.name);
+
+    const seenIds = new Set();
+    const seenTitleKeys = new Set();
+    const chosen = [];
+    const acceptTrack = (t) => {
+      if (!t || !t.id || seenIds.has(t.id)) return false;
+      const tk = normalizeTrackTitleKey(t.name);
+      if (tk && seenTitleKeys.has(tk)) return false;
+      seenIds.add(t.id);
+      if (tk) seenTitleKeys.add(tk);
+      chosen.push(t);
+      return true;
+    };
+
+    if (slot === 'dj') {
+      const [topTrRes, recentRes] = await Promise.allSettled([
+        callSpotify('/me/top/tracks', { query: { time_range: 'short_term', limit: 15 } }),
+        callSpotify('/me/player/recently-played', { query: { limit: 20 } }),
+      ]);
+      const topTracks = (topTrRes.status === 'fulfilled' && topTrRes.value && Array.isArray(topTrRes.value.items))
+        ? topTrRes.value.items
+        : [];
+      const recentTracks = (recentRes.status === 'fulfilled' && recentRes.value && Array.isArray(recentRes.value.items))
+        ? recentRes.value.items.map((e) => e && e.track).filter(Boolean)
+        : [];
+      const maxLen = Math.max(topTracks.length, recentTracks.length);
+      for (let i = 0; i < maxLen && chosen.length < 24; i++) {
+        if (i < topTracks.length) acceptTrack(topTracks[i]);
+        if (i < recentTracks.length && chosen.length < 24) acceptTrack(recentTracks[i]);
+      }
+    } else if (slot === 'discover_weekly') {
+      // Seed discovery from deeper offset search tracks of the user's top artists, excluding recent rotation
+      try {
+        const recentData = await callSpotify('/me/player/recently-played', { query: { limit: 30 } });
+        if (recentData && Array.isArray(recentData.items)) {
+          for (const e of recentData.items) {
+            if (e && e.track && e.track.id) {
+              seenIds.add(e.track.id);
+              const tk = normalizeTrackTitleKey(e.track.name);
+              if (tk) seenTitleKeys.add(tk);
+            }
+          }
+        }
+      } catch {}
+      const seedNames = artists.slice(0, 5);
+      const queries = seedNames.map((name) =>
+        callSpotify('/search', { query: { q: name, type: 'track', limit: 10, offset: 6 } })
+      );
+      const results = await Promise.allSettled(queries);
+      const buckets = results.map((r) =>
+        (r.status === 'fulfilled' && r.value && r.value.tracks && Array.isArray(r.value.tracks.items))
+          ? r.value.tracks.items
+          : []
+      );
+      for (let i = 0; i < 10 && chosen.length < 24; i++) {
+        for (const b of buckets) {
+          if (i < b.length && chosen.length < 24) acceptTrack(b[i]);
+        }
+      }
+    } else {
+      // daily_mix_1 (artists 0..2) or daily_mix_2 (artists 3..5)
+      const sliceStart = slot === 'daily_mix_2' ? 3 : 0;
+      let seedNames = artists.slice(sliceStart, sliceStart + 3);
+      if (seedNames.length === 0) seedNames = artists.slice(0, 3);
+      const queries = [];
+      for (const name of seedNames) {
+        queries.push(callSpotify('/search', { query: { q: name, type: 'track', limit: 10, offset: 0 } }));
+        queries.push(callSpotify('/search', { query: { q: name, type: 'track', limit: 10, offset: 10 } }));
+      }
+      const results = await Promise.allSettled(queries);
+      const buckets = results.map((r) =>
+        (r.status === 'fulfilled' && r.value && r.value.tracks && Array.isArray(r.value.tracks.items))
+          ? r.value.tracks.items
+          : []
+      );
+      for (let i = 0; i < 10 && chosen.length < 24; i++) {
+        for (const b of buckets) {
+          if (i < b.length && chosen.length < 24) acceptTrack(b[i]);
+        }
+      }
+    }
+
+    const rows = chosen.map((t) => formatTrackRow('TRACK', t));
+    recordTrackListRows(rows);
+    const pipe = formatPipeTable(rows);
+    if (req.query.format === 'json') return res.json({ ok: true, items: chosen, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);
   } catch (err) {
     return handleRouteError(req, res, err);

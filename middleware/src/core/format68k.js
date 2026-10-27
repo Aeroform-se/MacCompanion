@@ -37,8 +37,19 @@ const UNICODE_TO_MACROMAN = new Map([
 ]);
 
 /**
+ * Returns true if the string contains at least one Latin / MacRoman letter or digit.
+ */
+function hasRenderableLatinText(value) {
+  if (!value) return false;
+  return /[A-Za-z0-9\u00C0-\u024F]/.test(String(value));
+}
+
+/**
  * Sanitizes a single field for pipe-delimited output.
- * Replaces pipes with '/' and newlines/tabs with spaces.
+ * Preserves ASCII and Mac OS Roman characters (Swedish åäöÅÄÖ, French/German/Spanish accents),
+ * transliterates Latin Extended characters (e.g. Ł->L, ń->n, š->s) to base ASCII,
+ * strips non-Latin scripts (Arabic, Hebrew, CJK, Thai, Cyrillic) that System 7 fonts lack,
+ * and replaces pipes with '/' and newlines/tabs with spaces.
  */
 function sanitizeField(value) {
   if (value === null || value === undefined) return '';
@@ -46,10 +57,37 @@ function sanitizeField(value) {
   for (const [char, replacement] of Object.entries(TYPOGRAPHY_MAP)) {
     str = str.split(char).join(replacement);
   }
-  return str
+  const out = [];
+  for (const ch of str) {
+    const code = ch.codePointAt(0);
+    if (code >= 0x20 && code <= 0x7E) {
+      out.push(ch);
+    } else if (UNICODE_TO_MACROMAN.has(code)) {
+      out.push(ch);
+    } else if (code >= 0x00A0 && code <= 0x024F) {
+      // Transliterate Latin-1 / Latin Extended-A/B characters not in UNICODE_TO_MACROMAN
+      if (code === 0x0141) out.push('L');
+      else if (code === 0x0142) out.push('l');
+      else if (code === 0x00D0 || code === 0x0110) out.push('D');
+      else if (code === 0x00F0 || code === 0x0111) out.push('d');
+      else if (code === 0x0131) out.push('i');
+      else {
+        const decomposed = ch.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+        if (/^[A-Za-z0-9]$/.test(decomposed)) {
+          out.push(decomposed);
+        }
+      }
+    }
+    // Non-Latin scripts (code > 0x024F, e.g. Arabic, Hebrew, Thai, CJK, Cyrillic) are omitted cleanly
+  }
+  return out
+    .join('')
     .replace(/\|/g, '/')
     .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\(\s*\)/g, '')
+    .replace(/\[\s*\]/g, '')
     .replace(/\s+/g, ' ')
+    .replace(/^[\s\-–—:]+|[\s\-–—:]+$/g, '')
     .trim();
 }
 
@@ -111,6 +149,7 @@ function sendPipeResponse(req, res, payloadString) {
 }
 
 module.exports = {
+  hasRenderableLatinText,
   sanitizeField,
   formatPipeRow,
   formatPipeTable,

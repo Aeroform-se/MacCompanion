@@ -7,13 +7,13 @@
  */
 #define APP_NAME_STR            "SpotiMac"
 #define APP_VERSION_MAJOR_BCD   0x00
-#define APP_VERSION_MINOR_BCD   0x43
+#define APP_VERSION_MINOR_BCD   0x46
 #define APP_VERSION_STAGE       final
 #define APP_VERSION_NONFINAL    0x00
 
-#define APP_VERSION_SHORT       "0.4.3"
+#define APP_VERSION_SHORT       "0.4.6"
 #define APP_VERSION_CODENAME    "Whip the Llama's Macs"
-#define APP_VERSION_LONG        "0.4.3 \"Whip the Llama's Macs\" (SpotiMac 68k)"
-#define APP_VERSION_SLUG        "v0.4.3"
+#define APP_VERSION_LONG        "0.4.6 \"Whip the Llama's Macs\" (SpotiMac 68k)"
+#define APP_VERSION_SLUG        "v0.4.6"
 
 #endif /* VERSION_H */
