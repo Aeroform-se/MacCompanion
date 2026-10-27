@@ -4,12 +4,13 @@ const registry = require('./core/registry');
 const { ensureDataDir, DATA_DIR } = require('./core/storage');
 const { startDiscoveryServer, getLocalIpAddress, DEFAULT_UDP_PORT, DISCOVERY_MAGIC } = require('./core/discovery');
 
-// Service Modules
+// Service Modules & Versioning
+const { SERVER_NAME, SERVER_VERSION_SLUG, SERVER_CODENAME } = require('./version');
 const spotifyModule = require('./modules/spotify');
+const macaiModule = require('./modules/macai');
 
 const HTTP_PORT = parseInt(process.env.PORT || '6800', 10);
 const UDP_PORT = DEFAULT_UDP_PORT;
-const SERVER_VERSION = 'v0.3';
 
 function createApp() {
   ensureDataDir();
@@ -20,16 +21,18 @@ function createApp() {
 
   // Register standalone modules
   registry.register(spotifyModule);
+  registry.register(macaiModule);
 
-  // Mount all registered module routers (/api/spotify, etc.)
+  // Mount all registered module routers (/api/spotify, /api/macai, etc.)
   registry.mountAll(app);
 
   // Global middleware status endpoint (JSON for Web UI)
   app.get('/api/status', (req, res) => {
     res.json({
       server: {
-        name: 'MacCompanion',
-        version: SERVER_VERSION,
+        name: SERVER_NAME,
+        version: SERVER_VERSION_SLUG,
+        codename: SERVER_CODENAME,
         ip: getLocalIpAddress(),
         httpPort: HTTP_PORT,
         udpPort: UDP_PORT,

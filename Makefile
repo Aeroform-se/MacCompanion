@@ -1,4 +1,4 @@
-.PHONY: up down build logs test dev client
+.PHONY: up down build logs test dev client macai
 
 up:
 	docker-compose up -d --build
@@ -22,3 +22,7 @@ client:
 	@chmod +x scripts/build-client.sh
 	@if [ -f scripts/deploy-basilisk.sh ]; then chmod +x scripts/deploy-basilisk.sh; fi
 	./scripts/build-client.sh
+
+macai:
+	@chmod +x scripts/build-macai.sh
+	./scripts/build-macai.sh

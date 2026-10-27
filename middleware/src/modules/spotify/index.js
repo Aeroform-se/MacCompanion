@@ -17,6 +17,7 @@ const {
   generatePlaceholderArtwork,
 } = require('../../core/dither');
 const { AudioStreamEngine } = require('./audio');
+const audioHub = require('../../core/audio-hub');
 
 const router = express.Router();
 
@@ -49,6 +50,19 @@ const audioEngine = new AudioStreamEngine({
   store,
   getValidAccessToken: () => getValidAccessToken(),
   getFetchImpl: () => getFetchImpl(),
+});
+
+audioHub.registerSpotifyEngine(audioEngine, async () => {
+  try {
+    const raw = await callSpotify('/me/player');
+    if (raw && raw.is_playing) {
+      optimisticState.isPlaying = false;
+      optimisticState.isPlayingTs = Date.now();
+      audioEngine.onPause();
+      await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+      nowPlayingCache.fetchedAt = 0;
+    }
+  } catch {}
 });
 
 // Allow injecting custom fetch for unit tests

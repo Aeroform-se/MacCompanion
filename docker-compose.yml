@@ -16,5 +16,8 @@ services:
       - DATA_DIR=/app/data
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-https://aeroform-se.github.io/MacCompanion/callback.html}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       - ./data:/app/data

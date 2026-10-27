@@ -5,6 +5,7 @@ const { spawn, execSync } = require('child_process');
 const { EventEmitter } = require('events');
 const { Transform } = require('stream');
 const { DATA_DIR } = require('../../core/storage');
+const audioHub = require('../../core/audio-hub');
 const {
   generateCodeVerifier,
   generateCodeChallenge,
@@ -688,6 +689,9 @@ class AudioStreamEngine extends EventEmitter {
     proc.stdin.on('error', () => {});
 
     proc.stdout.on('data', (u8Chunk) => {
+      if (audioHub.isTtsActive()) {
+        return;
+      }
       this.bytesBroadcast += u8Chunk.length;
       if (this.state !== 'PLAYING') {
         this.state = 'PLAYING';

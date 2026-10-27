@@ -454,6 +454,87 @@
         </div>
       </div>
     </section>
+
+    <!-- Service Card 2: MacAI (Gemini, ChatGPT, Claude) -->
+    <section class="service-card" id="macai-card">
+      <div class="card-titlebar">
+        <span class="card-titlebar-label">MacAI Chat</span>
+        <span class="status-badge" id="macai-badge">Checking</span>
+      </div>
+
+      <div class="card-body">
+        <div class="service-status-line" id="macai-status-box">
+          Checking MacAI providers...
+        </div>
+
+        <!-- Provider 1: Google Gemini -->
+        <div class="config-panel" style="gap:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>1. Google Gemini</strong>
+            <span id="gemini-pill" style="font-size:11px; font-weight:bold;">Not connected</span>
+          </div>
+          <div style="font-size:11px; line-height:1.4;">
+            Generate a free key in 2 clicks at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>, or sign in via Google OAuth:
+          </div>
+          <div id="gemini-form-row" style="display:flex; gap:6px;">
+            <input type="password" id="gemini-key-input" placeholder="AIzaSy... (Google AI Studio API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
+            <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('gemini')">Save</button>
+          </div>
+          <details style="font-size:11px;">
+            <summary style="cursor:pointer; text-decoration:underline;">Or use Google OAuth 2.0 Sign-In</summary>
+            <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
+              <input type="text" id="google-client-id-input" placeholder="Google OAuth Client ID (.apps.googleusercontent.com)" style="font-family:Monaco,monospace; font-size:11px; padding:4px 6px; border:1px solid #000;" />
+              <input type="password" id="google-client-secret-input" placeholder="Google OAuth Client Secret" style="font-family:Monaco,monospace; font-size:11px; padding:4px 6px; border:1px solid #000;" />
+              <button type="button" class="mac-btn" style="font-size:11px; padding:4px 10px;" onclick="startGoogleOAuth()">Sign in with Google OAuth</button>
+            </div>
+          </details>
+          <div id="gemini-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
+            <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('gemini')">Disconnect Gemini</button>
+          </div>
+        </div>
+
+        <!-- Provider 2: OpenAI ChatGPT -->
+        <div class="config-panel" style="gap:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>2. OpenAI (ChatGPT)</strong>
+            <span id="chatgpt-pill" style="font-size:11px; font-weight:bold;">Not connected</span>
+          </div>
+          <div style="font-size:11px; line-height:1.4;">
+            Create an API key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI Platform</a> (also enables Whisper STT &amp; natural alloy TTS):
+          </div>
+          <div style="display:flex; gap:6px;">
+            <input type="password" id="chatgpt-key-input" placeholder="sk-... (OpenAI API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
+            <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('chatgpt')">Save</button>
+          </div>
+          <div id="chatgpt-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
+            <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('chatgpt')">Disconnect ChatGPT</button>
+          </div>
+        </div>
+
+        <!-- Provider 3: Anthropic Claude -->
+        <div class="config-panel" style="gap:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center;">
+            <strong>3. Anthropic (Claude)</strong>
+            <span id="claude-pill" style="font-size:11px; font-weight:bold;">Not connected</span>
+          </div>
+          <div style="font-size:11px; line-height:1.4;">
+            Create an API key at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Anthropic Console</a>:
+          </div>
+          <div style="display:flex; gap:6px;">
+            <input type="password" id="claude-key-input" placeholder="sk-ant-... (Anthropic API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
+            <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('claude')">Save</button>
+          </div>
+          <div id="claude-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
+            <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('claude')">Disconnect Claude</button>
+          </div>
+        </div>
+
+        <div class="card-footer">
+          <span id="macai-footer-label">Active: Gemini (Pro)</span>
+          <span id="macai-chats-count">0 saved chats</span>
+        </div>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -563,6 +644,86 @@
       }
     }
 
+    async function saveMacAIProviderKey(provider) {
+      const payload = {};
+      if (provider === 'gemini') {
+        const val = document.getElementById('gemini-key-input').value.trim();
+        if (!val) return;
+        payload.geminiApiKey = val;
+        document.getElementById('gemini-key-input').value = '';
+      } else if (provider === 'chatgpt') {
+        const val = document.getElementById('chatgpt-key-input').value.trim();
+        if (!val) return;
+        payload.openaiApiKey = val;
+        document.getElementById('chatgpt-key-input').value = '';
+      } else if (provider === 'claude') {
+        const val = document.getElementById('claude-key-input').value.trim();
+        if (!val) return;
+        payload.anthropicApiKey = val;
+        document.getElementById('claude-key-input').value = '';
+      }
+      await fetch('/api/macai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      await pollStatus();
+    }
+
+    async function disconnectMacAIProvider(provider) {
+      await fetch('/api/macai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disconnectProvider: provider }),
+      });
+      await pollStatus();
+    }
+
+    function startGoogleOAuth() {
+      const cid = document.getElementById('google-client-id-input').value.trim();
+      const csec = document.getElementById('google-client-secret-input').value.trim();
+      if (!cid || !csec) {
+        alert('Please enter your Google OAuth Client ID and Client Secret first.');
+        return;
+      }
+      window.location.href = `/api/macai/oauth/google/start?client_id=${encodeURIComponent(cid)}&client_secret=${encodeURIComponent(csec)}`;
+    }
+
+    function renderMacAI(macai) {
+      if (!macai) return;
+      const badge = document.getElementById('macai-badge');
+      const statusBox = document.getElementById('macai-status-box');
+      if (macai.ok) {
+        badge.textContent = 'Running OK';
+        badge.classList.add('ok');
+        statusBox.classList.add('running-ok');
+        statusBox.textContent = macai.message || 'MacAI service is running OK';
+      } else {
+        badge.textContent = 'Login Required';
+        badge.classList.remove('ok');
+        statusBox.classList.remove('running-ok');
+        statusBox.textContent = macai.message || 'Log in to at least one AI provider below';
+      }
+
+      const provs = macai.providers || {};
+      for (const id of ['gemini', 'chatgpt', 'claude']) {
+        const p = provs[id] || {};
+        const pill = document.getElementById(`${id}-pill`);
+        const disc = document.getElementById(`${id}-disconnect-row`);
+        if (pill) {
+          pill.textContent = p.enabled ? `● Connected (${p.authMode === 'oauth' ? 'OAuth' : 'API Key'})` : '○ Not connected';
+        }
+        if (disc) {
+          disc.classList.toggle('hidden', !p.enabled);
+        }
+      }
+
+      document.getElementById('macai-footer-label').textContent =
+        `Default: ${(macai.activeProvider || 'gemini').toUpperCase()} (${macai.activeTier || 'Pro'})`;
+      document.getElementById('macai-chats-count').textContent =
+        `${macai.chatCount || 0} saved chat${macai.chatCount === 1 ? '' : 's'}`;
+    }
+
     function renderUI(data) {
       const spotify = data.modules && data.modules.spotify;
       const statusBox = document.getElementById('spotify-status-box');
@@ -580,6 +741,10 @@
       document.getElementById('udp-port').textContent = `UDP: ${data.server.udpPort}`;
       if (data.server.version) {
         document.getElementById('server-version').textContent = data.server.version;
+      }
+
+      if (data.modules && data.modules.macai) {
+        renderMacAI(data.modules.macai);
       }
 
       if (!spotify) return;

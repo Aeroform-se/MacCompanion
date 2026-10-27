@@ -1,12 +1,12 @@
 {
   "name": "maccompanion-middleware",
-  "version": "0.3.0",
-  "description": "MacCompanion modular middleware server for vintage Macintosh clients (Spotify Connect & future services)",
+  "version": "0.4.0",
+  "description": "MacCompanion modular middleware server for vintage Macintosh clients (SpotiMac, MacAI & future services)",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "DATA_DIR=/tmp/maccompanion-test node tests/test-milestone1.js && DATA_DIR=/tmp/maccompanion-test node tests/test-milestone2.js"
+    "test": "DATA_DIR=/tmp/maccompanion-test node tests/test-milestone1.js && DATA_DIR=/tmp/maccompanion-test node tests/test-milestone2.js && DATA_DIR=/tmp/maccompanion-test-macai node tests/test-macai.js"
   },
   "dependencies": {
     "express": "^4.21.2",

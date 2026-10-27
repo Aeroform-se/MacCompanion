@@ -2,8 +2,8 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# Install FFmpeg and librespot for native 68k 8-bit PCM audio streaming
-RUN apk add --no-cache ffmpeg && \
+# Install FFmpeg, espeak-ng, and librespot for native 68k 8-bit PCM audio & TTS streaming
+RUN apk add --no-cache ffmpeg espeak-ng && \
     apk add --no-cache librespot --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
 
 # Install dependencies first for layer caching
