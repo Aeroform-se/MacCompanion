@@ -11,7 +11,7 @@ if (fs.existsSync(testDataDir)) {
 fs.mkdirSync(testDataDir, { recursive: true });
 
 const { createApp } = require('../src/index');
-const { SERVER_VERSION_TAG } = require('../src/version');
+const { SERVER_VERSION_SLUG } = require('../src/version');
 
 function httpRequest(port, method, reqPath, bodyObj = null) {
   return new Promise((resolve, reject) => {
@@ -37,7 +37,7 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
 }
 
 (async () => {
-  console.log(`--- MacAI Module Verification Tests (Middleware ${SERVER_VERSION_TAG}) ---`);
+  console.log(`--- MacAI Module Verification Tests (Middleware ${SERVER_VERSION_SLUG}) ---`);
   const app = createApp();
   const server = await new Promise((resolve) => {
     const s = app.listen(16810, '127.0.0.1', () => resolve(s));
@@ -77,6 +77,13 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
     const selRes = await httpRequest(16810, 'GET', '/api/macai/select?provider=openai&tier=thinking');
     assert.strictEqual(selRes.body, 'OK|openai|ChatGPT|thinking');
     console.log('[PASS] /api/macai/select ->', selRes.body);
+
+    // 6. Verify deleting all AI chats via DELETE /api/macai/chats
+    const delRes = await httpRequest(16810, 'DELETE', '/api/macai/chats');
+    const delJson = JSON.parse(delRes.body);
+    assert.strictEqual(delJson.ok, true);
+    assert.strictEqual(delJson.chatCount, 0);
+    console.log('[PASS] /api/macai/chats DELETE cleared all chat history');
 
     console.log('--- ALL MACAI TESTS PASSED ---');
   } finally {

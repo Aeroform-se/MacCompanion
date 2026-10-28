@@ -42,8 +42,8 @@
     }
 
     .mac-icon {
-      width: 100px;
-      height: 128px;
+      width: 108px;
+      height: 114px;
       display: block;
       image-rendering: pixelated;
       filter: drop-shadow(3px 3px 0px #000);
@@ -328,6 +328,60 @@
       color: #000;
     }
 
+    .subtle-btn.danger {
+      color: #b00;
+    }
+
+    .subtle-btn.danger:hover {
+      background: #b00;
+      color: #fff;
+      text-decoration: none;
+    }
+
+    /* Platform Footer / Support */
+    .platform-footer {
+      margin-top: 36px;
+      margin-bottom: 24px;
+      display: flex;
+      justify-content: center;
+      width: 100%;
+      max-width: 1000px;
+    }
+
+    .footer-pill {
+      background: #fff;
+      border: 2px solid #000;
+      box-shadow: 3px 3px 0px #000;
+      padding: 10px 22px;
+      font-size: 12px;
+      font-weight: bold;
+      text-align: center;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      line-height: 1.4;
+    }
+
+    .footer-pill a {
+      color: #000;
+      text-decoration: underline;
+      font-weight: bold;
+    }
+
+    .footer-pill a:hover {
+      background: #000;
+      color: #fff;
+      text-decoration: none;
+    }
+
+    .bitmap-heart {
+      image-rendering: pixelated;
+      display: inline-block;
+      vertical-align: middle;
+      filter: drop-shadow(1px 1px 0px rgba(0, 0, 0, 0.35));
+    }
+
     .hidden {
       display: none !important;
     }
@@ -339,10 +393,10 @@
     <img
       id="mac-icon"
       class="mac-icon"
-      src="/img/happymac.png"
-      width="100"
-      height="128"
-      alt="MacCompanion Server Status"
+      src="/img/MacCompanion-Logo.png"
+      width="108"
+      height="114"
+      alt="MacCompanion Logo"
     />
     <div id="error-code-badge" class="error-code hidden">NET_OFFLINE</div>
     <div class="platform-title-pill">
@@ -355,7 +409,7 @@
       <span>•</span>
       <span id="udp-port">UDP: 6801</span>
       <span>•</span>
-      <span id="server-version">v0.3</span>
+      <span id="server-version">v0.4.1</span>
     </div>
   </header>
 
@@ -474,20 +528,12 @@
             <span id="gemini-pill" style="font-size:11px; font-weight:bold;">Not connected</span>
           </div>
           <div style="font-size:11px; line-height:1.4;">
-            Generate a free key in 2 clicks at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>, or sign in via Google OAuth:
+            Generate a free API key in 2 clicks at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>:
           </div>
           <div id="gemini-form-row" style="display:flex; gap:6px;">
             <input type="password" id="gemini-key-input" placeholder="AIzaSy... (Google AI Studio API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
             <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('gemini')">Save</button>
           </div>
-          <details style="font-size:11px;">
-            <summary style="cursor:pointer; text-decoration:underline;">Or use Google OAuth 2.0 Sign-In</summary>
-            <div style="display:flex; flex-direction:column; gap:6px; margin-top:6px;">
-              <input type="text" id="google-client-id-input" placeholder="Google OAuth Client ID (.apps.googleusercontent.com)" style="font-family:Monaco,monospace; font-size:11px; padding:4px 6px; border:1px solid #000;" />
-              <input type="password" id="google-client-secret-input" placeholder="Google OAuth Client Secret" style="font-family:Monaco,monospace; font-size:11px; padding:4px 6px; border:1px solid #000;" />
-              <button type="button" class="mac-btn" style="font-size:11px; padding:4px 10px;" onclick="startGoogleOAuth()">Sign in with Google OAuth</button>
-            </div>
-          </details>
           <div id="gemini-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
             <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('gemini')">Disconnect Gemini</button>
           </div>
@@ -529,13 +575,26 @@
           </div>
         </div>
 
-        <div class="card-footer">
-          <span id="macai-footer-label">Active: Gemini (Pro)</span>
-          <span id="macai-chats-count">0 saved chats</span>
+        <div class="card-footer" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <div style="display:flex; gap:8px; align-items:center;">
+            <span id="macai-footer-label">Active: Gemini (Pro)</span>
+            <span>•</span>
+            <span id="macai-chats-count">0 saved chats</span>
+          </div>
+          <button type="button" id="macai-delete-chats-btn" class="subtle-btn danger" onclick="deleteAllAiChats()">Delete all chats</button>
         </div>
       </div>
     </section>
   </main>
+
+  <!-- MacCompanion Platform Footer / Support -->
+  <footer class="platform-footer">
+    <div class="footer-pill">
+      <img src="/img/heart.png" class="bitmap-heart" width="13" height="12" alt="♥" />
+      <span>Do you love MacCompanion? Support this project by <a href="https://buymeacoffee.com/MacCompanion" target="_blank" rel="noopener">Buying me a coffee</a></span>
+      <img src="/img/heart.png" class="bitmap-heart" width="13" height="12" alt="♥" />
+    </div>
+  </footer>
 
   <script>
     let editingConfig = false;
@@ -548,7 +607,7 @@
     function setPlatformMacIcon(isSad, errorCodeText) {
       const icon = document.getElementById('mac-icon');
       const badge = document.getElementById('error-code-badge');
-      const targetSrc = isSad ? '/img/sadmac.png' : '/img/happymac.png';
+      const targetSrc = isSad ? '/img/sadmac.png' : '/img/MacCompanion-Logo.png';
       if (!icon.src.endsWith(targetSrc)) {
         icon.src = targetSrc;
       }
@@ -679,14 +738,21 @@
       await pollStatus();
     }
 
-    function startGoogleOAuth() {
-      const cid = document.getElementById('google-client-id-input').value.trim();
-      const csec = document.getElementById('google-client-secret-input').value.trim();
-      if (!cid || !csec) {
-        alert('Please enter your Google OAuth Client ID and Client Secret first.');
+    async function deleteAllAiChats() {
+      if (!confirm("Are you sure you want to delete all AI chat history?")) {
         return;
       }
-      window.location.href = `/api/macai/oauth/google/start?client_id=${encodeURIComponent(cid)}&client_secret=${encodeURIComponent(csec)}`;
+      if (!confirm("Are you sure? This will delete all saved chats in MacCompanion / MacAI.")) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/macai/chats', { method: 'DELETE' });
+        await res.json();
+        await pollStatus();
+        alert("All AI chat history has been deleted.");
+      } catch (err) {
+        alert("Failed to delete chats: " + (err.message || err));
+      }
     }
 
     function renderMacAI(macai) {
@@ -722,6 +788,14 @@
         `Default: ${(macai.activeProvider || 'gemini').toUpperCase()} (${macai.activeTier || 'Pro'})`;
       document.getElementById('macai-chats-count').textContent =
         `${macai.chatCount || 0} saved chat${macai.chatCount === 1 ? '' : 's'}`;
+
+      const delBtn = document.getElementById('macai-delete-chats-btn');
+      if (delBtn) {
+        const hasChats = (macai.chatCount || 0) > 0;
+        delBtn.disabled = !hasChats;
+        delBtn.style.opacity = hasChats ? '1.0' : '0.4';
+        delBtn.style.pointerEvents = hasChats ? 'auto' : 'none';
+      }
     }
 
     function renderUI(data) {

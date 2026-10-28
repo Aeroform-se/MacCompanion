@@ -567,6 +567,10 @@ router.post('/config', (req, res) => {
     updates.anthropicApiKey = null;
   }
 
+  if (body.clearChats || body.deleteChats) {
+    updates.chats = [];
+  }
+
   store.save(updates);
   res.json({ ok: true, status: getStatus() });
 });
@@ -669,6 +673,24 @@ router.all('/select', (req, res) => {
   const saved = store.save(updates);
   const { provider, tier } = resolveActiveProviderAndTier(saved);
   return sendPipeResponse(req, res, formatPipeRow(['OK', 'SELECT', provider, PROVIDERS[provider].name, tier]) + '\n');
+});
+
+router.delete('/chats', (req, res) => {
+  store.save({ chats: [] });
+  return res.json({ ok: true, message: 'All chat history deleted', chatCount: 0 });
+});
+
+router.post('/chats/clear', (req, res) => {
+  store.save({ chats: [] });
+  return res.json({ ok: true, message: 'All chat history deleted', chatCount: 0 });
+});
+
+router.all('/clear-chats', (req, res) => {
+  store.save({ chats: [] });
+  if (req.accepts(['json', 'text']) === 'json' || req.xhr || (req.headers && req.headers['content-type'] === 'application/json')) {
+    return res.json({ ok: true, message: 'All chat history deleted', chatCount: 0 });
+  }
+  return sendPipeResponse(req, res, formatPipeRow(['OK', 'CLEARED_CHATS']) + '\n');
 });
 
 router.get('/chats', (req, res) => {

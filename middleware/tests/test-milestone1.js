@@ -56,11 +56,11 @@ async function runTests() {
   });
 
   try {
-    // 1. Test Status Web UI (Happy Mac HTML)
+    // 1. Test Status Web UI (Happy Mac / MacCompanion HTML)
     const homeRes = await httpGet('/');
     assert.strictEqual(homeRes.statusCode, 200, 'Root UI should return 200');
-    assert.ok(homeRes.body.includes('/img/sadmac.png') && homeRes.body.includes('/img/happymac.png'), 'Root UI should include Sad Mac and Happy Mac images');
-    console.log('[PASS] Status Web UI (Happy Mac) served on /');
+    assert.ok(homeRes.body.includes('/img/sadmac.png') && (homeRes.body.includes('/img/MacCompanion-Logo.png') || homeRes.body.includes('/img/happymac.png')), 'Root UI should include Sad Mac and MacCompanion Logo images');
+    console.log('[PASS] Status Web UI (MacCompanion) served on /');
 
     // 2. Test Global & Modular Status JSON
     const statusRes = await httpGet('/api/status');
