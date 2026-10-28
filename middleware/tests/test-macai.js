@@ -121,7 +121,14 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
     assert.strictEqual(pictRes.status, 200);
     assert(pictRes.headers['content-disposition'].includes('img_sample.pict'));
     assert(pictRes.buf.length > 512, 'PICT should include 512-byte disk header and data');
-    console.log(`[PASS] /api/macai/image/img_sample/pict -> 24-bit PICT v2 file (${pictRes.buf.length} bytes)`);
+    // Verify Color QuickDraw PICT v2 DirectBitsRect header fields
+    const packType = pictRes.buf.readUInt16BE(582);
+    const pixelSize = pictRes.buf.readUInt16BE(598);
+    const cmpCount = pictRes.buf.readUInt16BE(600);
+    assert.strictEqual(packType, 4, 'packType must be 4 (Component PackBits for 32/24-bit direct color)');
+    assert.strictEqual(pixelSize, 32, 'pixelSize must be 32 bits');
+    assert.strictEqual(cmpCount, 3, 'cmpCount must be 3 (RGB components)');
+    console.log(`[PASS] /api/macai/image/img_sample/pict -> 24-bit PICT v2 file (${pictRes.buf.length} bytes, packType: ${packType}, cmpCount: ${cmpCount})`);
 
     console.log('--- ALL MACAI TESTS PASSED ---');
   } finally {

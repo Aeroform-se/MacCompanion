@@ -113,7 +113,7 @@ function createPict24Bit(rgbBuffer, width, height, { includeDiskHeader = true } 
   pixMapHdr.writeUInt16BE(height, off); off += 2;      // bottom
   pixMapHdr.writeUInt16BE(width, off); off += 2;       // right
   pixMapHdr.writeUInt16BE(0, off); off += 2;           // pmVersion = 0
-  pixMapHdr.writeUInt16BE(3, off); off += 2;           // packType = 3 (PackBits 24-bit component)
+  pixMapHdr.writeUInt16BE(4, off); off += 2;           // packType = 4 (Component PackBits for 32-bit/24-bit direct color)
   pixMapHdr.writeUInt32BE(0, off); off += 4;           // packSize = 0
   pixMapHdr.writeUInt32BE(0x00480000, off); off += 4;  // hRes = 72 dpi
   pixMapHdr.writeUInt32BE(0x00480000, off); off += 4;  // vRes = 72 dpi
@@ -140,8 +140,8 @@ function createPict24Bit(rgbBuffer, width, height, { includeDiskHeader = true } 
   rectsBuf.writeUInt16BE(0x0000, off); off += 2;  // mode = 0 (srcCopy)
   pushChunk(rectsBuf);
 
-  // Scanline data: packType = 3 (24-bit PackBits):
-  const wideCount = (width * 4) > 250;
+  // Scanline data: packType = 4 (Component PackBits for 32-bit/24-bit direct color):
+  const wideCount = (width * 4) >= 250;
   for (let y = 0; y < height; y++) {
     const rScan = Buffer.alloc(width);
     const gScan = Buffer.alloc(width);
