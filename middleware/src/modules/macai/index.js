@@ -12,8 +12,8 @@ const PROVIDERS = {
     id: 'gemini',
     name: 'Gemini',
     tiers: {
-      Fast: 'gemini-3.5-flash-lite',
-      Pro: 'gemini-3.5-flash',
+      Fast: 'gemini-3-flash-preview',
+      Pro: 'gemini-3-flash-preview',
       Thinking: 'gemini-3.6-flash',
     },
   },
@@ -184,14 +184,14 @@ async function callGeminiChat(messages, tier = 'Pro', data = store.load()) {
   const auth = getProviderAuth(data).gemini;
   const fetchFn = getFetchImpl();
   const cleanTier = normalizeTier(tier) || 'Pro';
-  const primaryModel = PROVIDERS.gemini.tiers[cleanTier] || 'gemini-3.5-flash';
+  const primaryModel = PROVIDERS.gemini.tiers[cleanTier] || 'gemini-3-flash-preview';
   const fallbackChain = [
     primaryModel,
-    'gemini-3.5-flash',
-    'gemini-3.6-flash',
-    'gemini-3.5-flash-lite',
     'gemini-3-flash-preview',
-    'gemini-2.5-flash',
+    'gemini-3.6-flash',
+    'gemini-3.5-flash',
+    'gemini-flash-lite-latest',
+    'gemini-3.5-flash-lite',
   ];
   const modelsToTry = [...new Set(fallbackChain)];
 
@@ -213,40 +213,48 @@ async function callGeminiChat(messages, tier = 'Pro', data = store.load()) {
 
   let lastErr = null;
   for (const model of modelsToTry) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent${querySuffix}`;
-    const body = {
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents,
-      generationConfig: {
-        temperature: cleanTier === 'Thinking' ? 0.4 : 0.7,
-        maxOutputTokens: 2048,
-      },
-    };
-    const res = await fetchFn(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const parts =
-        json &&
-        json.candidates &&
-        json.candidates[0] &&
-        json.candidates[0].content &&
-        Array.isArray(json.candidates[0].content.parts)
-          ? json.candidates[0].content.parts
-          : [];
-      const nonThoughtText = parts
-        .filter((p) => !p.thought)
-        .map((p) => p.text || '')
-        .join('')
-        .trim();
-      const text = nonThoughtText || parts.map((p) => p.text || '').join('').trim();
-      if (text) return text;
-    } else {
-      const errText = await res.text().catch(() => '');
-      lastErr = new Error(`Gemini error (${res.status}): ${errText.slice(0, 120)}`);
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent${querySuffix}`;
+      const body = {
+        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+        contents,
+        generationConfig: {
+          temperature: cleanTier === 'Thinking' ? 0.4 : 0.7,
+          maxOutputTokens: 2048,
+        },
+      };
+      const fetchOpts = {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      };
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        fetchOpts.signal = AbortSignal.timeout(6000);
+      }
+      const res = await fetchFn(url, fetchOpts);
+      if (res.ok) {
+        const json = await res.json();
+        const parts =
+          json &&
+          json.candidates &&
+          json.candidates[0] &&
+          json.candidates[0].content &&
+          Array.isArray(json.candidates[0].content.parts)
+            ? json.candidates[0].content.parts
+            : [];
+        const nonThoughtText = parts
+          .filter((p) => !p.thought)
+          .map((p) => p.text || '')
+          .join('')
+          .trim();
+        const text = nonThoughtText || parts.map((p) => p.text || '').join('').trim();
+        if (text) return text;
+      } else {
+        const errText = await res.text().catch(() => '');
+        lastErr = new Error(`Gemini error (${res.status}): ${errText.slice(0, 120)}`);
+      }
+    } catch (e) {
+      lastErr = e;
     }
   }
   throw lastErr || new Error('Gemini returned an empty response');
