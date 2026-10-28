@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MacCompanion</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="36x38" href="/img/MacCompanion-Logo.png">
+  <link rel="shortcut icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" href="/img/MacCompanion-Logo.png">
   <style>
     * {
       box-sizing: border-box;
@@ -42,11 +46,12 @@
     }
 
     .mac-icon {
-      width: 108px;
-      height: 114px;
+      width: 184px;
+      height: 173px;
       display: block;
       image-rendering: pixelated;
       filter: drop-shadow(3px 3px 0px #000);
+      object-fit: contain;
     }
 
     .platform-title-pill {
@@ -393,15 +398,12 @@
     <img
       id="mac-icon"
       class="mac-icon"
-      src="/img/MacCompanion-Logo.png"
-      width="108"
-      height="114"
-      alt="MacCompanion Logo"
+      src="/img/MacCompanion-Logo-server.png"
+      width="184"
+      height="173"
+      alt="MacCompanion"
     />
     <div id="error-code-badge" class="error-code hidden">NET_OFFLINE</div>
-    <div class="platform-title-pill">
-      <h1 class="platform-title">MacCompanion</h1>
-    </div>
     <div class="platform-meta">
       <span id="server-status-text">Server Online</span>
       <span>•</span>
@@ -409,7 +411,7 @@
       <span>•</span>
       <span id="udp-port">UDP: 6801</span>
       <span>•</span>
-      <span id="server-version">v0.4.1</span>
+      <span id="server-version">v0.4.2</span>
     </div>
   </header>
 
@@ -607,7 +609,7 @@
     function setPlatformMacIcon(isSad, errorCodeText) {
       const icon = document.getElementById('mac-icon');
       const badge = document.getElementById('error-code-badge');
-      const targetSrc = isSad ? '/img/sadmac.png' : '/img/MacCompanion-Logo.png';
+      const targetSrc = isSad ? '/img/sadmac.png' : '/img/MacCompanion-Logo-server.png';
       if (!icon.src.endsWith(targetSrc)) {
         icon.src = targetSrc;
       }
