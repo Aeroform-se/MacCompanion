@@ -326,10 +326,10 @@ class RealTimePacer extends Transform {
       const durationMs = (slice.length / LIBRESPOT_BYTES_PER_SEC) * 1000;
       const now = performance.now();
 
-      // If starting fresh or resuming after a pause (> 200ms gap), allow a 160ms pre-fill burst
+      // If starting fresh or resuming after a pause (> 200ms gap), allow a 300ms pre-fill burst
       // so the 68k client's double-buffer fills immediately without initial underrun jitter
       if (now - this.nextFrameTimeMs > 200) {
-        this.nextFrameTimeMs = now - 160;
+        this.nextFrameTimeMs = now - 300;
       }
 
       const delayMs = Math.max(0, this.nextFrameTimeMs - now);
@@ -379,6 +379,9 @@ class AudioStreamEngine extends EventEmitter {
     this.tcpServer = null;
     this.tcpClients = new Set();
     this.httpClients = new Set();
+    this.tcpPendingChunks = [];
+    this.tcpPendingBytes = 0;
+    this.tcpFlushTimer = null;
     this.currentRateHz = 22255;
     this.currentFilterChain = '';
     this.state = 'STOPPED'; // STOPPED | AWAITING_SPEAKER_AUTH | STARTING | READY | PLAYING | UNAVAILABLE
@@ -518,7 +521,47 @@ class AudioStreamEngine extends EventEmitter {
     return active ? active.name : DEVICE_NAME;
   }
 
+  clearTcpPending() {
+    this.tcpPendingChunks = [];
+    this.tcpPendingBytes = 0;
+    if (this.tcpFlushTimer) {
+      clearTimeout(this.tcpFlushTimer);
+      this.tcpFlushTimer = null;
+    }
+  }
+
+  flushTcpPending() {
+    if (this.tcpFlushTimer) {
+      clearTimeout(this.tcpFlushTimer);
+      this.tcpFlushTimer = null;
+    }
+    if (this.tcpPendingBytes <= 0 || this.tcpPendingChunks.length === 0) {
+      return;
+    }
+    const payload = this.tcpPendingChunks.length === 1
+      ? this.tcpPendingChunks[0]
+      : Buffer.concat(this.tcpPendingChunks, this.tcpPendingBytes);
+    this.tcpPendingChunks = [];
+    this.tcpPendingBytes = 0;
+
+    const activeMac = this.getActiveMacClient();
+    const targetIp = activeMac && activeMac.ip ? activeMac.ip : null;
+    const hasMatchingSocket = targetIp
+      ? Array.from(this.tcpClients).some((s) => !s.destroyed && cleanIpAddress(s.remoteAddress) === targetIp)
+      : false;
+
+    for (const sock of this.tcpClients) {
+      if (!sock.destroyed && sock.writable) {
+        if (hasMatchingSocket && cleanIpAddress(sock.remoteAddress) !== targetIp) {
+          continue;
+        }
+        sock.write(payload);
+      }
+    }
+  }
+
   onPause() {
+    this.clearTcpPending();
     if (this.pacer && typeof this.pacer.flush === 'function') {
       this.pacer.flush();
     }
@@ -697,20 +740,18 @@ class AudioStreamEngine extends EventEmitter {
         this.state = 'PLAYING';
       }
 
-      const activeMac = this.getActiveMacClient();
-      const targetIp = activeMac && activeMac.ip ? activeMac.ip : null;
-      const hasMatchingSocket = targetIp
-        ? Array.from(this.tcpClients).some((s) => !s.destroyed && cleanIpAddress(s.remoteAddress) === targetIp)
-        : false;
-
-      for (const sock of this.tcpClients) {
-        if (!sock.destroyed && sock.writable) {
-          if (hasMatchingSocket && cleanIpAddress(sock.remoteAddress) !== targetIp) {
-            continue;
-          }
-          sock.write(u8Chunk);
+      // Coalesce outgoing TCP chunks to ~1460 bytes (1 Ethernet MSS) or 60ms max delay
+      // to cut MacTCP / Ethernet receive interrupt overhead on the 68k Mac by 3-4x
+      if (this.tcpClients.size > 0) {
+        this.tcpPendingChunks.push(u8Chunk);
+        this.tcpPendingBytes += u8Chunk.length;
+        if (this.tcpPendingBytes >= 1460) {
+          this.flushTcpPending();
+        } else if (!this.tcpFlushTimer) {
+          this.tcpFlushTimer = setTimeout(() => this.flushTcpPending(), 60);
         }
       }
+
       for (const res of this.httpClients) {
         if (!res.writableEnded) {
           res.write(u8Chunk);
@@ -951,6 +992,7 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   stopProcesses() {
+    this.clearTcpPending();
     if (this.pacer) {
       try {
         this.pacer.destroy();

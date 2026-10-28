@@ -10,8 +10,9 @@ add_application(SpotiMac
     src/main.c
     src/network.c
     src/visualizer.c
+    src/visualizer_020.c
     src/resources.r
 )
 
 target_compile_options(SpotiMac PRIVATE -O2 -Wall -Wno-multichar -Wno-pointer-sign)
-set_source_files_properties(src/visualizer.c PROPERTIES COMPILE_FLAGS "-O3")
+set_source_files_properties(src/visualizer_020.c PROPERTIES COMPILE_FLAGS "-O2 -m68020")

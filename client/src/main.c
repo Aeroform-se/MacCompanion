@@ -272,6 +272,9 @@ static unsigned long   gSeekLockUntilTicks   = 0;
 static Boolean         gPauseSynced          = false;
 static unsigned long   gLastKeyPressTicks    = 0;
 static unsigned long   gLastHoverTick        = 0;
+static Point           gLastHoverMouse       = { -32000, -32000 };
+static Boolean         gLastHoverMiniMode    = false;
+static Boolean         gInBackground         = false;
 static Boolean         gAudioConfigFetched   = false;
 
 /* Fullscreen Visualizer Mini-Player 1-bit Bitmap Cache */
@@ -293,10 +296,15 @@ static char           *gHttpBuf           = NULL;
 
 /* Forward declarations */
 static void RenderCanvas(void);
+static void RenderLeftColumnOnly(void);
+static void RenderRightColumnOnly(void);
+static void RenderSearchListOnly(void);
 static void RenderSearchBarOnly(void);
 static void RenderSearchHoverRows(short oldIdx, short newIdx);
 static void RenderTransportBarOnly(void);
 static void RenderTimelineOnly(void);
+static void VisualizerNetworkIdlePump(void);
+static long GetCurrentInterpolatedProgressMs(void);
 static void ConnectAndLoadAll(void);
 
 /* ============================================================================
@@ -682,13 +690,19 @@ static void GetPipeField(const char *line, short fieldIndex, char *outBuf, short
 static void FormatMmSs(long ms, char *outBuf)
 {
     long totalSec;
-    long mins;
-    long secs;
+    short mins;
+    short secs;
     if (ms < 0) ms = 0;
-    totalSec = ms / 1000;
-    mins = totalSec / 60;
-    secs = totalSec % 60;
-    sprintf(outBuf, "%02ld:%02ld", mins, secs);
+    totalSec = ms / 1000L;
+    mins = (short)(totalSec / 60L);
+    secs = (short)(totalSec - (long)mins * 60L);
+    if (mins > 99) mins = 99;
+    outBuf[0] = (char)('0' + (mins / 10));
+    outBuf[1] = (char)('0' + (mins % 10));
+    outBuf[2] = ':';
+    outBuf[3] = (char)('0' + (secs / 10));
+    outBuf[4] = (char)('0' + (secs % 10));
+    outBuf[5] = '\0';
 }
 
 /* ============================================================================
@@ -742,20 +756,6 @@ static short FindPlayingTrackIndexInRightList(void)
         }
     }
     return -1;
-}
-
-static Boolean IsRightItemCurrentlyPlaying(short idx)
-{
-    RightItem *it;
-    if (idx < 0 || idx >= gRightCount) return false;
-    it = &gRightItems[idx];
-
-    /* For Album browsing lists, highlight the selected album row */
-    if (strcmp(it->kind, "ALBUM") == 0) {
-        return (idx == gRightSelected);
-    }
-
-    return (idx == FindPlayingTrackIndexInRightList());
 }
 
 static void MaybeAppendSmartQueueToRightList(Boolean isInitialLoad);
@@ -863,7 +863,7 @@ static void DrawCenteredLineBelowArt(const char *str, short yBaseline)
     } else {
         SafeCopy(truncBuf, str, sizeof(truncBuf));
     }
-    pixelW = TextWidth(truncBuf, 0, len);
+    pixelW = len * 6; /* Monaco 9 is fixed 6px per character */
     startX = 256 - (pixelW / 2);
     if (startX < 152) startX = 152;
     TextMode(srcBic); /* White text on black background */
@@ -1072,7 +1072,7 @@ static void RenderSearchHistoryDropdown(void)
 static void DrawCenteredCardText(const char *str, short yBaseline)
 {
     short len = (short)strlen(str);
-    short w   = TextWidth(str, 0, len);
+    short w   = len * 6; /* Monaco 9 is fixed 6px per character */
     MoveTo(256 - (w / 2), yBaseline);
     DrawText(str, 0, len);
 }
@@ -1379,12 +1379,14 @@ static void InstallMiniPlayerWDEF(WindowPtr win)
     if (!win) return;
     stub = NewHandle(6);
     if (stub && *stub) {
-        unsigned char *p = (unsigned char *)*stub;
+        unsigned char jmpCode[6];
         long procAddr = (long)MiniPlayerWDEF;
         HLock(stub);
-        p[0] = 0x4E; /* 68000 JMP.L absolute */
-        p[1] = 0xF9;
-        *(long *)(p + 2) = procAddr;
+        jmpCode[0] = 0x4E; /* 68000 JMP.L absolute */
+        jmpCode[1] = 0xF9;
+        *(long *)(jmpCode + 2) = procAddr;
+        /* BlockMove automatically flushes the 68020/68030/68040 instruction cache on Mac OS */
+        BlockMove(jmpCode, *stub, 6);
         ((WindowPeek)win)->windowDefProc = stub;
         MiniPlayerWDEF(0, win, wCalcRgns, 0);
     }
@@ -1447,6 +1449,7 @@ static void DragWindowWithAudio(WindowPtr win, Point startGlobalPt)
             if (AudioStreamIsRunning()) {
                 AudioStreamPump();
             }
+            VisualizerNetworkIdlePump();
             GetMouse(&curGlobalPt);
             newLeft = origLeft + (curGlobalPt.h - startGlobalPt.h);
             newTop  = origTop  + (curGlobalPt.v - startGlobalPt.v);
@@ -1582,7 +1585,7 @@ static void DrawMiniPlayerContentsAt(short ox, short oy, Boolean drawOverlayFram
     } else {
         SafeCopy(truncTitle, titleLine, sizeof(truncTitle));
     }
-    w = TextWidth(truncTitle, 0, len);
+    w = len * 6; /* Monaco 9 is fixed 6px per character */
     startX = (MINI_W / 2) - (w / 2);
     if (startX < 6) startX = 6;
     MoveTo(ox + startX, oy + 15);
@@ -2120,11 +2123,210 @@ static void RenderTimelineOnly(void)
     SetPort(savePort);
 }
 
+static void DrawLeftColumnContents(void)
+{
+    Rect r, sqRect, thumbRect;
+    short i;
+
+    for (i = 0; i < VISIBLE_ROWS; i++) {
+        short itemIdx = gLeftScroll + i;
+        short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
+        const unsigned char *iconBits;
+        if (itemIdx >= gLeftCount) break;
+        iconBits = GetLeftItemIconBits(&gLeftItems[itemIdx]);
+
+        if (itemIdx == gLeftSelected) {
+            /* White highlight pill with rounded right edge + black icon + right arrow */
+            SetRect(&r, 7, rowTop, 137, rowTop + 12);
+            EraseRoundRect(&r, 8, 8);
+            SetRect(&sqRect, 7, rowTop, 15, rowTop + 12);
+            EraseRect(&sqRect);
+            BlitIcon1Bit(iconBits, 9, 9, 9, rowTop + 2, srcOr);
+            BlitIcon1Bit(gIconListPlayArrow, 3, 6, 131, rowTop + 3, srcCopy);
+            TextMode(srcOr); /* Black text */
+        } else {
+            BlitIcon1Bit(iconBits, 9, 9, 9, rowTop + 2, srcBic);
+            TextMode(srcBic); /* White text on black background */
+        }
+        MoveTo(24, rowTop + 9);
+        DrawCStringTruncated(gLeftItems[itemIdx].name, 17);
+    }
+
+    /* Left Scrollbar (x = 144, y = 35..266) — hidden when list fits without scrolling */
+    if (gLeftCount > VISIBLE_ROWS) {
+        short trackH = 231;
+        short thumbH = (short)((long)trackH * VISIBLE_ROWS / gLeftCount);
+        short maxScroll = gLeftCount - VISIBLE_ROWS;
+        short thumbY;
+        if (thumbH < 20) thumbH = 20;
+        thumbY = 35 + (short)((long)(trackH - thumbH) * gLeftScroll / maxScroll);
+        DrawVerticalDottedLine(144, 35, 266, true);
+        SetRect(&thumbRect, 143, thumbY, 146, thumbY + thumbH);
+        FillRect(&thumbRect, &qd.gray);
+    }
+    TextMode(srcOr);
+}
+
+static void DrawRightColumnContents(void)
+{
+    Rect r, thumbRect;
+    short i;
+    /* Hoist playing track lookup once per column draw instead of per row (saves up to 1,024 strcmp/strstr calls) */
+    short playingIdx = FindPlayingTrackIndexInRightList();
+
+    for (i = 0; i < VISIBLE_ROWS; i++) {
+        short itemIdx = gRightScroll + i;
+        short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
+        Boolean isRowPlaying;
+        if (itemIdx >= gRightCount) break;
+
+        if (strcmp(gRightItems[itemIdx].kind, "QUEUE_SEP") == 0) {
+            /* Smart queue separator line + 8x7 sparkle icon (ui/add-queue-separator.png) */
+            DrawHorizontalDottedLine(363, 419, rowTop + 6, true);
+            BlitIcon1Bit(gIconQueueSeparator, 8, 7, 424, rowTop + 2, srcBic);
+            DrawHorizontalDottedLine(435, 497, rowTop + 6, true);
+            continue;
+        }
+
+        if (strcmp(gRightItems[itemIdx].kind, "ALBUM") == 0) {
+            isRowPlaying = (itemIdx == gRightSelected);
+        } else {
+            isRowPlaying = (itemIdx == playingIdx);
+        }
+
+        if (isRowPlaying) {
+            /* Rounded highlight pill + left play arrow icon on currently playing track (UI-update.png) */
+            SetRect(&r, 362, rowTop, 499, rowTop + 12);
+            EraseRoundRect(&r, 10, 10);
+            BlitIcon1Bit(gIconListPlayArrow, 3, 6, 367, rowTop + 3, srcCopy);
+            TextMode(srcOr); /* Black text */
+        } else {
+            TextMode(srcBic); /* White text on black background */
+        }
+        MoveTo(373, rowTop + 9);
+        DrawCStringTruncated(gRightItems[itemIdx].name, 19);
+    }
+
+    /* Right Scrollbar (x = 504, y = 35..266) — hidden when list fits without scrolling */
+    if (gRightCount > VISIBLE_ROWS) {
+        short trackH = 231;
+        short thumbH = (short)((long)trackH * VISIBLE_ROWS / gRightCount);
+        short maxScroll = gRightCount - VISIBLE_ROWS;
+        short thumbY;
+        if (thumbH < 20) thumbH = 20;
+        thumbY = 35 + (short)((long)(trackH - thumbH) * gRightScroll / maxScroll);
+        DrawVerticalDottedLine(504, 35, 266, true);
+        SetRect(&thumbRect, 503, thumbY, 506, thumbY + thumbH);
+        FillRect(&thumbRect, &qd.gray);
+    }
+    TextMode(srcOr);
+}
+
+static void RenderLeftColumnOnly(void)
+{
+    GrafPtr savePort;
+    Rect colRect;
+
+    if (!gMainWindow || gMiniPlayerMode || gConnState != CONN_READY || !gInitialDataLoaded ||
+        gSearchViewOpen || gSearchHistoryOpen || gSpeakerPopupOpen || gAboutModalOpen ||
+        (gVisualizerOpen && gVizFullscreen)) {
+        RenderCanvas();
+        return;
+    }
+
+    GetPort(&savePort);
+    if (gOffscreenReady) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMainWindow);
+    }
+
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+
+    SetRect(&colRect, 0, 22, 152, 273);
+    PaintRect(&colRect);
+    DrawLeftColumnContents();
+
+    if (gOffscreenReady) {
+        SetPort(gMainWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &colRect, &colRect, srcCopy, NULL);
+    }
+    SetPort(savePort);
+}
+
+static void RenderRightColumnOnly(void)
+{
+    GrafPtr savePort;
+    Rect colRect;
+
+    if (!gMainWindow || gMiniPlayerMode || gConnState != CONN_READY || !gInitialDataLoaded ||
+        gSearchViewOpen || gSearchHistoryOpen || gSpeakerPopupOpen || gAboutModalOpen ||
+        (gVisualizerOpen && gVizFullscreen)) {
+        RenderCanvas();
+        return;
+    }
+
+    GetPort(&savePort);
+    if (gOffscreenReady) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMainWindow);
+    }
+
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+
+    SetRect(&colRect, 360, 22, CANVAS_W, 273);
+    PaintRect(&colRect);
+    DrawRightColumnContents();
+
+    if (gOffscreenReady) {
+        SetPort(gMainWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &colRect, &colRect, srcCopy, NULL);
+    }
+    SetPort(savePort);
+}
+
+static void RenderSearchListOnly(void)
+{
+    GrafPtr savePort;
+    Rect searchRect;
+
+    if (!gMainWindow || gMiniPlayerMode || gConnState != CONN_READY || !gSearchViewOpen ||
+        gSpeakerPopupOpen || gAboutModalOpen) {
+        RenderCanvas();
+        return;
+    }
+
+    GetPort(&savePort);
+    if (gOffscreenReady) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMainWindow);
+    }
+
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+
+    SetRect(&searchRect, 60, 34, 476, 273);
+    PaintRect(&searchRect);
+    RenderSearchCenterPanel();
+
+    if (gOffscreenReady) {
+        SetPort(gMainWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &searchRect, &searchRect, srcCopy, NULL);
+    }
+    SetPort(savePort);
+}
+
 static void RenderCanvas(void)
 {
     GrafPtr savePort;
-    Rect r, sqRect, thumbRect;
-    short i;
+    Rect r;
 
     if (gMiniPlayerMode) {
         RenderMiniPlayer();
@@ -2228,42 +2430,7 @@ static void RenderCanvas(void)
         RenderSearchCenterPanel();
     } else {
         /* 2A. Left Column: Library / Home Items with 9x9 Icons (ui/library.png & library-icons.psd) */
-        for (i = 0; i < VISIBLE_ROWS; i++) {
-            short itemIdx = gLeftScroll + i;
-            short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
-            const unsigned char *iconBits;
-            if (itemIdx >= gLeftCount) break;
-            iconBits = GetLeftItemIconBits(&gLeftItems[itemIdx]);
-
-            if (itemIdx == gLeftSelected) {
-                /* White highlight pill with rounded right edge + black icon + right arrow */
-                SetRect(&r, 7, rowTop, 137, rowTop + 12);
-                EraseRoundRect(&r, 8, 8);
-                SetRect(&sqRect, 7, rowTop, 15, rowTop + 12);
-                EraseRect(&sqRect);
-                BlitIcon1Bit(iconBits, 9, 9, 9, rowTop + 2, srcOr);
-                BlitIcon1Bit(gIconListPlayArrow, 3, 6, 131, rowTop + 3, srcCopy);
-                TextMode(srcOr); /* Black text */
-            } else {
-                BlitIcon1Bit(iconBits, 9, 9, 9, rowTop + 2, srcBic);
-                TextMode(srcBic); /* White text on black background */
-            }
-            MoveTo(24, rowTop + 9);
-            DrawCStringTruncated(gLeftItems[itemIdx].name, 17);
-        }
-
-        /* Left Scrollbar (x = 144, y = 35..266) — hidden when list fits without scrolling */
-        if (gLeftCount > VISIBLE_ROWS) {
-            short trackH = 231;
-            short thumbH = (short)((long)trackH * VISIBLE_ROWS / gLeftCount);
-            short maxScroll = gLeftCount - VISIBLE_ROWS;
-            short thumbY;
-            if (thumbH < 20) thumbH = 20;
-            thumbY = 35 + (short)((long)(trackH - thumbH) * gLeftScroll / maxScroll);
-            DrawVerticalDottedLine(144, 35, 266, true);
-            SetRect(&thumbRect, 143, thumbY, 146, thumbY + thumbH);
-            FillRect(&thumbRect, &qd.gray);
-        }
+        DrawLeftColumnContents();
 
         /* 2B. Center Column: "For You" Page, Visualizer, or 200x200 1-Bit Album Artwork */
         if (gForYouViewOpen || (!gVisualizerOpen && gNowPlaying.trackId[0] == '\0')) {
@@ -2293,44 +2460,7 @@ static void RenderCanvas(void)
         }
 
         /* 2C. Right Column: Tracks List (x = 362..499, y = 35..243) */
-        for (i = 0; i < VISIBLE_ROWS; i++) {
-            short itemIdx = gRightScroll + i;
-            short rowTop  = LIST_TOP_Y + i * ROW_HEIGHT;
-            if (itemIdx >= gRightCount) break;
-
-            if (strcmp(gRightItems[itemIdx].kind, "QUEUE_SEP") == 0) {
-                /* Smart queue separator line + 8x7 sparkle icon (ui/add-queue-separator.png) */
-                DrawHorizontalDottedLine(363, 419, rowTop + 6, true);
-                BlitIcon1Bit(gIconQueueSeparator, 8, 7, 424, rowTop + 2, srcBic);
-                DrawHorizontalDottedLine(435, 497, rowTop + 6, true);
-                continue;
-            }
-
-            if (IsRightItemCurrentlyPlaying(itemIdx)) {
-                /* Rounded highlight pill + left play arrow icon on currently playing track (UI-update.png) */
-                SetRect(&r, 362, rowTop, 499, rowTop + 12);
-                EraseRoundRect(&r, 10, 10);
-                BlitIcon1Bit(gIconListPlayArrow, 3, 6, 367, rowTop + 3, srcCopy);
-                TextMode(srcOr); /* Black text */
-            } else {
-                TextMode(srcBic); /* White text on black background */
-            }
-            MoveTo(373, rowTop + 9);
-            DrawCStringTruncated(gRightItems[itemIdx].name, 19);
-        }
-
-        /* Right Scrollbar (x = 504, y = 35..266) — hidden when list fits without scrolling */
-        if (gRightCount > VISIBLE_ROWS) {
-            short trackH = 231;
-            short thumbH = (short)((long)trackH * VISIBLE_ROWS / gRightCount);
-            short maxScroll = gRightCount - VISIBLE_ROWS;
-            short thumbY;
-            if (thumbH < 20) thumbH = 20;
-            thumbY = 35 + (short)((long)(trackH - thumbH) * gRightScroll / maxScroll);
-            DrawVerticalDottedLine(504, 35, 266, true);
-            SetRect(&thumbRect, 503, thumbY, 506, thumbY + thumbH);
-            FillRect(&thumbRect, &qd.gray);
-        }
+        DrawRightColumnContents();
 
         /* 2D. Search History Dropdown Overlay (ui/search-history.png) */
         if (gSearchHistoryOpen) {
@@ -2421,7 +2551,7 @@ static void RenderCanvas(void)
         const char *verLine    = "SpotiMac " APP_VERSION_SHORT;
         const char *codeLine   = "\"" APP_VERSION_CODENAME "\"";
         const char *coffeeLine = "Like SpotiMac? Buy me a coffee!";
-        short w;
+        short len, w;
 
         SetRect(&shadowRect, 140, 38, 380, 254);
         FillRoundRect(&shadowRect, 10, 10, &qd.gray);
@@ -2436,17 +2566,20 @@ static void RenderCanvas(void)
         BlitIcon1Bit(gSpotiMacLogoBits, 49, 44, 232, 44, srcCopy);
 
         TextMode(srcOr);
-        w = TextWidth(verLine, 0, (short)strlen(verLine));
+        len = (short)strlen(verLine);
+        w = len * 6;
         MoveTo(256 - (w / 2), 102);
-        DrawText(verLine, 0, (short)strlen(verLine));
+        DrawText(verLine, 0, len);
 
-        w = TextWidth(codeLine, 0, (short)strlen(codeLine));
+        len = (short)strlen(codeLine);
+        w = len * 6;
         MoveTo(256 - (w / 2), 116);
-        DrawText(codeLine, 0, (short)strlen(codeLine));
+        DrawText(codeLine, 0, len);
 
-        w = TextWidth(coffeeLine, 0, (short)strlen(coffeeLine));
+        len = (short)strlen(coffeeLine);
+        w = len * 6;
         MoveTo(256 - (w / 2), 134);
-        DrawText(coffeeLine, 0, (short)strlen(coffeeLine));
+        DrawText(coffeeLine, 0, len);
 
         /* 58x58 QR code (~2x2cm on 9" Compact Mac CRT) centered at (227, 144) */
         BlitIcon1Bit(gAboutQrCodeBits, 58, 58, 227, 144, srcCopy);
@@ -2474,61 +2607,86 @@ static void RenderCanvas(void)
  * Fast 30 FPS Visualizer Blit:
  * Renders the next 200x200 visualizer frame into `gVisualizerBits` and blits ONLY
  * the 200x200 center square `(156, 35)-(356, 235)` directly to `gMainWindow`
- * (and `gOffscreenPort`), avoiding full-screen 512x322 redraw overhead.
+ * (or composites in `gOffscreenPort` when an overlay is active), avoiding full-screen
+ * 512x322 redraw overhead and eliminating duplicate CopyBits/expansions.
  */
 static void RenderVisualizerFastFrameEx(Boolean fromIdlePump)
 {
     GrafPtr savePort;
+    long curProgMs;
     (void)fromIdlePump;
 
-    if (!gVisualizerOpen || !gInitialDataLoaded || gForYouViewOpen || gMiniPlayerMode || gSearchViewOpen || gConnState != CONN_READY) return;
-    if (!gMainWindow) return;
-
-    if (gSpeakerPopupOpen || gAboutModalOpen) {
-        RenderCanvas();
+    if (gInBackground || !gVisualizerOpen || !gInitialDataLoaded || gForYouViewOpen ||
+        gMiniPlayerMode || gSearchViewOpen || gSpeakerPopupOpen || gAboutModalOpen ||
+        gConnState != CONN_READY) {
         return;
     }
+    if (!gMainWindow) return;
+
+    curProgMs = GetCurrentInterpolatedProgressMs();
 
     if (gVizFullscreen) {
-        VisualizerRenderFrameFullscreen(
-            gVizMode,
-            gNowPlaying.isPlaying,
-            gNowPlaying.progressMs,
-            gNowPlaying.trackId,
-            NULL
-        );
-        RenderCanvas();
+        if (gOffscreenReady && gOffscreenBits) {
+            Rect fullRect;
+            /* Expand 256x161 -> 512x322 directly into gOffscreenBits ONCE (saves a duplicate 20,608-byte expansion) */
+            VisualizerRenderFrameFullscreen(
+                gVizMode,
+                gNowPlaying.isPlaying,
+                curProgMs,
+                gNowPlaying.trackId,
+                (unsigned char *)gOffscreenBits
+            );
+            GetPort(&savePort);
+            SetPort(&gOffscreenPort);
+            DrawFullscreenMiniPlayerCached();
+            DrawVizFullscreenHoverIcon(CANVAS_W - 8 - 12, 8, true);
+            SetRect(&fullRect, 0, 0, CANVAS_W, CANVAS_H);
+            SetPort(gMainWindow);
+            CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &fullRect, &fullRect, srcCopy, NULL);
+            SetPort(savePort);
+        } else {
+            VisualizerRenderFrameFullscreen(
+                gVizMode,
+                gNowPlaying.isPlaying,
+                curProgMs,
+                gNowPlaying.trackId,
+                NULL
+            );
+            RenderCanvas();
+        }
         return;
     }
 
     VisualizerRenderFrame(
         gVizMode,
         gNowPlaying.isPlaying,
-        gNowPlaying.progressMs,
+        curProgMs,
         gNowPlaying.trackId,
         gVisualizerBits
     );
 
     GetPort(&savePort);
-    if (gOffscreenReady) {
+    if (gSearchHistoryOpen && gOffscreenReady) {
         Rect vizRect;
         SetPort(&gOffscreenPort);
         BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
-        if (gSearchHistoryOpen) {
-            TextFont(kFontIDMonaco);
-            TextSize(9);
-            TextFace(normal);
-            RenderSearchHistoryDropdown();
-            SetRect(&vizRect, 156, 17, 356, 235);
-        } else {
-            if (gVizHover) {
-                DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
-            }
-            SetRect(&vizRect, 156, 35, 356, 235);
-        }
+        TextFont(kFontIDMonaco);
+        TextSize(9);
+        TextFace(normal);
+        RenderSearchHistoryDropdown();
+        SetRect(&vizRect, 156, 17, 356, 235);
+        SetPort(gMainWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &vizRect, &vizRect, srcCopy, NULL);
+    } else if (gVizHover && gOffscreenReady) {
+        Rect vizRect;
+        SetPort(&gOffscreenPort);
+        BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
+        DrawVizFullscreenHoverIcon(356 - 8 - 12, 35 + 8, false);
+        SetRect(&vizRect, 156, 35, 356, 235);
         SetPort(gMainWindow);
         CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &vizRect, &vizRect, srcCopy, NULL);
     } else {
+        /* Fast single-blit path when no dropdown or hover icon overlaps the 200x200 box! */
         SetPort(gMainWindow);
         BlitIcon1Bit(gVisualizerBits, 200, 200, 156, 35, srcCopy);
         if (gSearchHistoryOpen) {
@@ -2557,13 +2715,15 @@ static void RenderVisualizerFastFrame(void)
 static void VisualizerNetworkIdlePump(void)
 {
     unsigned long nowTicks;
-    if (!gVisualizerOpen || !gInitialDataLoaded || gForYouViewOpen || gMiniPlayerMode || gSearchViewOpen || gAboutModalOpen || gConnState != CONN_READY) {
+    if (gInBackground || !gVisualizerOpen || !gInitialDataLoaded || gForYouViewOpen ||
+        gMiniPlayerMode || gSearchViewOpen || gAboutModalOpen || gSpeakerPopupOpen ||
+        gConnState != CONN_READY) {
         return;
     }
     nowTicks = TickCount();
     if ((nowTicks - gLastVizTicks) >= 2) {
-        gLastVizTicks = nowTicks;
         RenderVisualizerFastFrameEx(true);
+        gLastVizTicks = TickCount();
     }
 }
 
@@ -2648,8 +2808,10 @@ static void LockOptimisticTrackSelection(const char *id, const char *name, const
 }
 
 /* Per-Mac network identity so multiple Macs on the same LAN each have their own speaker name */
-static char gMySpeakerName[40] = "Macintosh 68k";
-static char gMyClientId[32]    = "mac68k";
+static char gMySpeakerName[40]    = "Macintosh 68k";
+static char gMyClientId[32]       = "mac68k";
+static char gEncMySpeakerName[96] = "Macintosh%2068k";
+static char gEncMyClientId[64]    = "mac68k";
 
 /*
  * Reads the Macintosh's own Machine Name ('STR ' -16413 in System 7 Sharing Setup)
@@ -2693,6 +2855,9 @@ static void InitMyMacSpeakerName(void)
     } else {
         SafeCopy(gMyClientId, "mac68k", sizeof(gMyClientId));
     }
+
+    UrlEncode(gMyClientId, gEncMyClientId, sizeof(gEncMyClientId));
+    UrlEncode(gMySpeakerName, gEncMySpeakerName, sizeof(gEncMySpeakerName));
 }
 
 static Boolean IsThisMacSelectedSpeaker(void)
@@ -2846,7 +3011,7 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     char field[96];
     char incomingTrackId[64];
     char prevTrackId[64];
-    char encTrack[64], encId[64], encName[96], path[280];
+    char encTrack[64], path[280];
     Boolean trackLocked, seekLocked, sameTrack, prevWasPlaying;
 
     if (!NetHasServer() || !gHttpBuf) return;
@@ -2855,14 +3020,12 @@ static void RefreshNowPlaying(Boolean fetchArtIfChanged)
     prevProgressMs = GetCurrentInterpolatedProgressMs();
     SafeCopy(prevTrackId, gNowPlaying.trackId, sizeof(prevTrackId));
     UrlEncode((gNowPlaying.trackName[0] != '\0') ? gNowPlaying.trackId : "", encTrack, sizeof(encTrack));
-    UrlEncode(gMyClientId, encId, sizeof(encId));
-    UrlEncode(gMySpeakerName, encName, sizeof(encName));
     sprintf(
         path,
         "/api/spotify/poll?track_id=%s&client_id=%s&client_name=%s",
         encTrack,
-        encId,
-        encName
+        gEncMyClientId,
+        gEncMySpeakerName
     );
 
     reqStartTicks = TickCount();
@@ -3115,7 +3278,10 @@ static void MaybeAppendSmartQueueToRightList(Boolean isInitialLoad)
                 GetPipeField(line, 3, it->artist, sizeof(it->artist));
                 GetPipeField(line, 5, durStr, sizeof(durStr));
                 it->durationMs = atol(durStr);
-                FormatMmSs(it->durationMs, it->durationMmSs);
+                GetPipeField(line, 6, it->durationMmSs, sizeof(it->durationMmSs));
+                if (it->durationMmSs[0] == '\0') {
+                    FormatMmSs(it->durationMs, it->durationMmSs);
+                }
                 GetPipeField(line, 7, it->uri, sizeof(it->uri));
             }
             if (!nextLine) break;
@@ -3152,7 +3318,10 @@ static void ParseTracksResponseIntoRightList(const char *buf)
             GetPipeField(line, 3, it->artist, sizeof(it->artist));
             GetPipeField(line, 5, durStr, sizeof(durStr));
             it->durationMs = atol(durStr);
-            FormatMmSs(it->durationMs, it->durationMmSs);
+            GetPipeField(line, 6, it->durationMmSs, sizeof(it->durationMmSs));
+            if (it->durationMmSs[0] == '\0') {
+                FormatMmSs(it->durationMs, it->durationMmSs);
+            }
             GetPipeField(line, 7, it->uri, sizeof(it->uri));
         } else if (strcmp(rowKind, "ALBUM") == 0) {
             RightItem *it = &gRightItems[gRightCount++];
@@ -3460,8 +3629,6 @@ static void PlayRightItemAtIndex(short idx)
         ResetPollTimersAfterAction();
         if (gNowPlaying.isLiked != prevLiked) {
             RenderTransportBarOnly();
-        } else if (gVisualizerOpen) {
-            RenderCanvas();
         }
     }
 }
@@ -3546,15 +3713,16 @@ static void TriggerToggleLike(void)
 
     wantLiked = !gNowPlaying.isLiked;
     gNowPlaying.isLiked = wantLiked;
-    RenderCanvas();
+    RenderTransportBarOnly();
 
     NetHttpGet("/api/spotify/toggle-like", gHttpBuf, HTTP_BUF_SIZE);
     ResetPollTimersAfterAction();
 
     /* If "Liked" is currently selected in the left column, refresh the right column tracklist */
-    if (!gHomeMode && gLeftSelected == 0) {
+    if (gLeftSelected >= 0 && gLeftSelected < gLeftCount &&
+        strcmp(gLeftItems[gLeftSelected].kind, "LIKED") == 0) {
         LoadSelectedLeftItemIntoRightList();
-        RenderCanvas();
+        RenderRightColumnOnly();
     }
 }
 
@@ -3746,7 +3914,7 @@ static void ActivateSearchResultRow(short idx)
 static void LoadDevicesAndTogglePopover(void)
 {
     long n;
-    char encId[64], encName[96], path[220];
+    char path[220];
     if (gSpeakerPopupOpen) {
         gSpeakerPopupOpen = false;
         RenderCanvas();
@@ -3756,9 +3924,7 @@ static void LoadDevicesAndTogglePopover(void)
     if (!NetHasServer() || !gHttpBuf) return;
     gDeviceCount = 0;
 
-    UrlEncode(gMyClientId, encId, sizeof(encId));
-    UrlEncode(gMySpeakerName, encName, sizeof(encName));
-    sprintf(path, "/api/spotify/devices?client_id=%s&client_name=%s", encId, encName);
+    sprintf(path, "/api/spotify/devices?client_id=%s&client_name=%s", gEncMyClientId, gEncMySpeakerName);
 
     n = NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
     if (n > 0) {
@@ -3831,22 +3997,20 @@ static void ConnectAndLoadAll(void)
     if (!gStartupSpeakerSent) {
         gStartupSpeakerSent = true;
         if (gSavedSpeakerId[0] != '\0' || gSavedSpeakerName[0] != '\0') {
-            char encId[96], encName[96], encClientId[64], encClientName[96], path[512];
+            char encId[96], encName[96], path[512];
             if (gSavedSpeakerName[0] != '\0') {
                 SafeCopy(gNowPlaying.deviceName, gSavedSpeakerName, sizeof(gNowPlaying.deviceName));
             }
             gSpeakerLockUntilTicks = TickCount() + 300; /* 5s initial startup lock */
             UrlEncode(gSavedSpeakerId, encId, sizeof(encId));
             UrlEncode(gSavedSpeakerName, encName, sizeof(encName));
-            UrlEncode(gMyClientId, encClientId, sizeof(encClientId));
-            UrlEncode(gMySpeakerName, encClientName, sizeof(encClientName));
             sprintf(
                 path,
                 "/api/spotify/transfer?device_id=%s&device_name=%s&startup=1&client_id=%s&client_name=%s",
                 encId,
                 encName,
-                encClientId,
-                encClientName
+                gEncMyClientId,
+                gEncMySpeakerName
             );
             NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
         }
@@ -3984,12 +4148,17 @@ static void UpdateHoverState(void)
     Boolean histHoverChanged = false;
     Boolean changed = false;
 
-    if (gConnState != CONN_READY) return;
+    if (gInBackground || gConnState != CONN_READY) return;
 
     if (gMiniPlayerMode) {
         if (!gMiniWindow) return;
         SetPort(gMiniWindow);
         GetMouse(&pt);
+        if (pt.h == gLastHoverMouse.h && pt.v == gLastHoverMouse.v && gLastHoverMiniMode && !gSuppressPlayHover) {
+            return;
+        }
+        gLastHoverMouse    = pt;
+        gLastHoverMiniMode = true;
         newBtn = HitTestMiniPlayerHover(pt);
         if (newBtn != BTN_PLAY && gSuppressPlayHover) {
             gSuppressPlayHover = false;
@@ -4008,6 +4177,11 @@ static void UpdateHoverState(void)
     if (!gMainWindow) return;
     SetPort(gMainWindow);
     GetMouse(&pt);
+    if (pt.h == gLastHoverMouse.h && pt.v == gLastHoverMouse.v && !gLastHoverMiniMode && !gSuppressPlayHover) {
+        return;
+    }
+    gLastHoverMouse    = pt;
+    gLastHoverMiniMode = false;
 
     if (gVisualizerOpen && gVizFullscreen && !gSearchViewOpen && !gAboutModalOpen) {
         Point miniPt;
@@ -4067,8 +4241,15 @@ static void UpdateHoverState(void)
     }
 
     if (changed) {
+        Boolean vizRunning = (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen &&
+                              !gForYouViewOpen && !gAboutModalOpen && !gSpeakerPopupOpen);
         if (gSearchViewOpen && oldSearchRow != gSearchHoverRow && oldBtn == gHoverBtn && !vizHoverChanged) {
             RenderSearchHoverRows(oldSearchRow, gSearchHoverRow);
+        } else if (vizRunning && vizHoverChanged && !histHoverChanged && oldSearchRow == gSearchHoverRow) {
+            /* Next 30 FPS visualizer frame (<=2 ticks away) will draw/clear the hover icon automatically! */
+            if (oldBtn != gHoverBtn && !gVizFullscreen) {
+                RenderTransportBarOnly();
+            }
         } else if (!vizHoverChanged && !histHoverChanged && oldSearchRow == gSearchHoverRow &&
                    !(gVisualizerOpen && gVizFullscreen) && !gSpeakerPopupOpen && !gAboutModalOpen) {
             RenderTransportBarOnly();
@@ -4101,6 +4282,7 @@ static Boolean TrackTransportButtonPress(short btnId)
         if (AudioStreamIsRunning()) {
             AudioStreamPump();
         }
+        VisualizerNetworkIdlePump();
         GetMouse(&pt);
     }
     gPressedBtn = BTN_NONE;
@@ -4136,7 +4318,7 @@ static void PerformTogglePlayPause(Boolean useButtonTracking)
     if (useButtonTracking) {
         TrackTransportButtonPress(BTN_PLAY);
     } else {
-        RenderCanvas();
+        RenderTransportBarOnly();
     }
 
     if (wantPlay) {
@@ -4152,7 +4334,7 @@ static void PerformTogglePlayPause(Boolean useButtonTracking)
     }
 
     ResetPollTimersAfterAction();
-    RenderCanvas();
+    RenderTransportBarOnly();
 }
 
 /* ============================================================================
@@ -4507,7 +4689,7 @@ static void HandleCanvasClick(Point pt)
                     if (newScroll > maxScroll) newScroll = maxScroll;
                     if (newScroll != gSearchScroll) {
                         gSearchScroll = newScroll;
-                        RenderCanvas();
+                        RenderSearchListOnly();
                     }
                     if (AudioStreamIsRunning()) {
                         AudioStreamPump();
@@ -4543,11 +4725,12 @@ static void HandleCanvasClick(Point pt)
                 if (newScroll > maxScroll) newScroll = maxScroll;
                 if (newScroll != gLeftScroll) {
                     gLeftScroll = newScroll;
-                    RenderCanvas();
+                    RenderLeftColumnOnly();
                 }
                 if (AudioStreamIsRunning()) {
                     AudioStreamPump();
                 }
+                VisualizerNetworkIdlePump();
                 GetMouse(&curPt);
             } while (StillDown());
             return;
@@ -4561,7 +4744,7 @@ static void HandleCanvasClick(Point pt)
                 gLeftSelected       = clickedRow;
                 gLastLeftClickedRow = clickedRow;
                 gLastLeftClickTicks = now;
-                RenderCanvas();
+                RenderLeftColumnOnly();
 
                 LoadSelectedLeftItemIntoRightList();
                 RenderCanvas();
@@ -4626,11 +4809,12 @@ static void HandleCanvasClick(Point pt)
                 if (newScroll > maxScroll) newScroll = maxScroll;
                 if (newScroll != gRightScroll) {
                     gRightScroll = newScroll;
-                    RenderCanvas();
+                    RenderRightColumnOnly();
                 }
                 if (AudioStreamIsRunning()) {
                     AudioStreamPump();
                 }
+                VisualizerNetworkIdlePump();
                 GetMouse(&curPt);
             } while (StillDown());
             return;
@@ -4832,7 +5016,6 @@ static void HandleCanvasClick(Point pt)
             /* Timeline Scrubber (140..372) */
             if (pt.h >= 140 && pt.h <= 372) {
                 char path[96];
-                short pct = 0;
                 long targetMs;
                 Point curPt = pt;
                 unsigned long lastTick = 0;
@@ -4841,14 +5024,16 @@ static void HandleCanvasClick(Point pt)
                 do {
                     unsigned long nowTick = TickCount();
                     long newProg = gNowPlaying.progressMs;
+                    short px;
                     if (nowTick == lastTick) continue;
                     lastTick = nowTick;
 
-                    pct = (short)(((long)(curPt.h - 143) * 100L) / 226L);
-                    if (pct < 0) pct = 0;
-                    if (pct > 100) pct = 100;
+                    px = curPt.h - 143;
+                    if (px < 0) px = 0;
+                    if (px > 226) px = 226;
                     if (gNowPlaying.durationMs > 0) {
-                        newProg = (gNowPlaying.durationMs * pct) / 100L;
+                        newProg = (gNowPlaying.durationMs / 226L) * (long)px +
+                                  ((gNowPlaying.durationMs % 226L) * (long)px) / 226L;
                     }
                     if (newProg != gNowPlaying.progressMs) {
                         gNowPlaying.progressMs = newProg;
@@ -4858,6 +5043,7 @@ static void HandleCanvasClick(Point pt)
                     if (AudioStreamIsRunning()) {
                         AudioStreamPump();
                     }
+                    VisualizerNetworkIdlePump();
                     GetMouse(&curPt);
                 } while (StillDown());
                 gPressedBtn = BTN_NONE;
@@ -4905,6 +5091,7 @@ static void HandleCanvasClick(Point pt)
                     if (AudioStreamIsRunning()) {
                         AudioStreamPump();
                     }
+                    VisualizerNetworkIdlePump();
                     GetMouse(&curPt);
                 } while (StillDown());
                 gPressedBtn = BTN_NONE;
@@ -5074,7 +5261,7 @@ static void HandleKeyPress(char ch)
                 if (newScroll > maxScroll) newScroll = maxScroll;
                 if (newScroll != gSearchScroll) {
                     gSearchScroll = newScroll;
-                    RenderCanvas();
+                    RenderSearchListOnly();
                 }
             }
         } else if (mousePt.h < 156) {
@@ -5085,7 +5272,7 @@ static void HandleKeyPress(char ch)
                 if (newScroll > maxScroll) newScroll = maxScroll;
                 if (newScroll != gLeftScroll) {
                     gLeftScroll = newScroll;
-                    RenderCanvas();
+                    RenderLeftColumnOnly();
                 }
             }
         } else {
@@ -5096,7 +5283,7 @@ static void HandleKeyPress(char ch)
                 if (newScroll > maxScroll) newScroll = maxScroll;
                 if (newScroll != gRightScroll) {
                     gRightScroll = newScroll;
-                    RenderCanvas();
+                    RenderRightColumnOnly();
                 }
             }
         }
@@ -5206,6 +5393,10 @@ static void HandleMenuChoice(long menuChoice)
                 TriggerToggleLike();
             } else if (itemID == iChooseSpeaker) {
                 if (gMiniPlayerMode) ExitMiniPlayerMode();
+                if (gVizFullscreen) {
+                    gVizFullscreen = false;
+                    gHoverBtn      = BTN_NONE;
+                }
                 LoadDevicesAndTogglePopover();
             }
             break;
@@ -5406,6 +5597,9 @@ int main(void)
     NetSetIdleCallback(VisualizerNetworkIdlePump);
 
     gHttpBuf = NewPtrClear(HTTP_BUF_SIZE);
+    if (!gHttpBuf) {
+        return 1;
+    }
     memset(gCurrentArtworkBits, 0xFF, sizeof(gCurrentArtworkBits));
     InitForYouDefaults();
     memset(&gNowPlaying, 0, sizeof(gNowPlaying));
@@ -5501,7 +5695,9 @@ int main(void)
 
     while (gRunning) {
         unsigned long nowTicks;
+        unsigned long sleepTicks;
         Boolean gotEvent;
+        Boolean vizActive;
 
         SystemTask();
 
@@ -5510,10 +5706,28 @@ int main(void)
             AudioStreamPump();
         }
 
+        nowTicks  = TickCount();
+        vizActive = (!gInBackground && gConnState == CONN_READY && gVisualizerOpen &&
+                     !gMiniPlayerMode && !gSearchViewOpen && !gForYouViewOpen &&
+                     !gAboutModalOpen && !gSpeakerPopupOpen);
+        if (gInBackground) {
+            sleepTicks = AudioStreamIsRunning() ? 2 : 15;
+        } else if (vizActive) {
+            unsigned long elapsedViz = nowTicks - gLastVizTicks;
+            sleepTicks = (elapsedViz >= 2) ? 0 : (2 - elapsedViz);
+            if (AudioStreamIsRunning() && sleepTicks > 1) sleepTicks = 1;
+        } else if (AudioStreamIsRunning()) {
+            sleepTicks = 1;
+        } else if (gConnState != CONN_READY || gNowPlaying.isPlaying || gSearchFocused) {
+            sleepTicks = 2;
+        } else {
+            sleepTicks = 6;
+        }
+
         gotEvent = WaitNextEvent(
             everyEvent,
             &ev,
-            (AudioStreamIsRunning() || (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen)) ? 0 : 2,
+            sleepTicks,
             NULL
         );
 
@@ -5550,13 +5764,20 @@ int main(void)
                         EndUpdate(gMiniWindow);
                     }
                     break;
+
+                case osEvt:
+                    if (((ev.message >> 24) & 0xFF) == suspendResumeMessage) {
+                        gInBackground = ((ev.message & resumeFlag) == 0);
+                        gLastHoverMouse.h = -32000;
+                    }
+                    break;
             }
         }
 
         nowTicks = TickCount();
 
         /* Track button hover states and search result row hover at most once per VBL tick */
-        if (nowTicks != gLastHoverTick) {
+        if (!gInBackground && nowTicks != gLastHoverTick) {
             gLastHoverTick = nowTicks;
             UpdateHoverState();
         }
@@ -5586,10 +5807,11 @@ int main(void)
         }
 
         /* Real-Time 30 FPS Visualizer Pump (every 2 ticks = 30.075 FPS on 60.15 Hz Mac VBL) */
-        if (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen && !gAboutModalOpen &&
+        if (!gInBackground && gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen &&
+            !gForYouViewOpen && !gAboutModalOpen && !gSpeakerPopupOpen &&
             (nowTicks - gLastVizTicks) >= 2) {
-            gLastVizTicks = nowTicks;
             RenderVisualizerFastFrame();
+            gLastVizTicks = TickCount();
         }
 
         /* Tick-anchored local timeline progression (drift-free 60.15 Hz hardware tick clock) */
@@ -5609,29 +5831,40 @@ int main(void)
             }
         }
 
-        /* Poll /api/spotify/poll every ~3s (180 ticks), or ~4s (240 ticks) when visualizer is active;
-         * pause background polls while actively typing in the search bar. */
+        /* Poll /api/spotify/poll every ~3s (180 ticks) when playing, ~4s (240 ticks) when visualizer is active,
+         * or ~6s (360 ticks) when paused/idle; pause background polls while actively typing in the search bar. */
         {
-            unsigned long pollIntervalTicks = (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen) ? 240UL : 180UL;
+            unsigned long pollIntervalTicks = !gNowPlaying.isPlaying ? 360UL :
+                ((gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen) ? 240UL : 180UL);
             Boolean activelyTypingSearch = (gSearchFocused && gLastKeyPressTicks != 0 && (nowTicks - gLastKeyPressTicks) < 150UL);
             if (NetHasServer() && !gAboutModalOpen && !activelyTypingSearch &&
                 (nowTicks - gLastPollTicks) >= pollIntervalTicks) {
                 NowPlayingState prevState = gNowPlaying;
                 short prevRightCount = gRightCount;
+                char prevArtTrackId[64];
+                Boolean canvasChanged, transportChanged;
+
+                SafeCopy(prevArtTrackId, gLoadedArtTrackId, sizeof(prevArtTrackId));
                 gLastPollTicks = nowTicks;
                 RefreshNowPlaying(true);
-                if (prevRightCount != gRightCount ||
-                    prevState.isPlaying != gNowPlaying.isPlaying ||
-                    prevState.isLiked != gNowPlaying.isLiked ||
-                    prevState.volumePct != gNowPlaying.volumePct ||
-                    strcmp(prevState.trackId, gNowPlaying.trackId) != 0 ||
-                    strcmp(prevState.trackName, gNowPlaying.trackName) != 0 ||
-                    strcmp(prevState.artistName, gNowPlaying.artistName) != 0 ||
-                    strcmp(prevState.durationMmSs, gNowPlaying.durationMmSs) != 0 ||
-                    strcmp(prevState.shuffleMode, gNowPlaying.shuffleMode) != 0 ||
-                    strcmp(prevState.repeatState, gNowPlaying.repeatState) != 0 ||
-                    strcmp(prevState.deviceName, gNowPlaying.deviceName) != 0) {
+
+                canvasChanged = (prevRightCount != gRightCount ||
+                                 strcmp(prevState.trackId, gNowPlaying.trackId) != 0 ||
+                                 strcmp(prevState.trackName, gNowPlaying.trackName) != 0 ||
+                                 strcmp(prevState.artistName, gNowPlaying.artistName) != 0 ||
+                                 strcmp(prevArtTrackId, gLoadedArtTrackId) != 0);
+                transportChanged = (prevState.isPlaying != gNowPlaying.isPlaying ||
+                                    prevState.isLiked != gNowPlaying.isLiked ||
+                                    prevState.volumePct != gNowPlaying.volumePct ||
+                                    strcmp(prevState.durationMmSs, gNowPlaying.durationMmSs) != 0 ||
+                                    strcmp(prevState.shuffleMode, gNowPlaying.shuffleMode) != 0 ||
+                                    strcmp(prevState.repeatState, gNowPlaying.repeatState) != 0 ||
+                                    strcmp(prevState.deviceName, gNowPlaying.deviceName) != 0);
+
+                if (canvasChanged) {
                     RenderCanvas();
+                } else if (transportChanged) {
+                    RenderTransportBarOnly();
                 } else if (strcmp(prevState.progressMmSs, gNowPlaying.progressMmSs) != 0) {
                     RenderTimelineOnly();
                 }

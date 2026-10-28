@@ -16,6 +16,8 @@ function createApp() {
   ensureDataDir();
 
   const app = express();
+  app.disable('x-powered-by');
+  app.set('etag', false);
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
@@ -103,6 +105,7 @@ if (require.main === module) {
     console.log(`[MacCompanion] HTTP Server listening on http://0.0.0.0:${HTTP_PORT} (LAN: http://${ip}:${HTTP_PORT})`);
     console.log(`[MacCompanion] Persistent data directory: ${DATA_DIR}`);
   });
+  server.keepAliveTimeout = 15000;
 
   const udpSocket = startDiscoveryServer({
     httpPort: HTTP_PORT,

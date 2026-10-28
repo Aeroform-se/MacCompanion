@@ -233,6 +233,20 @@ function normalizeSpotifyUri(input, defaultType = 'track') {
 let likedCache = { uri: null, liked: false, ts: 0 };
 const likedStatusMap = new Map(); // uri -> { liked: boolean, ts: number }
 const artworkCache = new Map();
+const trackArtworkUrlMap = new Map(); // trackId -> imageUrl
+
+function rememberTrackArtworkUrl(trackObj) {
+  if (!trackObj || !trackObj.id) return;
+  const images = (trackObj.album && Array.isArray(trackObj.album.images)) ? trackObj.album.images : [];
+  const chosen = images.find((img) => img.width && img.width <= 300) || images[0];
+  if (chosen && chosen.url) {
+    if (trackArtworkUrlMap.size > 300) {
+      const oldestKey = trackArtworkUrlMap.keys().next().value;
+      trackArtworkUrlMap.delete(oldestKey);
+    }
+    trackArtworkUrlMap.set(trackObj.id, chosen.url);
+  }
+}
 
 function setCachedLikedStatus(uri, liked) {
   if (!uri) return;
@@ -565,6 +579,7 @@ function ensureMacReadableTitle(rawTitle, artistOrFallback, fallbackLabel = 'Unt
 }
 
 function formatTrackRow(prefix, t) {
+  rememberTrackArtworkUrl(t);
   const artistStr = Array.isArray(t.artists) ? t.artists.map((a) => a.name).join(', ') : '';
   const albumStr = t.album ? t.album.name : '';
   return [
@@ -870,6 +885,7 @@ async function refreshNowPlayingCache() {
     syncActiveSpeakerFromCloud(raw);
     let isLiked = false;
     if (raw && raw.item && raw.item.id) {
+      rememberTrackArtworkUrl(raw.item);
       isLiked = await checkIsTrackLiked(raw.item.id);
     }
     nowPlayingCache.raw = raw || null;
@@ -908,6 +924,7 @@ async function getFastNormalizedNowPlaying() {
     const playerFetchedAt = Date.now();
     syncActiveSpeakerFromCloud(raw);
     if (raw && raw.item && raw.item.id) {
+      rememberTrackArtworkUrl(raw.item);
       isLiked = await checkIsTrackLiked(raw.item.id);
     }
     if (!customFetch) {
@@ -3174,10 +3191,19 @@ router.get('/artwork', async (req, res) => {
         const chosen = images.find((img) => img.width && img.width <= 300) || images[0];
         if (chosen) imageUrl = chosen.url;
       } else {
-        const trackObj = await callSpotify(`/tracks/${encodeURIComponent(id)}`);
-        const images = (trackObj && trackObj.album && Array.isArray(trackObj.album.images)) ? trackObj.album.images : [];
-        const chosen = images.find((img) => img.width && img.width <= 300) || images[0];
-        if (chosen) imageUrl = chosen.url;
+        if (!customFetch && trackArtworkUrlMap.has(id)) {
+          imageUrl = trackArtworkUrlMap.get(id);
+        } else if (!customFetch && nowPlayingCache.raw && nowPlayingCache.raw.item && nowPlayingCache.raw.item.id === id) {
+          const np = normalizeNowPlaying(nowPlayingCache.raw);
+          imageUrl = np.artworkUrl || '';
+        }
+        if (!imageUrl) {
+          const trackObj = await callSpotify(`/tracks/${encodeURIComponent(id)}`);
+          rememberTrackArtworkUrl(trackObj);
+          const images = (trackObj && trackObj.album && Array.isArray(trackObj.album.images)) ? trackObj.album.images : [];
+          const chosen = images.find((img) => img.width && img.width <= 300) || images[0];
+          if (chosen) imageUrl = chosen.url;
+        }
       }
     }
 

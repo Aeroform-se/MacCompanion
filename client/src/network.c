@@ -17,6 +17,11 @@ static ip_addr        gServerIP       = 0;
 static unsigned short gServerHttpPort = DEFAULT_HTTP_PORT;
 static void         (*gIdleCallback)(void) = NULL;
 
+/* Persistent Reusable HTTP Stream & Receive Buffer (avoids per-request NewPtr/TCPCreate/TCPRelease) */
+#define HTTP_TCP_RCV_SIZE   8192
+static StreamPtr      gHttpStream     = 0;
+static Ptr            gHttpTcpRcvBuf  = NULL;
+
 /* ============================================================================
  * Native 68k Audio Streaming State (Double-Buffered Sound Manager)
  * ============================================================================ */
@@ -41,6 +46,7 @@ static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0 };
 static short          gNextFillBuf       = 0;
 static Boolean        gPrebuffering      = true;
 static unsigned long  gLastEmptyStatusTick = 0;
+static unsigned long  gLastAudioPumpTick   = 0;
 
 /*
  * Interrupt-safe Sound Manager callback:
@@ -190,6 +196,7 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
          */
         if (nowTicks != lastIdleTick) {
             lastIdleTick = nowTicks;
+            SystemTask();
             if (pumpAudioWhileWaiting && gAudioRunning) {
                 AudioStreamPump();
             }
@@ -197,9 +204,22 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
                 gIdleCallback();
             }
         }
-        /* Safety timeout (8 seconds) */
+        /* Safety timeout (8 seconds): abort via a separate parameter block so the pending
+         * async pb finishes cleanly before its stack frame is reused or returned! */
         if ((nowTicks - startTicks) > 480) {
-            break;
+            if (pb->tcpStream != 0 && pb->csCode != TCPAbort && pb->csCode != TCPRelease) {
+                TCPiopb abortPb;
+                unsigned long abortStart = TickCount();
+                memset(&abortPb, 0, sizeof(abortPb));
+                abortPb.ioCRefNum = gMacTCPRef;
+                abortPb.csCode    = TCPAbort;
+                abortPb.tcpStream = pb->tcpStream;
+                PBControlSync((ParmBlkPtr)&abortPb);
+                while (pb->ioResult == inProgress && (TickCount() - abortStart) < 60) {
+                    SystemTask();
+                }
+            }
+            return (pb->ioResult == inProgress) ? commandTimeout : pb->ioResult;
         }
     }
     return pb->ioResult;
@@ -328,11 +348,51 @@ static long ParseContentLength(const char *headers, long headerLen)
     return -1;
 }
 
+static Boolean EnsureHttpStream(void)
+{
+    TCPiopb pb;
+
+    if (!gHttpTcpRcvBuf) {
+        gHttpTcpRcvBuf = NewPtr(HTTP_TCP_RCV_SIZE);
+        if (!gHttpTcpRcvBuf) return false;
+    }
+    if (gHttpStream != 0) {
+        return true;
+    }
+
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode                    = TCPCreate;
+    pb.csParam.create.rcvBuff    = gHttpTcpRcvBuf;
+    pb.csParam.create.rcvBuffLen = HTTP_TCP_RCV_SIZE;
+    pb.csParam.create.notifyProc = NULL;
+    if (RunTCPControl(&pb, true) != noErr) {
+        return false;
+    }
+    gHttpStream = pb.tcpStream;
+    return (gHttpStream != 0);
+}
+
+static void ResetAndRecreateHttpStream(void)
+{
+    TCPiopb pb;
+    if (gHttpStream != 0) {
+        memset(&pb, 0, sizeof(pb));
+        pb.csCode    = TCPAbort;
+        pb.tcpStream = gHttpStream;
+        RunTCPControl(&pb, true);
+
+        memset(&pb, 0, sizeof(pb));
+        pb.csCode    = TCPRelease;
+        pb.tcpStream = gHttpStream;
+        RunTCPControl(&pb, true);
+        gHttpStream = 0;
+    }
+    EnsureHttpStream();
+}
+
 long NetHttpGet(const char *path, char *outBody, long maxLen)
 {
     TCPiopb pb;
-    Ptr tcpRcvBuf = NULL;
-    StreamPtr stream = 0;
     wdsEntry wds[2];
     char reqBuf[512];
     long totalRead = 0;
@@ -345,25 +405,12 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     outBody[0] = '\0';
 
     if (!NetInit() || gServerIP == 0) return -1;
+    if (!EnsureHttpStream()) return -1;
 
-    tcpRcvBuf = NewPtr(8192);
-    if (!tcpRcvBuf) return -1;
-
-    memset(&pb, 0, sizeof(pb));
-    pb.csCode                    = TCPCreate;
-    pb.csParam.create.rcvBuff    = tcpRcvBuf;
-    pb.csParam.create.rcvBuffLen = 8192;
-    pb.csParam.create.notifyProc = NULL;
-    if (RunTCPControl(&pb, true) != noErr) {
-        DisposePtr(tcpRcvBuf);
-        return -1;
-    }
-    stream = pb.tcpStream;
-
-    /* Active Open to gServerIP : gServerHttpPort */
+    /* Active Open to gServerIP : gServerHttpPort (reusing persistent gHttpStream) */
     memset(&pb, 0, sizeof(pb));
     pb.csCode                           = TCPActiveOpen;
-    pb.tcpStream                        = stream;
+    pb.tcpStream                        = gHttpStream;
     pb.csParam.open.ulpTimeoutValue     = 4;
     pb.csParam.open.ulpTimeoutAction    = 1;
     pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
@@ -372,7 +419,22 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     pb.csParam.open.remotePort          = gServerHttpPort;
     pb.csParam.open.localPort           = 0;
     if (RunTCPControl(&pb, true) != noErr) {
-        goto cleanup;
+        /* If stream was in a non-closed state, recreate once and retry */
+        ResetAndRecreateHttpStream();
+        if (gHttpStream == 0) return -1;
+        memset(&pb, 0, sizeof(pb));
+        pb.csCode                           = TCPActiveOpen;
+        pb.tcpStream                        = gHttpStream;
+        pb.csParam.open.ulpTimeoutValue     = 4;
+        pb.csParam.open.ulpTimeoutAction    = 1;
+        pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
+        pb.csParam.open.commandTimeoutValue = 4;
+        pb.csParam.open.remoteHost          = gServerIP;
+        pb.csParam.open.remotePort          = gServerHttpPort;
+        pb.csParam.open.localPort           = 0;
+        if (RunTCPControl(&pb, true) != noErr) {
+            goto close_conn;
+        }
     }
 
     /* Send HTTP/1.0 GET request */
@@ -389,7 +451,7 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
 
     memset(&pb, 0, sizeof(pb));
     pb.csCode                  = TCPSend;
-    pb.tcpStream               = stream;
+    pb.tcpStream               = gHttpStream;
     pb.csParam.send.wdsPtr     = (Ptr)wds;
     pb.csParam.send.pushFlag   = true;
     if (RunTCPControl(&pb, true) != noErr) {
@@ -407,7 +469,7 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
 
         memset(&pb, 0, sizeof(pb));
         pb.csCode                              = TCPRcv;
-        pb.tcpStream                           = stream;
+        pb.tcpStream                           = gHttpStream;
         pb.csParam.receive.commandTimeoutValue = 4;
         pb.csParam.receive.rcvBuff             = outBody + totalRead;
         pb.csParam.receive.rcvBuffLen          = chunkAsk;
@@ -448,19 +510,12 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     bodyLen = totalRead;
 
 close_conn:
-    /* Immediate TCPAbort + TCPRelease avoids waiting several seconds on FIN timeout */
+    /* Immediate TCPAbort returns gHttpStream to closed state ready for next request without TCPRelease */
     memset(&pb, 0, sizeof(pb));
     pb.csCode    = TCPAbort;
-    pb.tcpStream = stream;
+    pb.tcpStream = gHttpStream;
     RunTCPControl(&pb, true);
 
-cleanup:
-    memset(&pb, 0, sizeof(pb));
-    pb.csCode    = TCPRelease;
-    pb.tcpStream = stream;
-    RunTCPControl(&pb, true);
-
-    DisposePtr(tcpRcvBuf);
     return bodyLen;
 }
 
@@ -555,32 +610,31 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     if (!NetInit() || gServerIP == 0) return false;
     if (sampleRateHz > 0) gAudioSampleRateHz = sampleRateHz;
 
-    gSndChan = NULL;
-    if (SndNewChannel(&gSndChan, sampledSynth, initMono, gSndCallBackUPP) != noErr || !gSndChan) {
-        gSndChan = NULL;
-        return false;
-    }
-
-    if (!gAudioTcpRcvBuf) {
-        gAudioTcpRcvBuf = NewPtr(AUDIO_TCP_RCV_SIZE);
-        if (!gAudioTcpRcvBuf) {
-            SndDisposeChannel(gSndChan, true);
+    if (!gSndChan) {
+        if (SndNewChannel(&gSndChan, sampledSynth, initMono, gSndCallBackUPP) != noErr || !gSndChan) {
             gSndChan = NULL;
             return false;
         }
     }
 
-    memset(&pb, 0, sizeof(pb));
-    pb.csCode                    = TCPCreate;
-    pb.csParam.create.rcvBuff    = gAudioTcpRcvBuf;
-    pb.csParam.create.rcvBuffLen = AUDIO_TCP_RCV_SIZE;
-    pb.csParam.create.notifyProc = NULL;
-    if (RunTCPControl(&pb, false) != noErr) {
-        SndDisposeChannel(gSndChan, true);
-        gSndChan = NULL;
-        return false;
+    if (!gAudioTcpRcvBuf) {
+        gAudioTcpRcvBuf = NewPtr(AUDIO_TCP_RCV_SIZE);
+        if (!gAudioTcpRcvBuf) {
+            return false;
+        }
     }
-    gAudioStream = pb.tcpStream;
+
+    if (gAudioStream == 0) {
+        memset(&pb, 0, sizeof(pb));
+        pb.csCode                    = TCPCreate;
+        pb.csParam.create.rcvBuff    = gAudioTcpRcvBuf;
+        pb.csParam.create.rcvBuffLen = AUDIO_TCP_RCV_SIZE;
+        pb.csParam.create.notifyProc = NULL;
+        if (RunTCPControl(&pb, false) != noErr) {
+            return false;
+        }
+        gAudioStream = pb.tcpStream;
+    }
 
     memset(&pb, 0, sizeof(pb));
     pb.csCode                           = TCPActiveOpen;
@@ -593,14 +647,40 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     pb.csParam.open.remotePort          = DEFAULT_AUDIO_PORT;
     pb.csParam.open.localPort           = 0;
     if (RunTCPControl(&pb, false) != noErr) {
+        /* Recreate stream once if previous abort left it in a non-reusable state */
         memset(&pb, 0, sizeof(pb));
         pb.csCode    = TCPRelease;
         pb.tcpStream = gAudioStream;
         RunTCPControl(&pb, false);
         gAudioStream = 0;
-        SndDisposeChannel(gSndChan, true);
-        gSndChan = NULL;
-        return false;
+
+        memset(&pb, 0, sizeof(pb));
+        pb.csCode                    = TCPCreate;
+        pb.csParam.create.rcvBuff    = gAudioTcpRcvBuf;
+        pb.csParam.create.rcvBuffLen = AUDIO_TCP_RCV_SIZE;
+        pb.csParam.create.notifyProc = NULL;
+        if (RunTCPControl(&pb, false) != noErr) {
+            return false;
+        }
+        gAudioStream = pb.tcpStream;
+
+        memset(&pb, 0, sizeof(pb));
+        pb.csCode                           = TCPActiveOpen;
+        pb.tcpStream                        = gAudioStream;
+        pb.csParam.open.ulpTimeoutValue     = 10;
+        pb.csParam.open.ulpTimeoutAction    = 1;
+        pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
+        pb.csParam.open.commandTimeoutValue = 5;
+        pb.csParam.open.remoteHost          = gServerIP;
+        pb.csParam.open.remotePort          = DEFAULT_AUDIO_PORT;
+        pb.csParam.open.localPort           = 0;
+        if (RunTCPControl(&pb, false) != noErr) {
+            memset(&pb, 0, sizeof(pb));
+            pb.csCode    = TCPAbort;
+            pb.tcpStream = gAudioStream;
+            RunTCPControl(&pb, false);
+            return false;
+        }
     }
 
     for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
@@ -610,6 +690,7 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     gNextFillBuf  = 0;
     gPrebuffering = true;
     gLastEmptyStatusTick = 0;
+    gLastAudioPumpTick   = 0;
     gAudioRunning = true;
     return true;
 }
@@ -623,14 +704,14 @@ void AudioStreamStop(void)
     gAudioRunning = false;
     gPrebuffering = true;
 
+    /* Flush and quiet Sound Manager channel immediately, but keep gSndChan & gAudioStream
+     * alive so resuming playback avoids SndNewChannel/SndDisposeChannel and TCPCreate/TCPRelease! */
     if (gSndChan) {
         SndCommand cmd;
         cmd.cmd = flushCmd; cmd.param1 = 0; cmd.param2 = 0;
         SndDoImmediate(gSndChan, &cmd);
         cmd.cmd = quietCmd; cmd.param1 = 0; cmd.param2 = 0;
         SndDoImmediate(gSndChan, &cmd);
-        SndDisposeChannel(gSndChan, true);
-        gSndChan = NULL;
     }
 
     if (gAudioStream != 0) {
@@ -638,12 +719,6 @@ void AudioStreamStop(void)
         pb.csCode    = TCPAbort;
         pb.tcpStream = gAudioStream;
         RunTCPControl(&pb, false);
-
-        memset(&pb, 0, sizeof(pb));
-        pb.csCode    = TCPRelease;
-        pb.tcpStream = gAudioStream;
-        RunTCPControl(&pb, false);
-        gAudioStream = 0;
     }
 
     for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
@@ -684,11 +759,14 @@ Boolean AudioGetLiveSamples(unsigned char *outSamples, short count)
     bufLen = gBufferQueuedLen[playBuf];
     elapsedTicks = (long)(TickCount() - gBufferQueuedTick[playBuf]);
     if (elapsedTicks < 0) elapsedTicks = 0;
-    if (elapsedTicks > 20) elapsedTicks = 20;
+    if (elapsedTicks > 24) elapsedTicks = 24;
 
     samplesPerTick = (gAudioSampleRateHz <= 12000) ? 185L : 371L;
-    offset = (elapsedTicks * samplesPerTick) % (bufLen - count + 1);
-    if (offset < 0 || offset + count > bufLen) {
+    offset = elapsedTicks * samplesPerTick;
+    if (offset > bufLen - count) {
+        offset = bufLen - count;
+    }
+    if (offset < 0) {
         offset = 0;
     }
 
@@ -710,19 +788,21 @@ void AudioStreamPump(void)
         return;
     }
 
-    /* If the last TCPStatus check on this tick had 0 unread bytes, wait until the next VBL tick
-     * before issuing another synchronous PBControlSync(TCPStatus) trap into MacTCP. */
     nowTicks = TickCount();
     if (gLastEmptyStatusTick != 0 && nowTicks == gLastEmptyStatusTick) {
         return;
     }
 
-    /*
-     * If the Sound Manager currently has no buffers playing and both buffers are
-     * empty (e.g., fresh start, resume after pause, or recovery after a seek/skip),
-     * re-arm prebuffering so Buffer 0 only starts playing once Buffer 1 also has a
-     * >= 2,048-byte (~92ms) cushion ready.
-     */
+    /* Outside prebuffering, while the other buffer is still actively playing with plenty of
+     * cushion left, poll MacTCP at most once every 2 ticks (~33ms) so data arrives in larger
+     * ~1.2 KB chunks instead of 60 tiny ~370B reads per second! */
+    if (!gPrebuffering && (gBufferBusy[0] || gBufferBusy[1])) {
+        if (gLastAudioPumpTick != 0 && (nowTicks - gLastAudioPumpTick) < 2) {
+            return;
+        }
+    }
+    gLastAudioPumpTick = nowTicks;
+
     if (!gBufferBusy[0] && !gBufferBusy[1] && gPcmFilled[0] == 0 && gPcmFilled[1] == 0) {
         gPrebuffering = true;
         gNextFillBuf  = 0;
@@ -762,6 +842,15 @@ void AudioStreamPump(void)
             break;
         }
         gLastEmptyStatusTick = 0;
+
+        /* When not prebuffering and the other buffer is still playing with >6 ticks (~100ms) left,
+         * wait until at least 1024 bytes have accumulated in MacTCP before issuing TCPRcv. */
+        if (!gPrebuffering && unread < 1024) {
+            short otherIdx = 1 - idx;
+            if (gBufferBusy[otherIdx] && (nowTicks - gBufferQueuedTick[otherIdx]) < 5) {
+                break;
+            }
+        }
 
         needed = targetSize - gPcmFilled[idx];
         if (needed <= 0) {

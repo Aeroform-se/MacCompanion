@@ -72,7 +72,7 @@ class SharedAudioHub {
       return { streamedBytes: u8Buffer.length, durationMs };
     }
 
-    const frameBytes = Math.max(256, Math.round(hz * 0.04)); // 40ms frames
+    const frameBytes = Math.max(512, Math.round(hz * 0.08)); // 80ms coalesced TCP frames (~1780 bytes @ 22k)
     let offset = 0;
 
     const pump = () => {
@@ -92,7 +92,7 @@ class SharedAudioHub {
       }
 
       if (offset < u8Buffer.length) {
-        this.activeTtsTimer = setTimeout(pump, 38);
+        this.activeTtsTimer = setTimeout(pump, 76);
       } else {
         this.activeTtsTimer = null;
         this.ttsActiveUntil = 0;
