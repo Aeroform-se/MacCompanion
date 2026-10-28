@@ -52,6 +52,12 @@ long NetHttpGet(const char *path, char *outBody, long maxLen);
 long NetHttpGetStream(const char *path, char *outBody, long maxLen, NetStatusCallback onStatus, short timeoutSec);
 
 /*
+ * Performs an HTTP/1.0 GET request and writes the payload directly into an open file.
+ * Returns total bytes written, or -1 on network/file error.
+ */
+long NetHttpGetToFile(const char *path, short fileRefNum);
+
+/*
  * Performs an HTTP/1.0 POST request with a raw binary or text payload
  * (`postBody`, `postLen` bytes) and copies the response body into `outBody`.
  */

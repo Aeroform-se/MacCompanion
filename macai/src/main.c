@@ -14,6 +14,7 @@
 #include <Folders.h>
 #include <Scrap.h>
 #include <Sound.h>
+#include <StandardFile.h>
 #include <OSUtils.h>
 #include <string.h>
 #include <stdio.h>
@@ -79,6 +80,11 @@ typedef struct {
     short   cachedLines;
     short   cachedWidestPx;
     short   cachedBubbleH;
+    char    imageId[36];
+    short   imageW;
+    short   imageH;
+    short   imageRowBytes;
+    Handle  imageHandle;
 } ChatMessage;
 
 typedef struct {
@@ -595,10 +601,17 @@ static void EnsureMessageMetrics(ChatMessage *msg, short maxW)
         if (lw > widestPx) widestPx = lw;
     }
 
+    if (msg->imageH > 0) {
+        if (msg->imageW > widestPx) widestPx = msg->imageW;
+        if (widestPx < 180) widestPx = 180;
+        msg->cachedBubbleH = (nLines > 0 ? (nLines * 12 + 10) : 6) + msg->imageH + 6 + 18 + 8;
+    } else {
+        msg->cachedBubbleH = nLines * 12 + 12;
+    }
+
     msg->cachedMaxW     = maxW;
     msg->cachedLines    = nLines;
     msg->cachedWidestPx = widestPx;
-    msg->cachedBubbleH  = nLines * 12 + 12;
 }
 
 /* ============================================================================
@@ -1454,6 +1467,33 @@ static void DrawChatArea(void)
                         DrawCString(wrapped[L]);
                     }
 
+                    if (gMessages[i].imageHandle && *(gMessages[i].imageHandle) && gMessages[i].imageH > 0) {
+                        short imgX = bubbleR.left + 12;
+                        short imgY = curY + (nLines > 0 ? (14 + nLines * 12 + 4) : 10);
+                        BitMap bm;
+                        Rect srcR, dstR, copyBtnR, saveBtnR;
+                        SetRect(&srcR, 0, 0, gMessages[i].imageW, gMessages[i].imageH);
+                        SetRect(&dstR, imgX, imgY, imgX + gMessages[i].imageW, imgY + gMessages[i].imageH);
+                        bm.baseAddr = *(gMessages[i].imageHandle);
+                        bm.rowBytes = gMessages[i].imageRowBytes;
+                        bm.bounds   = srcR;
+                        CopyBits(&bm, &qd.thePort->portBits, &srcR, &dstR, srcCopy, NULL);
+                        FrameRect(&dstR);
+
+                        short btnY = imgY + gMessages[i].imageH + 6;
+                        SetRect(&copyBtnR, imgX, btnY, imgX + 54, btnY + 16);
+                        EraseRoundRect(&copyBtnR, 6, 6);
+                        FrameRoundRect(&copyBtnR, 6, 6);
+                        MoveTo(copyBtnR.left + 8, copyBtnR.top + 11);
+                        DrawCString((gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 120) ? "Copied" : "Copy");
+
+                        SetRect(&saveBtnR, imgX + 60, btnY, imgX + 172, btnY + 16);
+                        EraseRoundRect(&saveBtnR, 6, 6);
+                        FrameRoundRect(&saveBtnR, 6, 6);
+                        MoveTo(saveBtnR.left + 8, saveBtnR.top + 11);
+                        DrawCString("Save PICT...");
+                    }
+
                     /* Retry and Copy action icons on hover with pill background (retry-bg-example.png) */
                     if (gHoverBubbleIdx == i) {
                         Rect actPill;
@@ -1946,6 +1986,81 @@ static void CopyMessageToClipboard(short msgIdx)
     RenderChatAreaOnly();
 }
 
+static void CopyImageToClipboard(short msgIdx)
+{
+    PicHandle myPic;
+    Rect picR;
+    ChatMessage *msg;
+
+    if (msgIdx < 0 || msgIdx >= gMessageCount) return;
+    msg = &gMessages[msgIdx];
+    if (!msg->imageHandle || !*(msg->imageHandle) || msg->imageH <= 0 || msg->imageW <= 0) return;
+
+    SetRect(&picR, 0, 0, msg->imageW, msg->imageH);
+    myPic = OpenPicture(&picR);
+    if (myPic) {
+        BitMap bm;
+        bm.baseAddr = *(msg->imageHandle);
+        bm.rowBytes = msg->imageRowBytes;
+        bm.bounds   = picR;
+        CopyBits(&bm, &qd.thePort->portBits, &picR, &picR, srcCopy, NULL);
+        ClosePicture();
+
+        ZeroScrap();
+        HLock((Handle)myPic);
+        PutScrap(GetHandleSize((Handle)myPic), 'PICT', *(Handle)myPic);
+        HUnlock((Handle)myPic);
+        KillPicture(myPic);
+
+        gCopiedMsgIdx = msgIdx;
+        gCopiedTick   = TickCount();
+        RenderChatAreaOnly();
+    }
+}
+
+static void SaveImagePictToFile(short msgIdx)
+{
+    StandardFileReply sfReply;
+    short refNum = 0;
+    OSErr err;
+    char path[128];
+    ChatMessage *msg;
+    CursHandle watchH;
+
+    if (msgIdx < 0 || msgIdx >= gMessageCount) return;
+    msg = &gMessages[msgIdx];
+    if (msg->imageId[0] == '\0') return;
+
+    StandardPutFile("\pSave 24-bit PICT as:", "\pMacAI Image.pict", &sfReply);
+    if (!sfReply.sfGood) return;
+
+    if (sfReply.sfReplacing) {
+        FSpDelete(&sfReply.sfFile);
+    }
+
+    err = FSpCreate(&sfReply.sfFile, 'ttxt', 'PICT', sfReply.sfScript);
+    if (err != noErr && err != dupFNErr) {
+        SysBeep(1);
+        return;
+    }
+
+    err = FSpOpenDF(&sfReply.sfFile, fsWrPerm, &refNum);
+    if (err != noErr) {
+        SysBeep(1);
+        return;
+    }
+
+    watchH = GetCursor(watchCursor);
+    if (watchH) SetCursor(*watchH);
+
+    sprintf(path, "/api/macai/image/%s/pict", msg->imageId);
+    NetHttpGetToFile(path, refNum);
+
+    FSClose(refNum);
+    InitCursor();
+    SysBeep(1);
+}
+
 static void RetryAIResponseAtIndex(short aiMsgIdx)
 {
     static char userPrompt[MAX_MSG_TEXT];
@@ -2343,12 +2458,70 @@ static void SelectProviderOrTier(const char *provider, const char *tier)
     }
 }
 
+static void ClearAllMessages(void)
+{
+    short i;
+    for (i = 0; i < gMessageCount; i++) {
+        if (gMessages[i].imageHandle) {
+            DisposeHandle(gMessages[i].imageHandle);
+            gMessages[i].imageHandle = NULL;
+        }
+        gMessages[i].imageId[0] = '\0';
+        gMessages[i].imageH = 0;
+        gMessages[i].imageW = 0;
+    }
+    gMessageCount = 0;
+    gMsgScrollY   = 0;
+}
+
+static void AppendMessageEx(Boolean isUser, const char *text, const char *imgId, short imgW, short imgH, short imgRowBytes, Handle imgHdl)
+{
+    ChatMessage *msg;
+    if (!text && !imgHdl) return;
+    if (gMessageCount >= MAX_MESSAGES) {
+        if (gMessages[0].imageHandle) {
+            DisposeHandle(gMessages[0].imageHandle);
+            gMessages[0].imageHandle = NULL;
+        }
+        memmove(&gMessages[0], &gMessages[1], sizeof(ChatMessage) * (MAX_MESSAGES - 1));
+        gMessageCount = MAX_MESSAGES - 1;
+    }
+    msg = &gMessages[gMessageCount];
+    msg->isUser        = isUser;
+    msg->cachedMaxW    = 0;
+    msg->cachedLines   = 0;
+    msg->cachedWidestPx = 0;
+    msg->cachedBubbleH = 0;
+    if (text) {
+        strncpy(msg->text, text, MAX_MSG_TEXT - 1);
+        msg->text[MAX_MSG_TEXT - 1] = '\0';
+    } else {
+        msg->text[0] = '\0';
+    }
+    if (imgId && *imgId) {
+        strncpy(msg->imageId, imgId, sizeof(msg->imageId) - 1);
+        msg->imageId[sizeof(msg->imageId) - 1] = '\0';
+    } else {
+        msg->imageId[0] = '\0';
+    }
+    msg->imageW        = imgW;
+    msg->imageH        = imgH;
+    msg->imageRowBytes = imgRowBytes;
+    msg->imageHandle   = imgHdl;
+    gMessageCount++;
+    gMsgScrollY = 30000;
+}
+
+static void AppendMessage(Boolean isUser, const char *text)
+{
+    AppendMessageEx(isUser, text, NULL, 0, 0, 0, NULL);
+}
+
 static void StartNewChat(void)
 {
     gActiveChatId[0]    = '\0';
     gSelectedChatIdx    = -1;
-    gMessageCount       = 0;
-    gMsgScrollY         = 0;
+    ClearAllMessages();
     gMsgMaxScrollY      = 0;
     gCopiedMsgIdx       = -1;
     gPromptBuf[0]       = '\0';
@@ -2363,7 +2536,7 @@ static void StartNewChat(void)
 
 static void LoadChatById(const char *chatId)
 {
-    static char row[MAX_MSG_TEXT + 32];
+    static char row[MAX_MSG_TEXT + 128];
     char path[96];
     const char *line;
     short i;
@@ -2381,7 +2554,7 @@ static void LoadChatById(const char *chatId)
             break;
         }
     }
-    gMessageCount = 0;
+    ClearAllMessages();
     gCopiedMsgIdx = -1;
 
     line = gNetBuf;
@@ -2411,42 +2584,61 @@ static void LoadChatById(const char *chatId)
                 }
             }
         } else if (strncmp(row, "MSG|user|", 9) == 0) {
-            gMessages[gMessageCount].isUser = true;
-            gMessages[gMessageCount].cachedMaxW = 0;
-            gMessages[gMessageCount].cachedBubbleH = 0;
-            SafeCopyString(gMessages[gMessageCount].text, row + 9, MAX_MSG_TEXT);
-            gMessageCount++;
+            AppendMessage(true, row + 9);
         } else if (strncmp(row, "MSG|assistant|", 14) == 0) {
-            gMessages[gMessageCount].isUser = false;
-            gMessages[gMessageCount].cachedMaxW = 0;
-            gMessages[gMessageCount].cachedBubbleH = 0;
-            SafeCopyString(gMessages[gMessageCount].text, row + 14, MAX_MSG_TEXT);
-            gMessageCount++;
+            char *pText = row + 14;
+            char *pImg = strchr(pText, '|');
+            if (pImg) {
+                char *pW, *pH, *pRb;
+                *pImg++ = '\0';
+                pW = strchr(pImg, '|');
+                if (pW) {
+                    *pW++ = '\0';
+                    pH = strchr(pW, '|');
+                    if (pH) {
+                        *pH++ = '\0';
+                        pRb = strchr(pH, '|');
+                        if (pRb) {
+                            *pRb++ = '\0';
+                            AppendMessageEx(false, pText, pImg, (short)atoi(pW), (short)atoi(pH), (short)atoi(pRb), NULL);
+                        } else {
+                            AppendMessage(false, pText);
+                        }
+                    } else {
+                        AppendMessage(false, pText);
+                    }
+                } else {
+                    AppendMessage(false, pText);
+                }
+            } else {
+                AppendMessage(false, pText);
+            }
         }
         line = next ? (next + 1) : NULL;
+    }
+
+    /* Pass 2: Download any image previews (safe now since row parsing is done) */
+    for (i = 0; i < gMessageCount; i++) {
+        if (!gMessages[i].isUser && gMessages[i].imageId[0] != '\0' && !gMessages[i].imageHandle) {
+            char imgPath[96];
+            long imgBytes;
+            sprintf(imgPath, "/api/macai/image/%s", gMessages[i].imageId);
+            imgBytes = NetHttpGet(imgPath, gNetBuf, NET_BUF_SIZE);
+            if (imgBytes > 8) {
+                Handle h = NewHandle(imgBytes - 8);
+                if (h) {
+                    HLock(h);
+                    BlockMove(gNetBuf + 8, *h, imgBytes - 8);
+                    HUnlock(h);
+                    gMessages[i].imageHandle = h;
+                }
+            }
+        }
     }
 
     /* Scroll to bottom of loaded conversation */
     gMsgScrollY = 30000;
     RenderWindow();
-}
-
-static void AppendMessage(Boolean isUser, const char *text)
-{
-    if (!text) return;
-    if (gMessageCount >= MAX_MESSAGES) {
-        memmove(&gMessages[0], &gMessages[1], sizeof(ChatMessage) * (MAX_MESSAGES - 1));
-        gMessageCount = MAX_MESSAGES - 1;
-    }
-    gMessages[gMessageCount].isUser        = isUser;
-    gMessages[gMessageCount].cachedMaxW    = 0;
-    gMessages[gMessageCount].cachedLines   = 0;
-    gMessages[gMessageCount].cachedWidestPx = 0;
-    gMessages[gMessageCount].cachedBubbleH = 0;
-    strncpy(gMessages[gMessageCount].text, text, MAX_MSG_TEXT - 1);
-    gMessages[gMessageCount].text[MAX_MSG_TEXT - 1] = '\0';
-    gMessageCount++;
-    gMsgScrollY = 30000;
 }
 
 static void OnAIStatusCallback(const char *statusText)
@@ -2497,46 +2689,56 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
     if (!gRunning) return;
 
     if (n > 0 && strncmp(gNetBuf, "REPLY|", 6) == 0) {
-        char *p1 = gNetBuf + 6;
-        char *p2 = strchr(p1, '|');
-        if (p2) {
-            char *p3, *p4, *p5, *p6;
-            *p2++ = '\0';
-            p3 = strchr(p2, '|');
-            if (p3) {
-                *p3++ = '\0';
-                p4 = strchr(p3, '|');
-                if (p4) {
-                    *p4++ = '\0';
-                    p5 = strchr(p4, '|');
-                    if (p5) {
-                        *p5++ = '\0';
-                        p6 = strchr(p5, '|');
-                        if (p6) {
-                            *p6++ = '\0';
-                            /* REPLY|<chatId>|<title>|<provider>|<model>|<thinking>|<reply> */
-                            strncpy(gActiveChatId, p1, sizeof(gActiveChatId) - 1);
-                            if (IsProviderEnabled(p3)) {
-                                strncpy(gActiveProvider, p3, sizeof(gActiveProvider) - 1);
-                            }
-                            NormalizeTierName(p5, gActiveTier, sizeof(gActiveTier));
-                            SyncAIMenuState();
-                            AppendMessage(false, p6);
-                            RefreshChatList();
-                        } else {
-                            /* Standard 6-column: REPLY|<chatId>|<title>|<provider>|<thinking>|<reply> */
-                            strncpy(gActiveChatId, p1, sizeof(gActiveChatId) - 1);
-                            if (IsProviderEnabled(p3)) {
-                                strncpy(gActiveProvider, p3, sizeof(gActiveProvider) - 1);
-                            }
-                            NormalizeTierName(p4, gActiveTier, sizeof(gActiveTier));
-                            SyncAIMenuState();
-                            AppendMessage(false, p5);
-                            RefreshChatList();
-                        }
-                    }
-                }
+        char *fields[12];
+        short numFields = 0;
+        char *scan = gNetBuf + 6;
+        fields[numFields++] = scan;
+        while ((scan = strchr(scan, '|')) != NULL && numFields < 12) {
+            *scan++ = '\0';
+            fields[numFields++] = scan;
+        }
+
+        if (numFields >= 5) {
+            /* fields[0]=chatId, fields[1]=title, fields[2]=provider, fields[3]=thinking, fields[4]=replyText */
+            strncpy(gActiveChatId, fields[0], sizeof(gActiveChatId) - 1);
+            if (IsProviderEnabled(fields[2])) {
+                strncpy(gActiveProvider, fields[2], sizeof(gActiveProvider) - 1);
             }
+            NormalizeTierName(fields[3], gActiveTier, sizeof(gActiveTier));
+            SyncAIMenuState();
+
+            if (numFields >= 9 && fields[5] && *fields[5]) {
+                /* Image included: fields[5]=imgId, fields[6]=w, fields[7]=h, fields[8]=rb */
+                char imgPath[96];
+                char replyCopy[MAX_MSG_TEXT];
+                char imgIdCopy[36];
+                short w  = (short)atoi(fields[6]);
+                short h  = (short)atoi(fields[7]);
+                short rb = (short)atoi(fields[8]);
+                long imgBytes;
+
+                SafeCopyString(replyCopy, fields[4], sizeof(replyCopy));
+                SafeCopyString(imgIdCopy, fields[5], sizeof(imgIdCopy));
+
+                sprintf(imgPath, "/api/macai/image/%s", imgIdCopy);
+                imgBytes = NetHttpGet(imgPath, gNetBuf, NET_BUF_SIZE);
+                if (imgBytes > 8) {
+                    Handle imgH = NewHandle(imgBytes - 8);
+                    if (imgH) {
+                        HLock(imgH);
+                        BlockMove(gNetBuf + 8, *imgH, imgBytes - 8);
+                        HUnlock(imgH);
+                        AppendMessageEx(false, replyCopy, imgIdCopy, w, h, rb, imgH);
+                    } else {
+                        AppendMessage(false, replyCopy);
+                    }
+                } else {
+                    AppendMessage(false, replyCopy);
+                }
+            } else {
+                AppendMessage(false, fields[4]);
+            }
+            RefreshChatList();
         }
     } else if (n > 0 && strncmp(gNetBuf, "ERR|", 4) == 0) {
         char *msg = strchr(gNetBuf + 4, '|');
@@ -3071,6 +3273,25 @@ static void HandleContentClick(Point localPt)
                     bubbleH = gMessages[i].cachedBubbleH;
                     widestLine = gMessages[i].cachedWidestPx;
                     stepH = bubbleH + (gMessages[i].isUser ? 18 : 22);
+
+                    if (!gMessages[i].isUser && gMessages[i].imageHandle && *(gMessages[i].imageHandle) && gMessages[i].imageH > 0) {
+                        short nLines = gMessages[i].cachedLines;
+                        short imgX = aiLeftX + 12;
+                        short imgY = curY + (nLines > 0 ? (14 + nLines * 12 + 4) : 10);
+                        short btnY = imgY + gMessages[i].imageH + 6;
+                        Rect copyImgBtnR, saveImgBtnR;
+                        SetRect(&copyImgBtnR, imgX, btnY, imgX + 54, btnY + 16);
+                        SetRect(&saveImgBtnR, imgX + 60, btnY, imgX + 172, btnY + 16);
+
+                        if (PtInRect(localPt, &copyImgBtnR)) {
+                            CopyImageToClipboard(i);
+                            return;
+                        }
+                        if (PtInRect(localPt, &saveImgBtnR)) {
+                            SaveImagePictToFile(i);
+                            return;
+                        }
+                    }
 
                     if (gHoverBubbleIdx == i) {
                         if (gMessages[i].isUser) {
@@ -4001,6 +4222,7 @@ int main(void)
         }
     }
 
+    ClearAllMessages();
     AudioStreamStop();
     if (gOffscreenMem) DisposePtr(gOffscreenMem);
     if (gNetBuf) DisposePtr(gNetBuf);

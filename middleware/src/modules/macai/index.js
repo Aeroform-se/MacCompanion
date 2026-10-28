@@ -1,9 +1,20 @@
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
+const sharp = require('sharp');
 const { spawn } = require('child_process');
 const { createModuleStore } = require('../../core/storage');
 const { sanitizeField, formatPipeRow, formatPipeTable, sendPipeResponse } = require('../../core/format68k');
 const audioHub = require('../../core/audio-hub');
+const { convertImageToPict24 } = require('../../core/pict');
+const { processArtworkBuffer } = require('../../core/dither');
+
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../../../data');
+const IMAGE_DIR = path.join(DATA_DIR, 'images');
+if (!fs.existsSync(IMAGE_DIR)) {
+  fs.mkdirSync(IMAGE_DIR, { recursive: true });
+}
 
 const router = express.Router();
 
@@ -446,6 +457,108 @@ async function generateProviderReply(provider, model, thinking, messages, data =
     return callClaudeChat(messages, model, thinking, data, signal);
   }
   return callGeminiChat(messages, model, thinking, data, signal);
+}
+
+/**
+ * Detects whether a user prompt represents an image generation request.
+ */
+function extractImagePrompt(prompt) {
+  if (!prompt || typeof prompt !== 'string') return null;
+  const p = prompt.trim();
+
+  // 1. Slash commands: /image, /draw, /paint, /img, /photo
+  const slashMatch = p.match(/^\/(?:image|draw|paint|img|photo)\s+(.+)/i);
+  if (slashMatch) return slashMatch[1].trim();
+
+  // 2. Natural language commands:
+  const nlMatch = p.match(/^(?:please\s+)?(?:draw(?:\s+me)?|paint(?:\s+me)?|sketch(?:\s+me)?|generate\s+(?:an?\s+)?image\s+of|generate\s+(?:an?\s+)?picture\s+of|create\s+(?:an?\s+)?image\s+of|create\s+(?:an?\s+)?picture\s+of|make\s+(?:an?\s+)?image\s+of|make\s+(?:an?\s+)?picture\s+of)\s+(.+)/i);
+  if (nlMatch) return nlMatch[1].trim();
+
+  return null;
+}
+
+/**
+ * Generates an image using OpenAI DALL-E, Gemini Imagen, or high-speed Pollinations AI.
+ */
+async function generateImage(provider, prompt, data = store.load(), signal = undefined) {
+  const fetchFn = getFetchImpl();
+
+  // 1. OpenAI DALL-E
+  const openaiKey = (process.env.OPENAI_API_KEY || data.openaiApiKey || '').trim();
+  if (provider === 'chatgpt' && openaiKey) {
+    try {
+      const res = await fetchFn('https://api.openai.com/v1/images/generations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${openaiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'dall-e-3',
+          prompt,
+          n: 1,
+          size: '1024x1024',
+          response_format: 'b64_json',
+        }),
+        signal,
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data && json.data[0] && json.data[0].b64_json) {
+          return Buffer.from(json.data[0].b64_json, 'base64');
+        }
+      }
+    } catch (err) {
+      console.warn('[MacAI:Image] OpenAI image generation failed, trying fallback:', err.message);
+    }
+  }
+
+  // 2. Gemini Imagen
+  const geminiKey = (process.env.GEMINI_API_KEY || data.geminiApiKey || '').trim();
+  if (provider === 'gemini' && geminiKey) {
+    try {
+      const imgRes = await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${geminiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
+        }),
+        signal,
+      });
+      if (imgRes.ok) {
+        const json = await imgRes.json();
+        const cand = json.candidates && json.candidates[0];
+        if (cand && cand.content && cand.content.parts) {
+          for (const part of cand.content.parts) {
+            if (part.inlineData && part.inlineData.data) {
+              return Buffer.from(part.inlineData.data, 'base64');
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[MacAI:Image] Gemini image generation failed, trying fallback:', err.message);
+    }
+  }
+
+  // 3. Fallback: High-speed, high-quality free image generation via Pollinations AI
+  try {
+    const encodedPrompt = encodeURIComponent(prompt.trim());
+    const fallbackUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 1000000)}`;
+    const res = await fetchFn(fallbackUrl, {
+      headers: { 'User-Agent': 'MacCompanion/0.4.6 (Classic Macintosh 68k)' },
+      signal,
+    });
+    if (res.ok) {
+      const arrBuf = await res.arrayBuffer();
+      return Buffer.from(arrBuf);
+    }
+  } catch (err) {
+    console.warn('[MacAI:Image] Pollinations fallback failed:', err.message);
+  }
+
+  throw new Error('Image generation failed. Please try again.');
 }
 
 /**
@@ -912,7 +1025,11 @@ router.get('/chat/:id', (req, res) => {
     ['META', chat.id, chat.title || 'New chat', chat.provider || 'gemini', chat.tier || 'Pro', formatRelativeAge(chat.updatedAt)],
   ];
   for (const m of chat.messages || []) {
-    rows.push(['MSG', m.role === 'assistant' ? 'assistant' : 'user', m.content || '']);
+    const row = ['MSG', m.role === 'assistant' ? 'assistant' : 'user', m.content || ''];
+    if (m.imageId) {
+      row.push(m.imageId, String(m.imageW || 0), String(m.imageH || 0), String(m.imageRowBytes || 0));
+    }
+    rows.push(row);
   }
   return sendPipeResponse(req, res, formatPipeTable(rows));
 });
@@ -991,19 +1108,101 @@ router.all('/ask', async (req, res) => {
       controller.abort();
     }, 45000);
 
-    const replyText = await generateProviderReply(
-      provider,
-      model,
-      thinking,
-      chat.messages.slice(-12),
-      data,
-      controller.signal
-    );
+    let replyText = '';
+    let imageInfo = null;
+    const imgPrompt = extractImagePrompt(prompt);
+
+    if (imgPrompt) {
+      const imgBuffer = await generateImage(provider, imgPrompt, data, controller.signal);
+      const imgId = 'img_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
+      const pngPath = path.join(IMAGE_DIR, `${imgId}.png`);
+      const rawPath = path.join(IMAGE_DIR, `${imgId}.raw`);
+
+      const pngBuffer = await sharp(imgBuffer).png().toBuffer();
+      fs.writeFileSync(pngPath, pngBuffer);
+
+      const dithered = await processArtworkBuffer(pngBuffer, {
+        width: 240,
+        height: 300,
+        dither: 'adaptive',
+        format: 'raw',
+        fit: 'inside',
+      });
+      fs.writeFileSync(rawPath, dithered.buffer);
+
+      imageInfo = {
+        id: imgId,
+        width: dithered.width,
+        height: dithered.height,
+        rowBytes: dithered.rowBytes,
+      };
+      replyText = `Generated image for: "${imgPrompt}"`;
+    } else {
+      replyText = await generateProviderReply(
+        provider,
+        model,
+        thinking,
+        chat.messages.slice(-12),
+        data,
+        controller.signal
+      );
+
+      const mdImgMatch = replyText.match(/!\[(.*?)\]\((https?:\/\/[^\s\)]+)\)/i);
+      if (mdImgMatch) {
+        try {
+          const imgUrl = mdImgMatch[2];
+          const altText = mdImgMatch[1];
+          const fetchFn = getFetchImpl();
+          const imgRes = await fetchFn(imgUrl);
+          if (imgRes.ok) {
+            const arrBuf = await imgRes.arrayBuffer();
+            const imgBuffer = Buffer.from(arrBuf);
+            const imgId = 'img_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
+            const pngPath = path.join(IMAGE_DIR, `${imgId}.png`);
+            const rawPath = path.join(IMAGE_DIR, `${imgId}.raw`);
+
+            const pngBuffer = await sharp(imgBuffer).png().toBuffer();
+            fs.writeFileSync(pngPath, pngBuffer);
+
+            const dithered = await processArtworkBuffer(pngBuffer, {
+              width: 240,
+              height: 300,
+              dither: 'adaptive',
+              format: 'raw',
+              fit: 'inside',
+            });
+            fs.writeFileSync(rawPath, dithered.buffer);
+
+            imageInfo = {
+              id: imgId,
+              width: dithered.width,
+              height: dithered.height,
+              rowBytes: dithered.rowBytes,
+            };
+            replyText = replyText.replace(mdImgMatch[0], '').trim();
+            if (!replyText && altText) replyText = altText;
+          }
+        } catch (e) {
+          console.warn('[MacAI:Image] Failed to download markdown image:', e.message);
+        }
+      }
+    }
 
     if (timeoutId) clearTimeout(timeoutId);
     if (healthCheckId) clearTimeout(healthCheckId);
 
-    chat.messages.push({ role: 'assistant', content: replyText, ts: Date.now() });
+    const assistantMsg = {
+      role: 'assistant',
+      content: replyText,
+      ts: Date.now(),
+    };
+    if (imageInfo) {
+      assistantMsg.imageId = imageInfo.id;
+      assistantMsg.imageW = imageInfo.width;
+      assistantMsg.imageH = imageInfo.height;
+      assistantMsg.imageRowBytes = imageInfo.rowBytes;
+    }
+    chat.messages.push(assistantMsg);
     chat.updatedAt = Date.now();
 
     const activeModels = { ...(data.activeModels || {}), [provider]: model };
@@ -1016,7 +1215,7 @@ router.all('/ask', async (req, res) => {
       lastError: null,
     });
 
-    if (wantTts) {
+    if (wantTts && !imageInfo) {
       await audioHub.pauseSpotifyForVoice();
       synthesizeSpeechToPcmU8(replyText, { hz: 22255, data })
         .then((u8) => {
@@ -1027,9 +1226,22 @@ router.all('/ask', async (req, res) => {
         .catch(() => {});
     }
 
-    const pipe = formatPipeRow(['REPLY', chat.id, chat.title || prompt, provider, thinking, replyText]) + '\n';
+    const pipeCols = ['REPLY', chat.id, chat.title || prompt, provider, thinking, replyText];
+    if (imageInfo) {
+      pipeCols.push(imageInfo.id, String(imageInfo.width), String(imageInfo.height), String(imageInfo.rowBytes));
+    }
+    const pipe = formatPipeRow(pipeCols) + '\n';
     if (req.query.format === 'json') {
-      return res.json({ ok: true, chatId: chat.id, title: chat.title, provider, model, tier: thinking, reply: replyText });
+      return res.json({
+        ok: true,
+        chatId: chat.id,
+        title: chat.title,
+        provider,
+        model,
+        tier: thinking,
+        reply: replyText,
+        image: imageInfo,
+      });
     }
     return sendPipeResponse(req, res, pipe);
   } catch (err) {
@@ -1039,6 +1251,82 @@ router.all('/ask', async (req, res) => {
     store.save({ lastError: errMsg });
     return sendPipeResponse(req, res, `ERR|500|${sanitizeField(errMsg)}\n`);
   }
+});
+
+router.get('/image/:id', async (req, res) => {
+  const rawId = req.params.id;
+  const id = rawId.replace(/\.(raw|png|pict)$/i, '');
+  const rawPath = path.join(IMAGE_DIR, `${id}.raw`);
+  const pngPath = path.join(IMAGE_DIR, `${id}.png`);
+
+  if (fs.existsSync(rawPath)) {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    return res.sendFile(rawPath);
+  }
+
+  if (fs.existsSync(pngPath)) {
+    try {
+      const pngBuf = fs.readFileSync(pngPath);
+      const dithered = await processArtworkBuffer(pngBuf, {
+        width: 240,
+        height: 300,
+        dither: 'adaptive',
+        format: 'raw',
+        fit: 'inside',
+      });
+      fs.writeFileSync(rawPath, dithered.buffer);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      return res.send(dithered.buffer);
+    } catch (e) {
+      return res.status(500).type('text/plain').send('ERR|500|Failed to dither image\n');
+    }
+  }
+
+  return res.status(404).type('text/plain').send('ERR|404|Image not found\n');
+});
+
+router.get('/image/:id/pict', async (req, res) => {
+  const rawId = req.params.id;
+  const id = rawId.replace(/\.(pict)$/i, '');
+  const pictPath = path.join(IMAGE_DIR, `${id}.pict`);
+  const pngPath = path.join(IMAGE_DIR, `${id}.png`);
+
+  if (fs.existsSync(pictPath)) {
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${id}.pict"`);
+    return res.sendFile(pictPath);
+  }
+
+  if (fs.existsSync(pngPath)) {
+    try {
+      const pngBuf = fs.readFileSync(pngPath);
+      const { buffer: pictBuffer } = await convertImageToPict24(pngBuf, {
+        maxWidth: 1024,
+        maxHeight: 1024,
+        includeDiskHeader: true,
+      });
+      fs.writeFileSync(pictPath, pictBuffer);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${id}.pict"`);
+      return res.send(pictBuffer);
+    } catch (e) {
+      console.error('[MacAI:PICT] Conversion error:', e);
+      return res.status(500).type('text/plain').send('ERR|500|Failed to convert to PICT\n');
+    }
+  }
+
+  return res.status(404).type('text/plain').send('ERR|404|Image not found\n');
+});
+
+router.get('/image/:id/png', (req, res) => {
+  const rawId = req.params.id;
+  const id = rawId.replace(/\.(png)$/i, '');
+  const pngPath = path.join(IMAGE_DIR, `${id}.png`);
+  if (fs.existsSync(pngPath)) {
+    res.setHeader('Content-Type', 'image/png');
+    return res.sendFile(pngPath);
+  }
+  return res.status(404).type('text/plain').send('ERR|404|Image not found\n');
 });
 
 /**

@@ -571,10 +571,156 @@ long NetHttpGetStream(const char *path, char *outBody, long maxLen, NetStatusCal
 long NetHttpGet(const char *path, char *outBody, long maxLen)
 {
     Boolean isPing = (strstr(path, "/ping") != NULL);
-    Boolean isSlowAI = (strstr(path, "/ask") != NULL || strstr(path, "/tts") != NULL);
+    Boolean isSlowAI = (strstr(path, "/ask") != NULL || strstr(path, "/tts") != NULL || strstr(path, "/image") != NULL);
     Byte openTimeout = isPing ? 3 : 4;
     Byte rcvTimeout  = isSlowAI ? 45 : (isPing ? 3 : 6);
     return NetHttpRequestInternal("GET", path, NULL, NULL, 0, outBody, maxLen, openTimeout, rcvTimeout, NULL);
+}
+
+long NetHttpGetToFile(const char *path, short fileRefNum)
+{
+    TCPiopb pb;
+    StreamPtr tcpStream = 0;
+    Ptr tcpRcvBuf = NULL;
+    static char reqHeader[512];
+    static char chunkBuf[4096];
+    char hostStr[32];
+    wdsEntry wds[2];
+    OSErr err;
+    long totalWritten = 0;
+    Boolean headerStripped = false;
+    long headerBytesLeft = 0;
+    long expectedBodyLen = -1;
+    unsigned long openMaxTicks = 5UL * 60UL;
+    unsigned long rcvMaxTicks  = 30UL * 60UL;
+
+    if (fileRefNum == 0) return -1;
+    if (!NetInit() || gServerIP == 0) return -1;
+
+    tcpRcvBuf = NewPtr(8192);
+    if (!tcpRcvBuf) return -1;
+
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode                    = TCPCreate;
+    pb.csParam.create.rcvBuff    = tcpRcvBuf;
+    pb.csParam.create.rcvBuffLen = 8192;
+    pb.csParam.create.notifyProc = NULL;
+    err = RunTCPControl(&pb, true, 180);
+    if (err != noErr) {
+        DisposePtr(tcpRcvBuf);
+        return -1;
+    }
+    tcpStream = pb.tcpStream;
+
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode                           = TCPActiveOpen;
+    pb.tcpStream                        = tcpStream;
+    pb.csParam.open.ulpTimeoutValue     = 5;
+    pb.csParam.open.ulpTimeoutAction    = 1;
+    pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
+    pb.csParam.open.commandTimeoutValue = 5;
+    pb.csParam.open.remoteHost          = gServerIP;
+    pb.csParam.open.remotePort          = gServerHttpPort;
+    pb.csParam.open.localPort           = 0;
+
+    err = RunTCPControl(&pb, true, openMaxTicks);
+    if (err != noErr) {
+        goto cleanup;
+    }
+
+    FormatIPAddress(gServerIP, hostStr);
+    sprintf(reqHeader,
+            "GET %s HTTP/1.0\r\n"
+            "Host: %s:%u\r\n"
+            "User-Agent: MacAI/68k\r\n"
+            "Connection: close\r\n\r\n",
+            path, hostStr, gServerHttpPort);
+    wds[0].length = (unsigned short)strlen(reqHeader);
+    wds[0].ptr    = (Ptr)reqHeader;
+    wds[1].length = 0;
+    wds[1].ptr    = NULL;
+
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode                     = TCPSend;
+    pb.tcpStream                  = tcpStream;
+    pb.csParam.send.ulpTimeoutValue = 5;
+    pb.csParam.send.ulpTimeoutAction = 1;
+    pb.csParam.send.validityFlags = timeoutValue | timeoutAction;
+    pb.csParam.send.pushFlag      = 1;
+    pb.csParam.send.urgentFlag    = 0;
+    pb.csParam.send.wdsPtr        = (Ptr)wds;
+
+    err = RunTCPControl(&pb, true, openMaxTicks);
+    if (err != noErr) {
+        goto close_conn;
+    }
+
+    headerBytesLeft = 0;
+    while (1) {
+        memset(&pb, 0, sizeof(pb));
+        pb.csCode                              = TCPRcv;
+        pb.tcpStream                           = tcpStream;
+        pb.csParam.receive.commandTimeoutValue = 30;
+        pb.csParam.receive.rcvBuff             = chunkBuf + headerBytesLeft;
+        pb.csParam.receive.rcvBuffLen          = (unsigned short)(sizeof(chunkBuf) - headerBytesLeft);
+
+        err = RunTCPControl(&pb, true, rcvMaxTicks);
+        if (err == noErr && pb.csParam.receive.rcvBuffLen > 0) {
+            long bytesInBuf = headerBytesLeft + pb.csParam.receive.rcvBuffLen;
+
+            if (!headerStripped) {
+                long k;
+                for (k = 0; k <= bytesInBuf - 4; k++) {
+                    if (chunkBuf[k] == '\r' && chunkBuf[k+1] == '\n' &&
+                        chunkBuf[k+2] == '\r' && chunkBuf[k+3] == '\n') {
+                        long headerEnd = k + 4;
+                        long bodyBytes = bytesInBuf - headerEnd;
+                        expectedBodyLen = ParseContentLength(chunkBuf, headerEnd);
+                        headerStripped = true;
+                        if (bodyBytes > 0) {
+                            long toWrite = bodyBytes;
+                            FSWrite(fileRefNum, &toWrite, chunkBuf + headerEnd);
+                            totalWritten += toWrite;
+                        }
+                        break;
+                    }
+                }
+                if (!headerStripped) {
+                    headerBytesLeft = bytesInBuf;
+                    if (headerBytesLeft >= (long)(sizeof(chunkBuf) - 1)) {
+                        break;
+                    }
+                    continue;
+                }
+                headerBytesLeft = 0;
+            } else {
+                long toWrite = bytesInBuf;
+                FSWrite(fileRefNum, &toWrite, chunkBuf);
+                totalWritten += toWrite;
+            }
+
+            if (expectedBodyLen >= 0 && totalWritten >= expectedBodyLen) {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+close_conn:
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode    = TCPAbort;
+    pb.tcpStream = tcpStream;
+    RunTCPControl(&pb, true, 120);
+
+cleanup:
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode    = TCPRelease;
+    pb.tcpStream = tcpStream;
+    RunTCPControl(&pb, true, 120);
+
+    DisposePtr(tcpRcvBuf);
+    return totalWritten;
 }
 
 long NetHttpPost(const char *path, const char *contentType,

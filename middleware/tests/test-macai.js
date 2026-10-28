@@ -85,6 +85,44 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
     assert.strictEqual(delJson.chatCount, 0);
     console.log('[PASS] /api/macai/chats DELETE cleared all chat history');
 
+    // 7. Verify Image serving & 24-bit PICT on-demand conversion
+    const sharp = require('sharp');
+    const imgDir = path.join(testDataDir, 'images');
+    if (!fs.existsSync(imgDir)) fs.mkdirSync(imgDir, { recursive: true });
+    const sampleSvg = `<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg"><rect width="400" height="300" fill="#336699"/></svg>`;
+    const samplePng = await sharp(Buffer.from(sampleSvg)).png().toBuffer();
+    fs.writeFileSync(path.join(imgDir, 'img_sample.png'), samplePng);
+
+    // Verify 1-bit dithered bitmap endpoint
+    const rawRes = await new Promise((resolve, reject) => {
+      http.get('http://127.0.0.1:16810/api/macai/image/img_sample', (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, buf: Buffer.concat(chunks) }));
+      }).on('error', reject);
+    });
+    assert.strictEqual(rawRes.status, 200);
+    assert(rawRes.buf.length > 8, 'Raw image buffer should have header + bitmap');
+    const rawW = rawRes.buf.readUInt16BE(0);
+    const rawH = rawRes.buf.readUInt16BE(2);
+    const rawRb = rawRes.buf.readUInt16BE(4);
+    assert.strictEqual(rawW, 240);
+    assert.strictEqual(rawH, 180); // 400x300 fit: 'inside' within 240x300 bounding box
+    console.log(`[PASS] /api/macai/image/img_sample -> 1-bit QuickDraw bitmap (${rawW}x${rawH}, rowBytes: ${rawRb})`);
+
+    // Verify 24-bit PICT v2 on-demand conversion endpoint
+    const pictRes = await new Promise((resolve, reject) => {
+      http.get('http://127.0.0.1:16810/api/macai/image/img_sample/pict', (res) => {
+        const chunks = [];
+        res.on('data', c => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, buf: Buffer.concat(chunks) }));
+      }).on('error', reject);
+    });
+    assert.strictEqual(pictRes.status, 200);
+    assert(pictRes.headers['content-disposition'].includes('img_sample.pict'));
+    assert(pictRes.buf.length > 512, 'PICT should include 512-byte disk header and data');
+    console.log(`[PASS] /api/macai/image/img_sample/pict -> 24-bit PICT v2 file (${pictRes.buf.length} bytes)`);
+
     console.log('--- ALL MACAI TESTS PASSED ---');
   } finally {
     server.close();

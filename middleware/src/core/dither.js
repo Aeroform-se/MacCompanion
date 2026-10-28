@@ -302,6 +302,7 @@ async function processArtworkBuffer(inputBuffer, {
   dither = 'adaptive',
   format = 'raw',
   contrast = 1.08,
+  fit = 'cover',
 } = {}) {
   const targetW = Math.max(16, Math.min(512, parseInt(width || size || DEFAULT_ART_SIZE, 10)));
   const targetH = Math.max(16, Math.min(512, parseInt(height || size || DEFAULT_ART_SIZE, 10)));
@@ -310,7 +311,7 @@ async function processArtworkBuffer(inputBuffer, {
   // Downscale with Lanczos3, flatten alpha onto white, convert to 8-bit grayscale
   let pipeline = sharp(inputBuffer)
     .flatten({ background: { r: 255, g: 255, b: 255 } })
-    .resize(targetW, targetH, { fit: 'cover' })
+    .resize(targetW, targetH, { fit: fit || 'cover' })
     .grayscale();
 
   // Adaptive and Blue Noise perform their own histogram auto-leveling & gamma rescue
@@ -318,21 +319,23 @@ async function processArtworkBuffer(inputBuffer, {
     pipeline = pipeline.linear(contrast, -(128 * contrast) + 128);
   }
 
-  const grayBuffer = await pipeline.raw().toBuffer();
-  const dithered = ditherGrayscaleTo1Bit(grayBuffer, targetW, targetH, ditherKey);
+  const { data: grayBuffer, info } = await pipeline.raw().toBuffer({ resolveWithObject: true });
+  const actualW = info.width;
+  const actualH = info.height;
+  const dithered = ditherGrayscaleTo1Bit(grayBuffer, actualW, actualH, ditherKey);
 
   const fmt = String(format).toLowerCase();
   if (fmt === 'png') {
     const pngBuffer = await sharp(dithered.pixels, {
-      raw: { width: targetW, height: targetH, channels: 1 },
+      raw: { width: actualW, height: actualH, channels: 1 },
     })
       .png({ compressionLevel: 9 })
       .toBuffer();
 
     return {
       contentType: 'image/png',
-      width: targetW,
-      height: targetH,
+      width: actualW,
+      height: actualH,
       rowBytes: dithered.rowBytes,
       buffer: pngBuffer,
     };
@@ -341,8 +344,8 @@ async function processArtworkBuffer(inputBuffer, {
   if (fmt === 'bits') {
     return {
       contentType: 'application/octet-stream',
-      width: targetW,
-      height: targetH,
+      width: actualW,
+      height: actualH,
       rowBytes: dithered.rowBytes,
       buffer: dithered.packed,
     };
@@ -350,11 +353,11 @@ async function processArtworkBuffer(inputBuffer, {
 
   if (fmt === 'hex' || fmt === 'pipe') {
     const hexStr = dithered.packed.toString('hex').toUpperCase();
-    const pipePayload = `BITMAP|${targetW}|${targetH}|${dithered.rowBytes}|${dithered.packed.length}|${hexStr}\n`;
+    const pipePayload = `BITMAP|${actualW}|${actualH}|${dithered.rowBytes}|${dithered.packed.length}|${hexStr}\n`;
     return {
       contentType: 'text/plain; charset=utf-8',
-      width: targetW,
-      height: targetH,
+      width: actualW,
+      height: actualH,
       rowBytes: dithered.rowBytes,
       buffer: Buffer.from(pipePayload, 'utf8'),
     };
@@ -364,8 +367,8 @@ async function processArtworkBuffer(inputBuffer, {
   const rawBuffer = packQuickDrawBitMapWithHeader(dithered);
   return {
     contentType: 'application/octet-stream',
-    width: targetW,
-    height: targetH,
+    width: actualW,
+    height: actualH,
     rowBytes: dithered.rowBytes,
     buffer: rawBuffer,
   };
