@@ -17,6 +17,7 @@ static long           gOurNetMask     = (long)0xFFFFFF00;
 static ip_addr        gServerIP       = 0;
 static unsigned short gServerHttpPort = DEFAULT_HTTP_PORT;
 static void         (*gIdleCallback)(void) = NULL;
+static Boolean        gAbortRequested = false;
 
 /* ============================================================================
  * Native 68k Audio Streaming State (Double-Buffered Sound Manager for TTS)
@@ -190,11 +191,20 @@ void NetSetIdleCallback(void (*callback)(void))
     gIdleCallback = callback;
 }
 
+void NetAbortCurrentOperation(void)
+{
+    gAbortRequested = true;
+}
+
 static OSErr RunTCPControl(TCPiopb *pb, Boolean runIdle, unsigned long maxWaitTicks)
 {
     unsigned long startTicks = TickCount();
     unsigned long lastIdleTick = startTicks;
     OSErr err;
+
+    if (pb->csCode != TCPAbort && pb->csCode != TCPRelease) {
+        gAbortRequested = false;
+    }
 
     pb->ioCRefNum    = gMacTCPRef;
     pb->ioCompletion = NULL;
@@ -215,7 +225,8 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean runIdle, unsigned long maxWaitTi
                 AudioStreamPump();
             }
         }
-        if ((nowTicks - startTicks) > maxWaitTicks) {
+        if ((nowTicks - startTicks) > maxWaitTicks ||
+            (gAbortRequested && pb->csCode != TCPAbort && pb->csCode != TCPRelease)) {
             if (pb->tcpStream != 0 && pb->csCode != TCPAbort && pb->csCode != TCPRelease) {
                 TCPiopb abortPb;
                 memset(&abortPb, 0, sizeof(abortPb));
@@ -495,6 +506,7 @@ static long NetHttpRequestInternal(const char *method, const char *path,
             }
 
             if (headerStripped && onStatus) {
+                Boolean gotFinalReply = false;
                 char *nl;
                 while ((nl = memchr(outBody, '\n', totalRead)) != NULL) {
                     long lineLen = (long)(nl - outBody + 1);
@@ -511,13 +523,19 @@ static long NetHttpRequestInternal(const char *method, const char *path,
                         memmove(outBody, nl + 1, totalRead - lineLen);
                         totalRead -= lineLen;
                     } else if (strncmp(outBody, "REPLY|", 6) == 0 || strncmp(outBody, "ERR|", 4) == 0) {
-                        /* Final payload or error encountered; retain in buffer */
+                        /* Final payload or error encountered; truncate at line end and exit immediately */
+                        outBody[lineLen] = '\0';
+                        totalRead = lineLen;
+                        gotFinalReply = true;
                         break;
                     } else {
                         /* Consume unknown keep-alive line */
                         memmove(outBody, nl + 1, totalRead - lineLen);
                         totalRead -= lineLen;
                     }
+                }
+                if (gotFinalReply) {
+                    break;
                 }
             }
         } else {

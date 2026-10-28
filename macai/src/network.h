@@ -27,6 +27,9 @@ Boolean NetHasServer(void);
 /* Register an idle callback invoked while waiting on async MacTCP HTTP calls */
 void NetSetIdleCallback(void (*callback)(void));
 
+/* Request cancellation of an in-flight MacTCP HTTP request (e.g. on Quit or Cmd+.) */
+void NetAbortCurrentOperation(void);
+
 /*
  * Broadcasts "MACCOMPANION_DISCOVER" over UDP port 6801 and waits for
  * "MACCOMPANION_SERVER|<ip>|<port>|<modules>".

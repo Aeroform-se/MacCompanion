@@ -156,6 +156,7 @@ static const char    *gThinkingLevels[3]  = { "Fast", "Balanced", "Thinking" };
 static short          gActiveThinkingIdx  = 1; /* Default: Balanced */
 static char           gWaitStatusText[96] = "Thinking...";
 static unsigned long  gWaitStartTick      = 0;
+static Boolean        gUserCancelledWait  = false;
 static Boolean        gProviderMenuOpen   = false;
 static Boolean        gTierMenuOpen       = false;
 static Boolean        gReadRepliesTTS     = false;
@@ -2476,6 +2477,7 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
     }
     SafeCopyString(gWaitStatusText, "Thinking...", sizeof(gWaitStatusText));
     gWaitStartTick = TickCount();
+    gUserCancelledWait = false;
     gWaitingForAI = true;
     RenderWindow();
 
@@ -2491,6 +2493,8 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
 
     n = NetHttpGetStream(path, gNetBuf, NET_BUF_SIZE, OnAIStatusCallback, 45);
     gWaitingForAI = false;
+
+    if (!gRunning) return;
 
     if (n > 0 && strncmp(gNetBuf, "REPLY|", 6) == 0) {
         char *p1 = gNetBuf + 6;
@@ -2520,7 +2524,7 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
                             AppendMessage(false, p6);
                             RefreshChatList();
                         } else {
-                            /* Backwards compatible: REPLY|<chatId>|<title>|<provider>|<thinking>|<reply> */
+                            /* Standard 6-column: REPLY|<chatId>|<title>|<provider>|<thinking>|<reply> */
                             strncpy(gActiveChatId, p1, sizeof(gActiveChatId) - 1);
                             if (IsProviderEnabled(p3)) {
                                 strncpy(gActiveProvider, p3, sizeof(gActiveProvider) - 1);
@@ -2537,6 +2541,8 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
     } else if (n > 0 && strncmp(gNetBuf, "ERR|", 4) == 0) {
         char *msg = strchr(gNetBuf + 4, '|');
         AppendMessage(false, msg ? (msg + 1) : (gNetBuf + 4));
+    } else if (gUserCancelledWait) {
+        AppendMessage(false, "Request cancelled.");
     } else {
         AppendMessage(false, "Network error: Request timed out or server unreachable.");
     }
@@ -3726,6 +3732,108 @@ static void HandleMenuChoice(long menuChoice)
     HiliteMenu(0);
 }
 
+static void NetworkIdleProc(void)
+{
+    EventRecord ev;
+
+    if (gWaitingForAI) {
+        unsigned long elapsed = TickCount() - gWaitStartTick;
+        const char *newStatus = NULL;
+        char apiStatusBuf[96];
+
+        if (elapsed >= 26UL * 60UL) {
+            sprintf(apiStatusBuf, "Still thinking.. The %s API is still responding",
+                    GetProviderDisplayName(gActiveProvider));
+            newStatus = apiStatusBuf;
+        } else if (elapsed >= 22UL * 60UL) {
+            newStatus = "Hmm this is taking a while, MacCompanion server is still up!";
+        } else if (elapsed >= 20UL * 60UL) {
+            newStatus = "Still thinking...";
+        }
+
+        if (newStatus && strcmp(gWaitStatusText, newStatus) != 0) {
+            SafeCopyString(gWaitStatusText, newStatus, sizeof(gWaitStatusText));
+            RenderWindow();
+        }
+    }
+
+    if (GetNextEvent(mDownMask | keyDownMask | updateMask | activMask, &ev)) {
+        switch (ev.what) {
+            case mouseDown: {
+                WindowPtr hitWin = NULL;
+                short part = FindWindow(ev.where, &hitWin);
+                if (part == inMenuBar) {
+                    long mChoice;
+                    SyncAIMenuState();
+                    mChoice = MenuSelect(ev.where);
+                    if (HiWord(mChoice) == mFile && LoWord(mChoice) == iQuit) {
+                        gRunning = false;
+                        gUserCancelledWait = true;
+                        NetAbortCurrentOperation();
+                    }
+                    HiliteMenu(0);
+                } else if (part == inSysWindow) {
+                    SystemClick(&ev, hitWin);
+                } else if (hitWin == gMainWindow) {
+                    if (part == inDrag) {
+                        DragWindow(gMainWindow, ev.where, &qd.screenBits.bounds);
+                    } else if (part == inGoAway) {
+                        if (TrackGoAway(gMainWindow, ev.where)) {
+                            gRunning = false;
+                            gUserCancelledWait = true;
+                            NetAbortCurrentOperation();
+                        }
+                    } else if (part == inGrow) {
+                        Rect sizeLimits;
+                        long newSize;
+                        SetRect(&sizeLimits, MIN_WIN_W, MIN_WIN_H, MAX_WIN_W, MAX_WIN_H);
+                        newSize = GrowWindow(gMainWindow, ev.where, &sizeLimits);
+                        if (newSize != 0) {
+                            gWinW = LoWord(newSize);
+                            gWinH = HiWord(newSize);
+                            SizeWindow(gMainWindow, gWinW, gWinH, true);
+                            EnsureOffscreenBuffer(gWinW, gWinH);
+                            RenderWindow();
+                        }
+                    } else if (part == inZoomIn || part == inZoomOut) {
+                        if (TrackBox(gMainWindow, ev.where, part)) {
+                            ZoomWindow(gMainWindow, part, false);
+                            gWinW = gMainWindow->portRect.right - gMainWindow->portRect.left;
+                            gWinH = gMainWindow->portRect.bottom - gMainWindow->portRect.top;
+                            EnsureOffscreenBuffer(gWinW, gWinH);
+                            RenderWindow();
+                        }
+                    }
+                }
+                break;
+            }
+            case keyDown: {
+                char key = (char)(ev.message & charCodeMask);
+                if (ev.modifiers & cmdKey) {
+                    if (key == 'q' || key == 'Q') {
+                        gRunning = false;
+                        gUserCancelledWait = true;
+                        NetAbortCurrentOperation();
+                    } else if (key == '.') {
+                        gUserCancelledWait = true;
+                        NetAbortCurrentOperation();
+                    }
+                }
+                break;
+            }
+            case updateEvt: {
+                WindowPtr updWin = (WindowPtr)ev.message;
+                if (updWin == gMainWindow) {
+                    BeginUpdate(gMainWindow);
+                    RenderWindow();
+                    EndUpdate(gMainWindow);
+                }
+                break;
+            }
+        }
+    }
+}
+
 /* ============================================================================
  * Main Application Entry Point
  * ============================================================================ */
@@ -3751,6 +3859,7 @@ int main(void)
     FlushEvents(everyEvent, 0);
 
     gNetBuf = NewPtrClear(NET_BUF_SIZE);
+    NetSetIdleCallback(NetworkIdleProc);
 
     /* Set up Menus */
     menuBar = GetNewMBar(128);

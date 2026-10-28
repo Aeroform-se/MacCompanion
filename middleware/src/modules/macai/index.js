@@ -221,10 +221,24 @@ async function getValidGoogleAccessToken(data = store.load()) {
   return json.access_token;
 }
 
+function extractApiErrorMessage(errText, maxLen = 140) {
+  if (!errText) return 'Unknown API error';
+  try {
+    const parsed = JSON.parse(errText);
+    if (parsed && parsed.error && typeof parsed.error.message === 'string') {
+      return parsed.error.message.trim().slice(0, maxLen);
+    }
+    if (parsed && typeof parsed.message === 'string') {
+      return parsed.message.trim().slice(0, maxLen);
+    }
+  } catch (_) {}
+  return String(errText).replace(/\s+/g, ' ').trim().slice(0, maxLen);
+}
+
 /**
  * Calls Google Gemini API (`generateContent`) using either OAuth Bearer token or API Key.
  */
-async function callGeminiChat(messages, model = 'gemini-3.8-flash', thinking = 'Balanced', data = store.load()) {
+async function callGeminiChat(messages, model = 'gemini-3.8-flash', thinking = 'Balanced', data = store.load(), signal = undefined) {
   const auth = getProviderAuth(data).gemini;
   const fetchFn = getFetchImpl();
   const targetModel = model || PROVIDERS.gemini.defaultModel;
@@ -247,24 +261,43 @@ async function callGeminiChat(messages, model = 'gemini-3.8-flash', thinking = '
 
   const cleanThinking = normalizeThinking(thinking);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent${querySuffix}`;
-  const body = {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents,
-    generationConfig: {
+  const isGemini3Or4 = /^gemini-[34]/i.test(targetModel);
+  const thinkingLevel = cleanThinking === 'Fast' ? 'LOW' : (cleanThinking === 'Thinking' ? 'HIGH' : 'MEDIUM');
+
+  const buildBody = (withThinkingConfig) => {
+    const genCfg = {
       temperature: cleanThinking === 'Fast' ? 0.7 : (cleanThinking === 'Thinking' ? 0.3 : 0.5),
       maxOutputTokens: 2048,
-    },
+    };
+    if (withThinkingConfig && isGemini3Or4) {
+      genCfg.thinkingConfig = { thinkingLevel };
+    }
+    return {
+      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+      contents,
+      generationConfig: genCfg,
+    };
   };
 
-  const res = await fetchFn(url, {
+  let res = await fetchFn(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify(body),
+    body: JSON.stringify(buildBody(true)),
+    ...(signal ? { signal } : {}),
   });
+
+  if (res.status === 400 && isGemini3Or4) {
+    res = await fetchFn(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(buildBody(false)),
+      ...(signal ? { signal } : {}),
+    });
+  }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Gemini error (${res.status}): ${errText.slice(0, 140)}`);
+    throw new Error(`Gemini error (${res.status}): ${extractApiErrorMessage(errText)}`);
   }
 
   const json = await res.json();
@@ -289,7 +322,7 @@ async function callGeminiChat(messages, model = 'gemini-3.8-flash', thinking = '
 /**
  * Calls OpenAI Chat Completions API (`ChatGPT`).
  */
-async function callOpenAIChat(messages, model = 'gpt-4o', thinking = 'Balanced', data = store.load()) {
+async function callOpenAIChat(messages, model = 'gpt-4o', thinking = 'Balanced', data = store.load(), signal = undefined) {
   const auth = getProviderAuth(data).chatgpt;
   if (!auth.apiKey) throw new Error('ChatGPT API key is not configured');
   const fetchFn = getFetchImpl();
@@ -323,11 +356,12 @@ async function callOpenAIChat(messages, model = 'gpt-4o', thinking = 'Balanced',
       Authorization: `Bearer ${auth.apiKey}`,
     },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`ChatGPT error (${res.status}): ${errText.slice(0, 140)}`);
+    throw new Error(`ChatGPT error (${res.status}): ${extractApiErrorMessage(errText)}`);
   }
 
   const json = await res.json();
@@ -346,7 +380,7 @@ async function callOpenAIChat(messages, model = 'gpt-4o', thinking = 'Balanced',
 /**
  * Calls Anthropic Messages API (`Claude`).
  */
-async function callClaudeChat(messages, model = 'claude-3-7-sonnet-latest', thinking = 'Balanced', data = store.load()) {
+async function callClaudeChat(messages, model = 'claude-3-7-sonnet-latest', thinking = 'Balanced', data = store.load(), signal = undefined) {
   const auth = getProviderAuth(data).claude;
   if (!auth.apiKey) throw new Error('Claude API key is not configured');
   const fetchFn = getFetchImpl();
@@ -383,11 +417,12 @@ async function callClaudeChat(messages, model = 'claude-3-7-sonnet-latest', thin
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   });
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Claude error (${res.status}): ${errText.slice(0, 140)}`);
+    throw new Error(`Claude error (${res.status}): ${extractApiErrorMessage(errText)}`);
   }
 
   const json = await res.json();
@@ -403,14 +438,14 @@ async function callClaudeChat(messages, model = 'claude-3-7-sonnet-latest', thin
   return text;
 }
 
-async function generateProviderReply(provider, model, thinking, messages, data = store.load()) {
+async function generateProviderReply(provider, model, thinking, messages, data = store.load(), signal = undefined) {
   if (provider === 'chatgpt') {
-    return callOpenAIChat(messages, model, thinking, data);
+    return callOpenAIChat(messages, model, thinking, data, signal);
   }
   if (provider === 'claude') {
-    return callClaudeChat(messages, model, thinking, data);
+    return callClaudeChat(messages, model, thinking, data, signal);
   }
-  return callGeminiChat(messages, model, thinking, data);
+  return callGeminiChat(messages, model, thinking, data, signal);
 }
 
 /**
@@ -890,8 +925,11 @@ router.all('/new-chat', (req, res) => {
 });
 
 router.all('/ask', async (req, res) => {
-  let statusTimer = null;
-  let isDone = false;
+  let timeoutId = null;
+  let healthCheckId = null;
+  const controller = new AbortController();
+  let abortReason = null;
+
   try {
     const data = store.load();
     const { provider: defaultProvider, tier: defaultTier, enabled } = resolveActiveProviderAndTier(data);
@@ -947,53 +985,33 @@ router.all('/ask', async (req, res) => {
       chat.messages.push({ role: 'user', content: prompt, ts: Date.now() });
     }
 
-    res.writeHead(200, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Transfer-Encoding': 'chunked',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    });
+    /* 45-second hard timeout */
+    timeoutId = setTimeout(() => {
+      abortReason = 'Request timed out after 45s without response';
+      controller.abort();
+    }, 45000);
 
-    const sendStatus = (msg) => {
-      if (!isDone && !res.writableEnded) {
-        res.write(`STATUS|${sanitizeField(msg)}\n`);
-      }
-    };
+    const replyText = await generateProviderReply(
+      provider,
+      model,
+      thinking,
+      chat.messages.slice(-12),
+      data,
+      controller.signal
+    );
 
-    sendStatus('Thinking...');
-
-    let elapsedSec = 0;
-    statusTimer = setInterval(() => {
-      elapsedSec += 5;
-      if (isDone || res.writableEnded) {
-        clearInterval(statusTimer);
-        return;
-      }
-      if (elapsedSec >= 45) {
-        clearInterval(statusTimer);
-        if (!res.writableEnded) {
-          res.write('ERR|408|Request timed out after 45s without response\n');
-          res.end();
-        }
-        return;
-      }
-      if (elapsedSec >= 20) {
-        sendStatus('Still thinking... MacCompanion server is still up!');
-        sendStatus(`Still thinking... The ${PROVIDERS[provider].name} API is still responding`);
-      }
-    }, 5000);
-
-    const replyText = await generateProviderReply(provider, model, thinking, chat.messages.slice(-12), data);
-    isDone = true;
-    if (statusTimer) clearInterval(statusTimer);
+    if (timeoutId) clearTimeout(timeoutId);
+    if (healthCheckId) clearTimeout(healthCheckId);
 
     chat.messages.push({ role: 'assistant', content: replyText, ts: Date.now() });
     chat.updatedAt = Date.now();
 
+    const activeModels = { ...(data.activeModels || {}), [provider]: model };
     store.save({
       activeProvider: provider,
       activeTier: thinking,
       activeThinking: thinking,
+      activeModels,
       chats: chats.slice(0, 60),
       lastError: null,
     });
@@ -1009,30 +1027,17 @@ router.all('/ask', async (req, res) => {
         .catch(() => {});
     }
 
-    const pipeReply = [
-      'REPLY',
-      chat.id,
-      escapePipe(chat.title || prompt),
-      provider,
-      escapePipe(model),
-      thinking,
-      escapePipe(replyText),
-    ].join('|');
-
-    if (!res.writableEnded) {
-      res.write(pipeReply + '\n');
-      res.end();
+    const pipe = formatPipeRow(['REPLY', chat.id, chat.title || prompt, provider, thinking, replyText]) + '\n';
+    if (req.query.format === 'json') {
+      return res.json({ ok: true, chatId: chat.id, title: chat.title, provider, model, tier: thinking, reply: replyText });
     }
+    return sendPipeResponse(req, res, pipe);
   } catch (err) {
-    isDone = true;
-    if (statusTimer) clearInterval(statusTimer);
-    const errMsg = err.message || 'AI request failed';
-    if (!res.headersSent) {
-      res.status(500).type('text/plain; charset=utf-8').send(`ERR|500|${sanitizeField(errMsg)}\n`);
-    } else if (!res.writableEnded) {
-      res.write(`ERR|500|${sanitizeField(errMsg)}\n`);
-      res.end();
-    }
+    if (timeoutId) clearTimeout(timeoutId);
+    if (healthCheckId) clearTimeout(healthCheckId);
+    const errMsg = abortReason || err.message || 'AI request failed';
+    store.save({ lastError: errMsg });
+    return sendPipeResponse(req, res, `ERR|500|${sanitizeField(errMsg)}\n`);
   }
 });
 
