@@ -33,12 +33,20 @@ void NetSetIdleCallback(void (*callback)(void));
  */
 Boolean NetDiscoverServer(void);
 
+typedef void (*NetStatusCallback)(const char *statusText);
+
 /*
  * Performs an HTTP/1.0 GET request to the MacCompanion server and copies the
  * response body into `outBody` (up to `maxLen - 1` bytes).
  * Returns number of body bytes read, or -1 on network error.
  */
 long NetHttpGet(const char *path, char *outBody, long maxLen);
+
+/*
+ * Performs an HTTP/1.0 GET request with an optional real-time status callback.
+ * If lines beginning with "STATUS|" arrive, onStatus is invoked.
+ */
+long NetHttpGetStream(const char *path, char *outBody, long maxLen, NetStatusCallback onStatus, short timeoutSec);
 
 /*
  * Performs an HTTP/1.0 POST request with a raw binary or text payload

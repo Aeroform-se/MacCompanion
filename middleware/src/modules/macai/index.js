@@ -11,15 +11,29 @@ const PROVIDERS = {
   gemini: {
     id: 'gemini',
     name: 'Gemini',
+    defaultModel: 'gemini-3.8-flash',
+    models: [
+      { label: '3.5 Flash-Lite', id: 'gemini-3.5-flash-lite' },
+      { label: '3.8 Flash',      id: 'gemini-3.8-flash', isDefault: true },
+      { label: '3.1 Pro',        id: 'gemini-3.1-pro-preview' },
+      { label: '4 Argon',        id: 'gemini-4-argon' },
+    ],
     tiers: {
-      Fast: 'gemini-3-flash-preview',
-      Pro: 'gemini-3-flash-preview',
-      Thinking: 'gemini-3.6-flash',
+      Fast: 'gemini-3.5-flash-lite',
+      Pro: 'gemini-3.8-flash',
+      Thinking: 'gemini-3.1-pro-preview',
     },
   },
   chatgpt: {
     id: 'chatgpt',
     name: 'ChatGPT',
+    defaultModel: 'gpt-4o',
+    models: [
+      { label: 'GPT-4o Mini',    id: 'gpt-4o-mini' },
+      { label: 'GPT-4o',         id: 'gpt-4o', isDefault: true },
+      { label: 'o3-mini',        id: 'o3-mini' },
+      { label: 'o1',             id: 'o1' },
+    ],
     tiers: {
       Fast: 'gpt-4o-mini',
       Pro: 'gpt-4o',
@@ -29,6 +43,13 @@ const PROVIDERS = {
   claude: {
     id: 'claude',
     name: 'Claude',
+    defaultModel: 'claude-3-7-sonnet-latest',
+    models: [
+      { label: 'Claude 3.5 Haiku',  id: 'claude-3-5-haiku-latest' },
+      { label: 'Claude 3.7 Sonnet', id: 'claude-3-7-sonnet-latest', isDefault: true },
+      { label: 'Claude 3.5 Sonnet', id: 'claude-3-5-sonnet-latest' },
+      { label: 'Claude 3 Opus',     id: 'claude-3-opus-latest' },
+    ],
     tiers: {
       Fast: 'claude-3-5-haiku-latest',
       Pro: 'claude-3-7-sonnet-latest',
@@ -45,12 +66,19 @@ function normalizeProviderId(raw) {
   return '';
 }
 
+function normalizeThinking(raw) {
+  const s = String(raw || '').toLowerCase().trim();
+  if (s === 'fast' || s === 'low') return 'Fast';
+  if (s === 'thinking' || s === 'high') return 'Thinking';
+  return 'Balanced';
+}
+
 function normalizeTier(raw) {
   const s = String(raw || '').toLowerCase().trim();
-  if (s === 'fast') return 'Fast';
-  if (s === 'thinking') return 'Thinking';
-  if (s === 'pro') return 'Pro';
-  return '';
+  if (s === 'fast' || s === 'low') return 'Fast';
+  if (s === 'thinking' || s === 'high') return 'Thinking';
+  if (s === 'pro' || s === 'balanced' || s === 'medium') return 'Balanced';
+  return 'Balanced';
 }
 
 const SYSTEM_PROMPT =
@@ -60,7 +88,23 @@ const SYSTEM_PROMPT =
 
 const store = createModuleStore('macai', {
   activeProvider: 'gemini',
-  activeTier: 'Pro',
+  activeTier: 'Balanced',
+  activeThinking: 'Balanced',
+  activeModels: {
+    gemini: 'gemini-3.8-flash',
+    chatgpt: 'gpt-4o',
+    claude: 'claude-3-7-sonnet-latest',
+  },
+  customModels: {
+    gemini: '',
+    chatgpt: '',
+    claude: '',
+  },
+  discoveredModels: {
+    gemini: [],
+    chatgpt: [],
+    claude: [],
+  },
   geminiApiKey: null,
   googleClientId: null,
   googleClientSecret: null,
@@ -120,8 +164,8 @@ function resolveActiveProviderAndTier(data = store.load()) {
   if (enabled.length > 0 && !enabled.includes(provider)) {
     provider = enabled[0];
   }
-  const tier = normalizeTier(data.activeTier) || 'Pro';
-  return { provider, tier, enabled };
+  const tier = normalizeTier(data.activeThinking || data.activeTier) || 'Balanced';
+  return { provider, tier, thinking: tier, enabled };
 }
 
 function formatRelativeAge(updatedAtMs) {
@@ -180,20 +224,10 @@ async function getValidGoogleAccessToken(data = store.load()) {
 /**
  * Calls Google Gemini API (`generateContent`) using either OAuth Bearer token or API Key.
  */
-async function callGeminiChat(messages, tier = 'Pro', data = store.load()) {
+async function callGeminiChat(messages, model = 'gemini-3.8-flash', thinking = 'Balanced', data = store.load()) {
   const auth = getProviderAuth(data).gemini;
   const fetchFn = getFetchImpl();
-  const cleanTier = normalizeTier(tier) || 'Pro';
-  const primaryModel = PROVIDERS.gemini.tiers[cleanTier] || 'gemini-3-flash-preview';
-  const fallbackChain = [
-    primaryModel,
-    'gemini-3-flash-preview',
-    'gemini-3.6-flash',
-    'gemini-3.5-flash',
-    'gemini-flash-lite-latest',
-    'gemini-3.5-flash-lite',
-  ];
-  const modelsToTry = [...new Set(fallbackChain)];
+  const targetModel = model || PROVIDERS.gemini.defaultModel;
 
   const contents = messages.map((m) => ({
     role: m.role === 'assistant' ? 'model' : 'user',
@@ -211,173 +245,172 @@ async function callGeminiChat(messages, tier = 'Pro', data = store.load()) {
     throw new Error('Gemini is not configured');
   }
 
-  let lastErr = null;
-  for (const model of modelsToTry) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent${querySuffix}`;
-      const body = {
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents,
-        generationConfig: {
-          temperature: cleanTier === 'Thinking' ? 0.4 : 0.7,
-          maxOutputTokens: 2048,
-        },
-      };
-      const fetchOpts = {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      };
-      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-        fetchOpts.signal = AbortSignal.timeout(6000);
-      }
-      const res = await fetchFn(url, fetchOpts);
-      if (res.ok) {
-        const json = await res.json();
-        const parts =
-          json &&
-          json.candidates &&
-          json.candidates[0] &&
-          json.candidates[0].content &&
-          Array.isArray(json.candidates[0].content.parts)
-            ? json.candidates[0].content.parts
-            : [];
-        const nonThoughtText = parts
-          .filter((p) => !p.thought)
-          .map((p) => p.text || '')
-          .join('')
-          .trim();
-        const text = nonThoughtText || parts.map((p) => p.text || '').join('').trim();
-        if (text) return text;
-      } else {
-        const errText = await res.text().catch(() => '');
-        lastErr = new Error(`Gemini error (${res.status}): ${errText.slice(0, 120)}`);
-      }
-    } catch (e) {
-      lastErr = e;
-    }
+  const cleanThinking = normalizeThinking(thinking);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent${querySuffix}`;
+  const body = {
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents,
+    generationConfig: {
+      temperature: cleanThinking === 'Fast' ? 0.7 : (cleanThinking === 'Thinking' ? 0.3 : 0.5),
+      maxOutputTokens: 2048,
+    },
+  };
+
+  const res = await fetchFn(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Gemini error (${res.status}): ${errText.slice(0, 140)}`);
   }
-  throw lastErr || new Error('Gemini returned an empty response');
+
+  const json = await res.json();
+  const parts =
+    json &&
+    json.candidates &&
+    json.candidates[0] &&
+    json.candidates[0].content &&
+    Array.isArray(json.candidates[0].content.parts)
+      ? json.candidates[0].content.parts
+      : [];
+  const nonThoughtText = parts
+    .filter((p) => !p.thought)
+    .map((p) => p.text || '')
+    .join('')
+    .trim();
+  const text = nonThoughtText || parts.map((p) => p.text || '').join('').trim();
+  if (!text) throw new Error('Gemini returned an empty response');
+  return text;
 }
 
 /**
  * Calls OpenAI Chat Completions API (`ChatGPT`).
  */
-async function callOpenAIChat(messages, tier = 'Pro', data = store.load()) {
+async function callOpenAIChat(messages, model = 'gpt-4o', thinking = 'Balanced', data = store.load()) {
   const auth = getProviderAuth(data).chatgpt;
   if (!auth.apiKey) throw new Error('ChatGPT API key is not configured');
   const fetchFn = getFetchImpl();
+  const targetModel = model || PROVIDERS.chatgpt.defaultModel;
 
-  const primaryModel = PROVIDERS.chatgpt.tiers[tier] || 'gpt-4o';
-  const modelsToTry = primaryModel === 'o3-mini' ? ['o3-mini', 'gpt-4o', 'gpt-4o-mini'] : [primaryModel, 'gpt-4o-mini'];
+  const isReasoning = targetModel.startsWith('o1') || targetModel.startsWith('o3') || targetModel.startsWith('o4');
+  const cleanThinking = normalizeThinking(thinking);
 
-  let lastErr = null;
-  for (const model of modelsToTry) {
-    const isReasoning = model.startsWith('o1') || model.startsWith('o3') || model.startsWith('o4');
-    const apiMessages = [
-      { role: isReasoning ? 'developer' : 'system', content: SYSTEM_PROMPT },
-      ...messages.map((m) => ({
-        role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.content,
-      })),
-    ];
-    const body = {
-      model,
-      messages: apiMessages,
-    };
-    if (!isReasoning) {
-      body.max_tokens = 400;
-      body.temperature = 0.7;
-    }
-
-    const res = await fetchFn('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${auth.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const text =
-        json &&
-        json.choices &&
-        json.choices[0] &&
-        json.choices[0].message &&
-        json.choices[0].message.content
-          ? String(json.choices[0].message.content).trim()
-          : '';
-      if (text) return text;
-    } else {
-      const errText = await res.text().catch(() => '');
-      lastErr = new Error(`ChatGPT error (${res.status}): ${errText.slice(0, 120)}`);
-    }
+  const apiMessages = [
+    { role: isReasoning ? 'developer' : 'system', content: SYSTEM_PROMPT },
+    ...messages.map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content,
+    })),
+  ];
+  const body = {
+    model: targetModel,
+    messages: apiMessages,
+  };
+  if (isReasoning) {
+    body.reasoning_effort = cleanThinking === 'Fast' ? 'low' : (cleanThinking === 'Thinking' ? 'high' : 'medium');
+  } else {
+    body.max_tokens = 1024;
+    body.temperature = cleanThinking === 'Fast' ? 0.7 : (cleanThinking === 'Thinking' ? 0.3 : 0.5);
   }
-  throw lastErr || new Error('ChatGPT returned an empty response');
+
+  const res = await fetchFn('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${auth.apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`ChatGPT error (${res.status}): ${errText.slice(0, 140)}`);
+  }
+
+  const json = await res.json();
+  const text =
+    json &&
+    json.choices &&
+    json.choices[0] &&
+    json.choices[0].message &&
+    json.choices[0].message.content
+      ? String(json.choices[0].message.content).trim()
+      : '';
+  if (!text) throw new Error('ChatGPT returned an empty response');
+  return text;
 }
 
 /**
  * Calls Anthropic Messages API (`Claude`).
  */
-async function callClaudeChat(messages, tier = 'Pro', data = store.load()) {
+async function callClaudeChat(messages, model = 'claude-3-7-sonnet-latest', thinking = 'Balanced', data = store.load()) {
   const auth = getProviderAuth(data).claude;
   if (!auth.apiKey) throw new Error('Claude API key is not configured');
   const fetchFn = getFetchImpl();
-
-  const modelsToTry =
-    tier === 'Fast'
-      ? ['claude-3-5-haiku-latest', 'claude-3-haiku-20240307']
-      : ['claude-3-7-sonnet-latest', 'claude-3-5-sonnet-latest', 'claude-3-5-haiku-latest'];
+  const targetModel = model || PROVIDERS.claude.defaultModel;
 
   const apiMessages = messages.map((m) => ({
     role: m.role === 'assistant' ? 'assistant' : 'user',
     content: m.content,
   }));
 
-  let lastErr = null;
-  for (const model of modelsToTry) {
-    const res = await fetchFn('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': auth.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 450,
-        system: SYSTEM_PROMPT,
-        messages: apiMessages,
-      }),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const text =
-        json && Array.isArray(json.content)
-          ? json.content
-              .filter((c) => c.type === 'text')
-              .map((c) => c.text || '')
-              .join('')
-              .trim()
-          : '';
-      if (text) return text;
-    } else {
-      const errText = await res.text().catch(() => '');
-      lastErr = new Error(`Claude error (${res.status}): ${errText.slice(0, 120)}`);
+  const cleanThinking = normalizeThinking(thinking);
+  const body = {
+    model: targetModel,
+    max_tokens: 1024,
+    system: SYSTEM_PROMPT,
+    messages: apiMessages,
+  };
+
+  if (targetModel.includes('3-7-sonnet')) {
+    if (cleanThinking === 'Thinking') {
+      body.thinking = { type: 'enabled', budget_tokens: 16384 };
+      body.max_tokens = 20000;
+    } else if (cleanThinking === 'Balanced') {
+      body.thinking = { type: 'enabled', budget_tokens: 4096 };
+      body.max_tokens = 8000;
     }
   }
-  throw lastErr || new Error('Claude returned an empty response');
+
+  const res = await fetchFn('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': auth.apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Claude error (${res.status}): ${errText.slice(0, 140)}`);
+  }
+
+  const json = await res.json();
+  const text =
+    json && Array.isArray(json.content)
+      ? json.content
+          .filter((c) => c.type === 'text')
+          .map((c) => c.text || '')
+          .join('')
+          .trim()
+      : '';
+  if (!text) throw new Error('Claude returned an empty response');
+  return text;
 }
 
-async function generateProviderReply(provider, tier, messages, data = store.load()) {
+async function generateProviderReply(provider, model, thinking, messages, data = store.load()) {
   if (provider === 'chatgpt') {
-    return callOpenAIChat(messages, tier, data);
+    return callOpenAIChat(messages, model, thinking, data);
   }
   if (provider === 'claude') {
-    return callClaudeChat(messages, tier, data);
+    return callClaudeChat(messages, model, thinking, data);
   }
-  return callGeminiChat(messages, tier, data);
+  return callGeminiChat(messages, model, thinking, data);
 }
 
 /**
@@ -552,6 +585,7 @@ router.get('/status', (req, res) => {
 });
 
 router.post('/config', (req, res) => {
+  const data = store.load();
   const body = req.body || {};
   const updates = {};
 
@@ -579,8 +613,106 @@ router.post('/config', (req, res) => {
     updates.chats = [];
   }
 
+  if (body.customModels && typeof body.customModels === 'object') {
+    const prev = data.customModels || { gemini: '', chatgpt: '', claude: '' };
+    updates.customModels = {
+      gemini: body.customModels.gemini !== undefined ? String(body.customModels.gemini || '').trim() : prev.gemini,
+      chatgpt: body.customModels.chatgpt !== undefined ? String(body.customModels.chatgpt || '').trim() : prev.chatgpt,
+      claude: body.customModels.claude !== undefined ? String(body.customModels.claude || '').trim() : prev.claude,
+    };
+  }
+  if (body.customModelGemini !== undefined) {
+    updates.customModels = updates.customModels || { ...(data.customModels || {}) };
+    updates.customModels.gemini = String(body.customModelGemini || '').trim();
+  }
+  if (body.customModelChatgpt !== undefined) {
+    updates.customModels = updates.customModels || { ...(data.customModels || {}) };
+    updates.customModels.chatgpt = String(body.customModelChatgpt || '').trim();
+  }
+  if (body.customModelClaude !== undefined) {
+    updates.customModels = updates.customModels || { ...(data.customModels || {}) };
+    updates.customModels.claude = String(body.customModelClaude || '').trim();
+  }
+
   store.save(updates);
   res.json({ ok: true, status: getStatus() });
+});
+
+router.post('/fetch-models', async (req, res) => {
+  try {
+    const data = store.load();
+    const auth = getProviderAuth(data);
+    const targetProvider = normalizeProviderId(req.body && req.body.provider);
+    const providersToFetch = targetProvider ? [targetProvider] : ['gemini', 'chatgpt', 'claude'];
+    const results = {};
+
+    for (const p of providersToFetch) {
+      if (!auth[p] || !auth[p].enabled) {
+        results[p] = { ok: false, error: 'Provider not configured or missing API key' };
+        continue;
+      }
+      try {
+        if (p === 'gemini') {
+          const fetchFn = getFetchImpl();
+          const querySuffix = auth.gemini.apiKey ? `?key=${encodeURIComponent(auth.gemini.apiKey)}` : '';
+          const headers = {};
+          if (auth.gemini.mode === 'oauth') {
+            const token = await getValidGoogleAccessToken(data);
+            headers.Authorization = `Bearer ${token}`;
+          }
+          const resp = await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models${querySuffix}`, { headers });
+          if (!resp.ok) {
+            results[p] = { ok: false, error: `Google API HTTP ${resp.status}` };
+          } else {
+            const json = await resp.json();
+            const models = (json.models || []).map((m) => m.name.replace(/^models\//, ''));
+            results[p] = { ok: true, models };
+          }
+        } else if (p === 'chatgpt') {
+          const fetchFn = getFetchImpl();
+          const resp = await fetchFn('https://api.openai.com/v1/models', {
+            headers: { Authorization: `Bearer ${auth.chatgpt.apiKey}` },
+          });
+          if (!resp.ok) {
+            results[p] = { ok: false, error: `OpenAI API HTTP ${resp.status}` };
+          } else {
+            const json = await resp.json();
+            const models = (json.data || []).map((m) => m.id);
+            results[p] = { ok: true, models };
+          }
+        } else if (p === 'claude') {
+          const fetchFn = getFetchImpl();
+          const resp = await fetchFn('https://api.anthropic.com/v1/models', {
+            headers: {
+              'x-api-key': auth.claude.apiKey,
+              'anthropic-version': '2023-06-01',
+            },
+          });
+          if (!resp.ok) {
+            results[p] = { ok: false, error: `Anthropic API HTTP ${resp.status}` };
+          } else {
+            const json = await resp.json();
+            const models = (json.data || []).map((m) => m.id);
+            results[p] = { ok: true, models };
+          }
+        }
+      } catch (err) {
+        results[p] = { ok: false, error: err.message };
+      }
+    }
+
+    const discovered = data.discoveredModels || { gemini: [], chatgpt: [], claude: [] };
+    for (const [p, r] of Object.entries(results)) {
+      if (r.ok && Array.isArray(r.models)) {
+        discovered[p] = r.models;
+      }
+    }
+    store.save({ discoveredModels: discovered });
+
+    return res.json({ ok: true, results, discoveredModels: discovered });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 router.get('/oauth/google/start', (req, res) => {
@@ -650,8 +782,10 @@ router.get('/providers', (req, res) => {
   const data = store.load();
   const auth = getProviderAuth(data);
   const { provider, tier } = resolveActiveProviderAndTier(data);
+  const customModels = data.customModels || {};
+  const activeModels = data.activeModels || {};
   const rows = [
-    ['ACTIVE', provider, PROVIDERS[provider].name, tier],
+    ['ACTIVE', provider, PROVIDERS[provider].name, tier, activeModels[provider] || PROVIDERS[provider].defaultModel],
   ];
   for (const p of Object.values(PROVIDERS)) {
     rows.push([
@@ -659,7 +793,8 @@ router.get('/providers', (req, res) => {
       p.id,
       p.name,
       auth[p.id] && auth[p.id].enabled ? '1' : '0',
-      'Fast,Pro,Thinking',
+      'fast,pro,thinking',
+      customModels[p.id] || '',
     ]);
   }
   return sendPipeResponse(req, res, formatPipeTable(rows));
@@ -755,6 +890,8 @@ router.all('/new-chat', (req, res) => {
 });
 
 router.all('/ask', async (req, res) => {
+  let statusTimer = null;
+  let isDone = false;
   try {
     const data = store.load();
     const { provider: defaultProvider, tier: defaultTier, enabled } = resolveActiveProviderAndTier(data);
@@ -769,8 +906,10 @@ router.all('/ask', async (req, res) => {
 
     const reqProv = normalizeProviderId(req.query.provider || (req.body && req.body.provider)) || defaultProvider;
     const provider = enabled.includes(reqProv) ? reqProv : defaultProvider;
-    const reqTier = normalizeTier(req.query.tier || (req.body && req.body.tier));
-    const tier = reqTier || defaultTier;
+    const reqThinking = normalizeThinking(req.query.thinking || req.query.tier || (req.body && (req.body.thinking || req.body.tier)));
+    const thinking = reqThinking || defaultTier;
+    const reqModel = String(req.query.model || (req.body && req.body.model) || '').trim();
+    const model = reqModel || (data.activeModels && data.activeModels[provider]) || PROVIDERS[provider].defaultModel;
     const wantTts = req.query.tts === '1' || (req.body && req.body.tts === true);
     const isRetry = req.query.retry === '1' || (req.body && req.body.retry === true);
 
@@ -784,7 +923,8 @@ router.all('/ask', async (req, res) => {
         id: chatId,
         title: generateChatTitle(prompt),
         provider,
-        tier,
+        tier: thinking,
+        model,
         createdAt: Date.now(),
         updatedAt: Date.now(),
         messages: [],
@@ -793,7 +933,8 @@ router.all('/ask', async (req, res) => {
     }
 
     chat.provider = provider;
-    chat.tier = tier;
+    chat.tier = thinking;
+    chat.model = model;
     if (isRetry && Array.isArray(chat.messages) && chat.messages.length > 0) {
       if (chat.messages[chat.messages.length - 1].role === 'assistant') {
         chat.messages.pop();
@@ -806,13 +947,53 @@ router.all('/ask', async (req, res) => {
       chat.messages.push({ role: 'user', content: prompt, ts: Date.now() });
     }
 
-    const replyText = await generateProviderReply(provider, tier, chat.messages.slice(-12), data);
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Transfer-Encoding': 'chunked',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+
+    const sendStatus = (msg) => {
+      if (!isDone && !res.writableEnded) {
+        res.write(`STATUS|${sanitizeField(msg)}\n`);
+      }
+    };
+
+    sendStatus('Thinking...');
+
+    let elapsedSec = 0;
+    statusTimer = setInterval(() => {
+      elapsedSec += 5;
+      if (isDone || res.writableEnded) {
+        clearInterval(statusTimer);
+        return;
+      }
+      if (elapsedSec >= 45) {
+        clearInterval(statusTimer);
+        if (!res.writableEnded) {
+          res.write('ERR|408|Request timed out after 45s without response\n');
+          res.end();
+        }
+        return;
+      }
+      if (elapsedSec >= 20) {
+        sendStatus('Still thinking... MacCompanion server is still up!');
+        sendStatus(`Still thinking... The ${PROVIDERS[provider].name} API is still responding`);
+      }
+    }, 5000);
+
+    const replyText = await generateProviderReply(provider, model, thinking, chat.messages.slice(-12), data);
+    isDone = true;
+    if (statusTimer) clearInterval(statusTimer);
+
     chat.messages.push({ role: 'assistant', content: replyText, ts: Date.now() });
     chat.updatedAt = Date.now();
 
     store.save({
       activeProvider: provider,
-      activeTier: tier,
+      activeTier: thinking,
+      activeThinking: thinking,
       chats: chats.slice(0, 60),
       lastError: null,
     });
@@ -828,14 +1009,30 @@ router.all('/ask', async (req, res) => {
         .catch(() => {});
     }
 
-    const pipe = formatPipeRow(['REPLY', chat.id, chat.title, provider, tier, replyText]) + '\n';
-    if (req.query.format === 'json') {
-      return res.json({ ok: true, chatId: chat.id, title: chat.title, provider, tier, reply: replyText });
+    const pipeReply = [
+      'REPLY',
+      chat.id,
+      escapePipe(chat.title || prompt),
+      provider,
+      escapePipe(model),
+      thinking,
+      escapePipe(replyText),
+    ].join('|');
+
+    if (!res.writableEnded) {
+      res.write(pipeReply + '\n');
+      res.end();
     }
-    return sendPipeResponse(req, res, pipe);
   } catch (err) {
-    store.save({ lastError: err.message });
-    return res.status(500).type('text/plain').send(`ERR|500|${sanitizeField(err.message)}\n`);
+    isDone = true;
+    if (statusTimer) clearInterval(statusTimer);
+    const errMsg = err.message || 'AI request failed';
+    if (!res.headersSent) {
+      res.status(500).type('text/plain; charset=utf-8').send(`ERR|500|${sanitizeField(errMsg)}\n`);
+    } else if (!res.writableEnded) {
+      res.write(`ERR|500|${sanitizeField(errMsg)}\n`);
+      res.end();
+    }
   }
 });
 
@@ -896,7 +1093,8 @@ router.all(
       }
 
       chat.messages.push({ role: 'user', content: transcript, ts: Date.now() });
-      const replyText = await generateProviderReply(provider, tier, chat.messages.slice(-12), data);
+      const activeMod = (data.activeModels && data.activeModels[provider]) || PROVIDERS[provider].defaultModel;
+      const replyText = await generateProviderReply(provider, activeMod, tier, chat.messages.slice(-12), data);
       chat.messages.push({ role: 'assistant', content: replyText, ts: Date.now() });
       chat.updatedAt = Date.now();
 
@@ -962,6 +1160,10 @@ function getStatus() {
         : 'Log in or add an API key for Gemini, ChatGPT, or Claude below',
     activeProvider: provider,
     activeTier: tier,
+    activeThinking: tier,
+    activeModels: data.activeModels || {},
+    customModels: data.customModels || { gemini: '', chatgpt: '', claude: '' },
+    discoveredModels: data.discoveredModels || { gemini: [], chatgpt: [], claude: [] },
     enabledProviders: enabled,
     providers: {
       gemini: {
@@ -970,21 +1172,27 @@ function getStatus() {
         enabled: auth.gemini.enabled,
         authMode: auth.gemini.mode,
         hasOAuthClient: Boolean(data.googleClientId && data.googleClientSecret),
-        models: PROVIDERS.gemini.tiers,
+        models: PROVIDERS.gemini.models,
+        defaultModel: PROVIDERS.gemini.defaultModel,
+        customModel: (data.customModels && data.customModels.gemini) || '',
       },
       chatgpt: {
         id: 'chatgpt',
         name: 'OpenAI ChatGPT',
         enabled: auth.chatgpt.enabled,
         authMode: auth.chatgpt.mode,
-        models: PROVIDERS.chatgpt.tiers,
+        models: PROVIDERS.chatgpt.models,
+        defaultModel: PROVIDERS.chatgpt.defaultModel,
+        customModel: (data.customModels && data.customModels.chatgpt) || '',
       },
       claude: {
         id: 'claude',
         name: 'Anthropic Claude',
         enabled: auth.claude.enabled,
         authMode: auth.claude.mode,
-        models: PROVIDERS.claude.tiers,
+        models: PROVIDERS.claude.models,
+        defaultModel: PROVIDERS.claude.defaultModel,
+        customModel: (data.customModels && data.customModels.claude) || '',
       },
     },
     chatCount: Array.isArray(data.chats) ? data.chats.length : 0,

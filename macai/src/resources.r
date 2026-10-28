@@ -221,9 +221,15 @@ resource 'MENU' (130, "Settings") {
         "Use ChatGPT (OpenAI)", noIcon, "2", noMark, plain,
         "Use Claude (Anthropic)", noIcon, "3", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
-        "Model Tier: Fast", noIcon, noKey, noMark, plain,
-        "Model Tier: Pro", noIcon, noKey, noMark, plain,
-        "Model Tier: Thinking", noIcon, noKey, noMark, plain,
+        "Model: 3.5 Flash-Lite", noIcon, noKey, noMark, plain,
+        "Model: 3.8 Flash", noIcon, noKey, noMark, plain,
+        "Model: 3.1 Pro", noIcon, noKey, noMark, plain,
+        "Model: 4 Argon", noIcon, noKey, noMark, plain,
+        "Model: Custom", noIcon, noKey, noMark, plain,
+        "-", noIcon, noKey, noMark, plain,
+        "Thinking: Fast", noIcon, noKey, noMark, plain,
+        "Thinking: Balanced", noIcon, noKey, noMark, plain,
+        "Thinking: Thinking", noIcon, noKey, noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Read Replies Aloud (TTS)", noIcon, "T", noMark, plain
     }

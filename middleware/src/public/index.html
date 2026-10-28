@@ -411,7 +411,7 @@
       <span>•</span>
       <span id="udp-port">UDP: 6801</span>
       <span>•</span>
-      <span id="server-version">v0.4.3</span>
+      <span id="server-version">v0.4.4</span>
     </div>
   </header>
 
@@ -536,6 +536,19 @@
             <input type="password" id="gemini-key-input" placeholder="AIzaSy... (Google AI Studio API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
             <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('gemini')">Save</button>
           </div>
+          <div id="gemini-custom-box" style="margin-top:4px; padding-top:6px; border-top:1px dashed #bbb; font-size:11px; display:flex; flex-direction:column; gap:4px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span><strong>Custom Model:</strong> (optional advanced override for MacAI)</span>
+              <button type="button" class="subtle-btn" id="gemini-fetch-btn" onclick="fetchModelsForProvider('gemini')">Fetch Available Models</button>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <select id="gemini-model-select" style="flex:1; font-size:11px; padding:3px;" onchange="onCustomModelSelect('gemini')">
+                <option value="">-- Discovered models (click Fetch) --</option>
+              </select>
+              <input type="text" id="gemini-custom-model-input" placeholder="e.g. gemini-3-flash-preview" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:3px 6px; border:1px solid #000;" />
+              <button type="button" class="mac-btn" style="padding:3px 8px; font-size:11px;" onclick="saveCustomModel('gemini')">Save</button>
+            </div>
+          </div>
           <div id="gemini-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
             <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('gemini')">Disconnect Gemini</button>
           </div>
@@ -554,6 +567,19 @@
             <input type="password" id="chatgpt-key-input" placeholder="sk-... (OpenAI API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
             <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('chatgpt')">Save</button>
           </div>
+          <div id="chatgpt-custom-box" style="margin-top:4px; padding-top:6px; border-top:1px dashed #bbb; font-size:11px; display:flex; flex-direction:column; gap:4px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span><strong>Custom Model:</strong> (optional advanced override for MacAI)</span>
+              <button type="button" class="subtle-btn" id="chatgpt-fetch-btn" onclick="fetchModelsForProvider('chatgpt')">Fetch Available Models</button>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <select id="chatgpt-model-select" style="flex:1; font-size:11px; padding:3px;" onchange="onCustomModelSelect('chatgpt')">
+                <option value="">-- Discovered models (click Fetch) --</option>
+              </select>
+              <input type="text" id="chatgpt-custom-model-input" placeholder="e.g. o1-preview" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:3px 6px; border:1px solid #000;" />
+              <button type="button" class="mac-btn" style="padding:3px 8px; font-size:11px;" onclick="saveCustomModel('chatgpt')">Save</button>
+            </div>
+          </div>
           <div id="chatgpt-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
             <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('chatgpt')">Disconnect ChatGPT</button>
           </div>
@@ -571,6 +597,19 @@
           <div style="display:flex; gap:6px;">
             <input type="password" id="claude-key-input" placeholder="sk-ant-... (Anthropic API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
             <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('claude')">Save</button>
+          </div>
+          <div id="claude-custom-box" style="margin-top:4px; padding-top:6px; border-top:1px dashed #bbb; font-size:11px; display:flex; flex-direction:column; gap:4px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span><strong>Custom Model:</strong> (optional advanced override for MacAI)</span>
+              <button type="button" class="subtle-btn" id="claude-fetch-btn" onclick="fetchModelsForProvider('claude')">Fetch Available Models</button>
+            </div>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <select id="claude-model-select" style="flex:1; font-size:11px; padding:3px;" onchange="onCustomModelSelect('claude')">
+                <option value="">-- Discovered models (click Fetch) --</option>
+              </select>
+              <input type="text" id="claude-custom-model-input" placeholder="e.g. claude-3-opus-20240229" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:3px 6px; border:1px solid #000;" />
+              <button type="button" class="mac-btn" style="padding:3px 8px; font-size:11px;" onclick="saveCustomModel('claude')">Save</button>
+            </div>
           </div>
           <div id="claude-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
             <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('claude')">Disconnect Claude</button>
@@ -757,6 +796,82 @@
       }
     }
 
+    async function fetchModelsForProvider(prov) {
+      const btn = document.getElementById(`${prov}-fetch-btn`);
+      const origText = btn ? btn.textContent : '';
+      if (btn) {
+        btn.textContent = 'Fetching...';
+        btn.disabled = true;
+      }
+      try {
+        const res = await fetch('/api/macai/fetch-models', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: prov }),
+        });
+        const json = await res.json();
+        if (json.ok && json.discoveredModels && json.discoveredModels[prov]) {
+          populateDiscoveredModels(prov, json.discoveredModels[prov]);
+          if (btn) {
+            btn.textContent = `Refreshed (${json.discoveredModels[prov].length} models)`;
+            setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 3000);
+          }
+        } else {
+          alert(`Could not fetch models: ${json.error || (json.results && json.results[prov] && json.results[prov].error) || 'Unknown error'}`);
+          if (btn) { btn.textContent = origText; btn.disabled = false; }
+        }
+      } catch (err) {
+        alert(`Fetch failed: ${err.message}`);
+        if (btn) { btn.textContent = origText; btn.disabled = false; }
+      }
+    }
+
+    function populateDiscoveredModels(prov, models) {
+      const sel = document.getElementById(`${prov}-model-select`);
+      const input = document.getElementById(`${prov}-custom-model-input`);
+      if (!sel || !Array.isArray(models)) return;
+      const currentVal = input ? input.value.trim() : '';
+      sel.innerHTML = `<option value="">-- Discovered models (${models.length}) --</option>`;
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        if (m === currentVal) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    }
+
+    function onCustomModelSelect(prov) {
+      const sel = document.getElementById(`${prov}-model-select`);
+      const input = document.getElementById(`${prov}-custom-model-input`);
+      if (sel && input && sel.value) {
+        input.value = sel.value;
+      }
+    }
+
+    async function saveCustomModel(prov) {
+      const input = document.getElementById(`${prov}-custom-model-input`);
+      const val = input ? input.value.trim() : '';
+      const payload = { customModels: {} };
+      payload.customModels[prov] = val;
+      try {
+        const res = await fetch('/api/macai/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          alert(`Custom model for ${prov.toUpperCase()} saved: ${val || '(None / Cleared)'}`);
+          pollStatus();
+        } else {
+          alert('Error saving custom model');
+        }
+      } catch (err) {
+        alert(`Error saving custom model: ${err.message}`);
+      }
+    }
+
     function renderMacAI(macai) {
       if (!macai) return;
       const badge = document.getElementById('macai-badge');
@@ -786,8 +901,20 @@
         }
       }
 
+      const customModels = macai.customModels || {};
+      const discovered = macai.discoveredModels || {};
+      for (const prov of ['gemini', 'chatgpt', 'claude']) {
+        const input = document.getElementById(`${prov}-custom-model-input`);
+        if (input && !input.matches(':focus')) {
+          input.value = customModels[prov] || '';
+        }
+        if (discovered[prov] && discovered[prov].length > 0) {
+          populateDiscoveredModels(prov, discovered[prov]);
+        }
+      }
+
       document.getElementById('macai-footer-label').textContent =
-        `Default: ${(macai.activeProvider || 'gemini').toUpperCase()} (${macai.activeTier || 'Pro'})`;
+        `Default: ${(macai.activeProvider || 'gemini').toUpperCase()} (${macai.activeTier || 'Balanced'})`;
       document.getElementById('macai-chats-count').textContent =
         `${macai.chatCount || 0} saved chat${macai.chatCount === 1 ? '' : 's'}`;
 

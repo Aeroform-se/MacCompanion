@@ -359,7 +359,8 @@ static long NetHttpRequestInternal(const char *method, const char *path,
                                    const char *contentType,
                                    const void *postBody, long postLen,
                                    char *outBody, long maxLen,
-                                   Byte openTimeoutSec, Byte rcvTimeoutSec)
+                                   Byte openTimeoutSec, Byte rcvTimeoutSec,
+                                   NetStatusCallback onStatus)
 {
     TCPiopb pb;
     StreamPtr stream = 0;
@@ -492,6 +493,33 @@ static long NetHttpRequestInternal(const char *method, const char *path,
             if (headerStripped && expectedBodyLen >= 0 && totalRead >= expectedBodyLen) {
                 break;
             }
+
+            if (headerStripped && onStatus) {
+                char *nl;
+                while ((nl = memchr(outBody, '\n', totalRead)) != NULL) {
+                    long lineLen = (long)(nl - outBody + 1);
+                    if (strncmp(outBody, "STATUS|", 7) == 0) {
+                        char stBuf[128];
+                        short stLen = (short)(lineLen - 7 - 1);
+                        if (stLen > 0 && outBody[7 + stLen - 1] == '\r') stLen--;
+                        if (stLen > (short)(sizeof(stBuf) - 1)) stLen = sizeof(stBuf) - 1;
+                        if (stLen > 0) {
+                            memcpy(stBuf, outBody + 7, stLen);
+                            stBuf[stLen] = '\0';
+                            onStatus(stBuf);
+                        }
+                        memmove(outBody, nl + 1, totalRead - lineLen);
+                        totalRead -= lineLen;
+                    } else if (strncmp(outBody, "REPLY|", 6) == 0 || strncmp(outBody, "ERR|", 4) == 0) {
+                        /* Final payload or error encountered; retain in buffer */
+                        break;
+                    } else {
+                        /* Consume unknown keep-alive line */
+                        memmove(outBody, nl + 1, totalRead - lineLen);
+                        totalRead -= lineLen;
+                    }
+                }
+            }
         } else {
             break;
         }
@@ -516,20 +544,26 @@ cleanup:
     return bodyLen;
 }
 
+long NetHttpGetStream(const char *path, char *outBody, long maxLen, NetStatusCallback onStatus, short timeoutSec)
+{
+    Byte rcvTimeout = (timeoutSec > 0 && timeoutSec < 120) ? (Byte)timeoutSec : 45;
+    return NetHttpRequestInternal("GET", path, NULL, NULL, 0, outBody, maxLen, 4, rcvTimeout, onStatus);
+}
+
 long NetHttpGet(const char *path, char *outBody, long maxLen)
 {
     Boolean isPing = (strstr(path, "/ping") != NULL);
     Boolean isSlowAI = (strstr(path, "/ask") != NULL || strstr(path, "/tts") != NULL);
     Byte openTimeout = isPing ? 3 : 4;
-    Byte rcvTimeout  = isSlowAI ? 30 : (isPing ? 3 : 6);
-    return NetHttpRequestInternal("GET", path, NULL, NULL, 0, outBody, maxLen, openTimeout, rcvTimeout);
+    Byte rcvTimeout  = isSlowAI ? 45 : (isPing ? 3 : 6);
+    return NetHttpRequestInternal("GET", path, NULL, NULL, 0, outBody, maxLen, openTimeout, rcvTimeout, NULL);
 }
 
 long NetHttpPost(const char *path, const char *contentType,
                  const void *postBody, long postLen,
                  char *outBody, long maxLen)
 {
-    return NetHttpRequestInternal("POST", path, contentType, postBody, postLen, outBody, maxLen, 5, 30);
+    return NetHttpRequestInternal("POST", path, contentType, postBody, postLen, outBody, maxLen, 5, 30, NULL);
 }
 
 void UrlEncode(const char *src, char *dst, short maxDst)

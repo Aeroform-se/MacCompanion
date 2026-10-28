@@ -49,10 +49,15 @@
 #define iUseGemini          3
 #define iUseOpenAI          4
 #define iUseClaude          5
-#define iTierFast           7
-#define iTierPro            8
-#define iTierThinking       9
-#define iToggleTTS          11
+#define iModel1             7
+#define iModel2             8
+#define iModel3             9
+#define iModel4             10
+#define iModelCustom        11
+#define iThinkingFast       13
+#define iThinkingBalanced   14
+#define iThinkingThinking   15
+#define iToggleTTS          17
 
 #define MAX_CHATS           30
 #define MAX_MESSAGES        40
@@ -77,9 +82,18 @@ typedef struct {
 } ChatMessage;
 
 typedef struct {
-    char    id[12];
-    char    name[16];
-    Boolean enabled;
+    char name[32];
+    char id[48];
+} ModelChoice;
+
+typedef struct {
+    char        id[12];
+    char        name[16];
+    Boolean     enabled;
+    short       activeModelIdx;
+    ModelChoice models[4];
+    char        customModelName[48];
+    Boolean     hasCustomModel;
 } ProviderInfo;
 
 /* Global Window & Offscreen Double-Buffer */
@@ -103,14 +117,45 @@ static Boolean        gManualIPFocused  = true;
 static char           gManualIPBuf[32]  = "10.0.2.2";
 static char           gServerIPStr[32]  = "";
 
-/* AI Provider & Tier State */
+/* AI Provider, Models & Thinking State */
 static ProviderInfo   gProviders[3] = {
-    { "gemini",  "Gemini",  false },
-    { "chatgpt", "ChatGPT", false },
-    { "claude",  "Claude",  false }
+    {
+        "gemini", "Gemini", false, 1, /* Default: 3.8 Flash (idx 1) */
+        {
+            { "3.5 Flash-Lite", "gemini-3.5-flash-lite" },
+            { "3.8 Flash",      "gemini-3.8-flash" },
+            { "3.1 Pro",        "gemini-3.1-pro-preview" },
+            { "4 Argon",        "gemini-4-argon" }
+        },
+        "", false
+    },
+    {
+        "chatgpt", "ChatGPT", false, 1, /* Default: GPT-4o (idx 1) */
+        {
+            { "GPT-4o Mini", "gpt-4o-mini" },
+            { "GPT-4o",      "gpt-4o" },
+            { "o3-mini",     "o3-mini" },
+            { "o1",          "o1" }
+        },
+        "", false
+    },
+    {
+        "claude", "Claude", false, 1, /* Default: Claude 3.7 Sonnet (idx 1) */
+        {
+            { "Claude 3.5 Haiku",  "claude-3-5-haiku-latest" },
+            { "Claude 3.7 Sonnet", "claude-3-7-sonnet-latest" },
+            { "Claude 3.5 Sonnet", "claude-3-5-sonnet-latest" },
+            { "Claude 3 Opus",     "claude-3-opus-latest" }
+        },
+        "", false
+    }
 };
 static char           gActiveProvider[12] = "gemini";
-static char           gActiveTier[12]     = "Pro";
+static char           gActiveTier[12]     = "Balanced";
+static const char    *gThinkingLevels[3]  = { "Fast", "Balanced", "Thinking" };
+static short          gActiveThinkingIdx  = 1; /* Default: Balanced */
+static char           gWaitStatusText[96] = "Thinking...";
+static unsigned long  gWaitStartTick      = 0;
 static Boolean        gProviderMenuOpen   = false;
 static Boolean        gTierMenuOpen       = false;
 static Boolean        gReadRepliesTTS     = false;
@@ -450,10 +495,10 @@ static const char *GetProviderDisplayName(const char *id)
 
 static const char *GetTierDisplayName(const char *tier)
 {
-    if (!tier) return "Pro";
-    if (tier[0] == 'f' || tier[0] == 'F') return "Fast";
-    if (tier[0] == 't' || tier[0] == 'T') return "Thinking";
-    return "Pro";
+    if (!tier) return "Balanced";
+    if (tier[0] == 'f' || tier[0] == 'F' || tier[0] == 'l' || tier[0] == 'L') return "Fast";
+    if (tier[0] == 't' || tier[0] == 'T' || tier[0] == 'h' || tier[0] == 'H') return "Thinking";
+    return "Balanced";
 }
 
 /* ============================================================================
@@ -1426,7 +1471,12 @@ static void DrawChatArea(void)
 
     if (gWaitingForAI) {
         Rect waitR;
-        SetRect(&waitR, aiLeftX, curY, aiLeftX + 120, curY + 24);
+        short textW = MeasureCString(gWaitStatusText);
+        short waitW = textW + 24;
+        short maxW  = aiMaxW;
+        if (waitW < 96) waitW = 96;
+        if (waitW > maxW) waitW = maxW;
+        SetRect(&waitR, aiLeftX, curY, aiLeftX + waitW, curY + 24);
         {
             Rect shadowR = waitR;
             OffsetRect(&shadowR, 0, 1);
@@ -1434,7 +1484,7 @@ static void DrawChatArea(void)
             EraseRoundRect(&waitR, 14, 14);
         }
         MoveTo(waitR.left + 12, waitR.top + 15);
-        DrawCString("Thinking...");
+        DrawCString(gWaitStatusText);
     }
 
     /* Restore full window clip */
@@ -1814,22 +1864,27 @@ static Boolean IsProviderEnabled(const char *id)
 
 static void NormalizeTierName(const char *inTier, char *outTier, short maxLen)
 {
+    const char *norm = GetTierDisplayName(inTier);
     if (!inTier || !*inTier || maxLen < 2) return;
-    if (inTier[0] == 'f' || inTier[0] == 'F') {
-        strncpy(outTier, "Fast", maxLen - 1);
-    } else if (inTier[0] == 'p' || inTier[0] == 'P') {
-        strncpy(outTier, "Pro", maxLen - 1);
-    } else if (inTier[0] == 't' || inTier[0] == 'T') {
-        strncpy(outTier, "Thinking", maxLen - 1);
-    } else {
-        strncpy(outTier, inTier, maxLen - 1);
-    }
+    strncpy(outTier, norm, maxLen - 1);
     outTier[maxLen - 1] = '\0';
+    if (norm[0] == 'F') gActiveThinkingIdx = 0;
+    else if (norm[0] == 'T') gActiveThinkingIdx = 2;
+    else gActiveThinkingIdx = 1;
+}
+
+static short GetActiveProviderIdx(void)
+{
+    if (strcmp(gActiveProvider, "chatgpt") == 0 || strcmp(gActiveProvider, "openai") == 0) return 1;
+    if (strcmp(gActiveProvider, "claude") == 0) return 2;
+    return 0; /* gemini */
 }
 
 static void SyncAIMenuState(void)
 {
     MenuHandle setMenu = GetMenuHandle(mSettings);
+    short pIdx = GetActiveProviderIdx();
+    short i;
     if (!setMenu) return;
 
     if (IsProviderEnabled("gemini")) EnableItem(setMenu, iUseGemini);
@@ -1841,13 +1896,42 @@ static void SyncAIMenuState(void)
     if (IsProviderEnabled("claude")) EnableItem(setMenu, iUseClaude);
     else DisableItem(setMenu, iUseClaude);
 
-    CheckItem(setMenu, iUseGemini, (strcmp(gActiveProvider, "gemini") == 0));
-    CheckItem(setMenu, iUseOpenAI, (strcmp(gActiveProvider, "chatgpt") == 0 || strcmp(gActiveProvider, "openai") == 0));
-    CheckItem(setMenu, iUseClaude, (strcmp(gActiveProvider, "claude") == 0));
+    CheckItem(setMenu, iUseGemini, (pIdx == 0));
+    CheckItem(setMenu, iUseOpenAI, (pIdx == 1));
+    CheckItem(setMenu, iUseClaude, (pIdx == 2));
 
-    CheckItem(setMenu, iTierFast,     (gActiveTier[0] == 'F' || gActiveTier[0] == 'f'));
-    CheckItem(setMenu, iTierPro,      (gActiveTier[0] == 'P' || gActiveTier[0] == 'p'));
-    CheckItem(setMenu, iTierThinking, (gActiveTier[0] == 'T' || gActiveTier[0] == 't'));
+    /* Update Model 1..4 title and checkmark */
+    for (i = 0; i < 4; i++) {
+        Str255 pTitle;
+        char cTitle[64];
+        sprintf(cTitle, "Model: %s", gProviders[pIdx].models[i].name);
+        c2pstrcpy(pTitle, cTitle);
+        SetMenuItemText(setMenu, iModel1 + i, pTitle);
+        CheckItem(setMenu, iModel1 + i, (gProviders[pIdx].activeModelIdx == i));
+    }
+
+    /* Update Model: Custom title and availability */
+    {
+        Str255 pTitle;
+        char cTitle[64];
+        if (gProviders[pIdx].hasCustomModel && gProviders[pIdx].customModelName[0]) {
+            sprintf(cTitle, "Model: Custom: %s", gProviders[pIdx].customModelName);
+            c2pstrcpy(pTitle, cTitle);
+            SetMenuItemText(setMenu, iModelCustom, pTitle);
+            EnableItem(setMenu, iModelCustom);
+            CheckItem(setMenu, iModelCustom, (gProviders[pIdx].activeModelIdx == 4));
+        } else {
+            c2pstrcpy(pTitle, "Model: Custom");
+            SetMenuItemText(setMenu, iModelCustom, pTitle);
+            DisableItem(setMenu, iModelCustom);
+            CheckItem(setMenu, iModelCustom, false);
+        }
+    }
+
+    /* Thinking levels */
+    CheckItem(setMenu, iThinkingFast,     (gActiveThinkingIdx == 0));
+    CheckItem(setMenu, iThinkingBalanced, (gActiveThinkingIdx == 1));
+    CheckItem(setMenu, iThinkingThinking, (gActiveThinkingIdx == 2));
 
     CheckItem(setMenu, iToggleTTS, gReadRepliesTTS);
 }
@@ -2076,11 +2160,43 @@ static void FetchProvidersAndChats(void)
                     *p2++ = '\0';
                     p3 = strchr(p2, '|');
                     if (p3) {
+                        char *p4;
                         short k;
                         *p3++ = '\0';
-                        for (k = 0; k < 3; k++) {
-                            if (strcmp(gProviders[k].id, p1) == 0) {
-                                gProviders[k].enabled = (p3[0] == '1');
+                        p4 = strchr(p3, '|');
+                        if (p4) {
+                            char *p5;
+                            *p4++ = '\0';
+                            p5 = strchr(p4, '|');
+                            if (p5) {
+                                *p5++ = '\0';
+                                for (k = 0; k < 3; k++) {
+                                    if (strcmp(gProviders[k].id, p1) == 0) {
+                                        gProviders[k].enabled = (p3[0] == '1');
+                                        if (p5 && *p5) {
+                                            SafeCopyString(gProviders[k].customModelName, p5, sizeof(gProviders[k].customModelName));
+                                            gProviders[k].hasCustomModel = true;
+                                        } else {
+                                            gProviders[k].customModelName[0] = '\0';
+                                            gProviders[k].hasCustomModel = false;
+                                            if (gProviders[k].activeModelIdx == 4) {
+                                                gProviders[k].activeModelIdx = 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                for (k = 0; k < 3; k++) {
+                                    if (strcmp(gProviders[k].id, p1) == 0) {
+                                        gProviders[k].enabled = (p3[0] == '1');
+                                    }
+                                }
+                            }
+                        } else {
+                            for (k = 0; k < 3; k++) {
+                                if (strcmp(gProviders[k].id, p1) == 0) {
+                                    gProviders[k].enabled = (p3[0] == '1');
+                                }
                             }
                         }
                     }
@@ -2174,7 +2290,7 @@ static void AttemptDiscoveryOrSavedConnect(void)
     RenderWindow();
 }
 
-static void SelectProviderOrTier(const char *provider, const char *tier)
+static void SelectProvider(const char *provider)
 {
     if (provider && *provider) {
         const char *normProv = (strcmp(provider, "openai") == 0) ? "chatgpt" : provider;
@@ -2186,11 +2302,44 @@ static void SelectProviderOrTier(const char *provider, const char *tier)
         strncpy(gActiveProvider, normProv, sizeof(gActiveProvider) - 1);
         gActiveProvider[sizeof(gActiveProvider) - 1] = '\0';
     }
-    if (tier && *tier) {
-        NormalizeTierName(tier, gActiveTier, sizeof(gActiveTier));
-    }
     SyncAIMenuState();
     RenderWindow();
+}
+
+static void SelectModel(short mIdx)
+{
+    short pIdx = GetActiveProviderIdx();
+    if (mIdx == 4 && (!gProviders[pIdx].hasCustomModel || !gProviders[pIdx].customModelName[0])) {
+        SysBeep(1);
+        return;
+    }
+    if (mIdx >= 0 && mIdx <= 4) {
+        gProviders[pIdx].activeModelIdx = mIdx;
+        SyncAIMenuState();
+        RenderWindow();
+    }
+}
+
+static void SelectThinkingLevel(short tIdx)
+{
+    if (tIdx >= 0 && tIdx < 3) {
+        gActiveThinkingIdx = tIdx;
+        strncpy(gActiveTier, gThinkingLevels[tIdx], sizeof(gActiveTier) - 1);
+        SyncAIMenuState();
+        RenderWindow();
+    }
+}
+
+static void SelectProviderOrTier(const char *provider, const char *tier)
+{
+    if (provider && *provider) {
+        SelectProvider(provider);
+    }
+    if (tier && *tier) {
+        if (tier[0] == 'f' || tier[0] == 'F' || tier[0] == 'l' || tier[0] == 'L') SelectThinkingLevel(0);
+        else if (tier[0] == 't' || tier[0] == 'T' || tier[0] == 'h' || tier[0] == 'H') SelectThinkingLevel(2);
+        else SelectThinkingLevel(1);
+    }
 }
 
 static void StartNewChat(void)
@@ -2299,17 +2448,34 @@ static void AppendMessage(Boolean isUser, const char *text)
     gMsgScrollY = 30000;
 }
 
+static void OnAIStatusCallback(const char *statusText)
+{
+    if (statusText && *statusText) {
+        SafeCopyString(gWaitStatusText, statusText, sizeof(gWaitStatusText));
+        RenderWindow();
+    }
+}
+
 static void SendPromptToAI(const char *promptText, Boolean isRetry)
 {
     static char encPrompt[600];
+    static char encModel[64];
     static char path[768];
     long n;
+    short pIdx = GetActiveProviderIdx();
+    short mIdx = gProviders[pIdx].activeModelIdx;
+    const char *modelId = (mIdx == 4 && gProviders[pIdx].hasCustomModel && gProviders[pIdx].customModelName[0])
+                            ? gProviders[pIdx].customModelName
+                            : gProviders[pIdx].models[mIdx].id;
+    const char *thinkingName = gThinkingLevels[gActiveThinkingIdx];
 
     if (!promptText || !*promptText || !gNetBuf || !gServerConnected) return;
 
     if (!isRetry) {
         AppendMessage(true, promptText);
     }
+    SafeCopyString(gWaitStatusText, "Thinking...", sizeof(gWaitStatusText));
+    gWaitStartTick = TickCount();
     gWaitingForAI = true;
     RenderWindow();
 
@@ -2318,17 +2484,19 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
     }
 
     UrlEncode(promptText, encPrompt, sizeof(encPrompt));
-    sprintf(path, "/api/macai/ask?chat_id=%s&provider=%s&tier=%s&tts=%d&retry=%d&q=%s",
-            gActiveChatId, gActiveProvider, gActiveTier, gReadRepliesTTS ? 1 : 0, isRetry ? 1 : 0, encPrompt);
+    UrlEncode(modelId, encModel, sizeof(encModel));
+    sprintf(path, "/api/macai/ask?chat_id=%s&provider=%s&model=%s&thinking=%s&tts=%d&retry=%d&q=%s",
+            gActiveChatId, gProviders[pIdx].id, encModel, thinkingName,
+            gReadRepliesTTS ? 1 : 0, isRetry ? 1 : 0, encPrompt);
 
-    n = NetHttpGet(path, gNetBuf, NET_BUF_SIZE);
+    n = NetHttpGetStream(path, gNetBuf, NET_BUF_SIZE, OnAIStatusCallback, 45);
     gWaitingForAI = false;
 
     if (n > 0 && strncmp(gNetBuf, "REPLY|", 6) == 0) {
         char *p1 = gNetBuf + 6;
         char *p2 = strchr(p1, '|');
         if (p2) {
-            char *p3, *p4, *p5;
+            char *p3, *p4, *p5, *p6;
             *p2++ = '\0';
             p3 = strchr(p2, '|');
             if (p3) {
@@ -2339,14 +2507,29 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
                     p5 = strchr(p4, '|');
                     if (p5) {
                         *p5++ = '\0';
-                        strncpy(gActiveChatId, p1, sizeof(gActiveChatId) - 1);
-                        if (IsProviderEnabled(p3)) {
-                            strncpy(gActiveProvider, p3, sizeof(gActiveProvider) - 1);
+                        p6 = strchr(p5, '|');
+                        if (p6) {
+                            *p6++ = '\0';
+                            /* REPLY|<chatId>|<title>|<provider>|<model>|<thinking>|<reply> */
+                            strncpy(gActiveChatId, p1, sizeof(gActiveChatId) - 1);
+                            if (IsProviderEnabled(p3)) {
+                                strncpy(gActiveProvider, p3, sizeof(gActiveProvider) - 1);
+                            }
+                            NormalizeTierName(p5, gActiveTier, sizeof(gActiveTier));
+                            SyncAIMenuState();
+                            AppendMessage(false, p6);
+                            RefreshChatList();
+                        } else {
+                            /* Backwards compatible: REPLY|<chatId>|<title>|<provider>|<thinking>|<reply> */
+                            strncpy(gActiveChatId, p1, sizeof(gActiveChatId) - 1);
+                            if (IsProviderEnabled(p3)) {
+                                strncpy(gActiveProvider, p3, sizeof(gActiveProvider) - 1);
+                            }
+                            NormalizeTierName(p4, gActiveTier, sizeof(gActiveTier));
+                            SyncAIMenuState();
+                            AppendMessage(false, p5);
+                            RefreshChatList();
                         }
-                        NormalizeTierName(p4, gActiveTier, sizeof(gActiveTier));
-                        SyncAIMenuState();
-                        AppendMessage(false, p5);
-                        RefreshChatList();
                     }
                 }
             }
@@ -2355,7 +2538,7 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
         char *msg = strchr(gNetBuf + 4, '|');
         AppendMessage(false, msg ? (msg + 1) : (gNetBuf + 4));
     } else {
-        AppendMessage(false, "Network timeout or server error.");
+        AppendMessage(false, "Network error: Request timed out or server unreachable.");
     }
 
     RenderWindow();
@@ -3523,12 +3706,17 @@ static void HandleMenuChoice(long menuChoice)
                 gScanningServer  = false;
                 RenderWindow();
                 break;
-            case iUseGemini:    SelectProviderOrTier("gemini", NULL); break;
-            case iUseOpenAI:    SelectProviderOrTier("chatgpt", NULL); break;
-            case iUseClaude:    SelectProviderOrTier("claude", NULL); break;
-            case iTierFast:     SelectProviderOrTier(NULL, "Fast"); break;
-            case iTierPro:      SelectProviderOrTier(NULL, "Pro"); break;
-            case iTierThinking: SelectProviderOrTier(NULL, "Thinking"); break;
+            case iUseGemini:        SelectProvider("gemini"); break;
+            case iUseOpenAI:        SelectProvider("chatgpt"); break;
+            case iUseClaude:        SelectProvider("claude"); break;
+            case iModel1:           SelectModel(0); break;
+            case iModel2:           SelectModel(1); break;
+            case iModel3:           SelectModel(2); break;
+            case iModel4:           SelectModel(3); break;
+            case iModelCustom:      SelectModel(4); break;
+            case iThinkingFast:     SelectThinkingLevel(0); break;
+            case iThinkingBalanced: SelectThinkingLevel(1); break;
+            case iThinkingThinking: SelectThinkingLevel(2); break;
             case iToggleTTS:
                 gReadRepliesTTS = !gReadRepliesTTS;
                 SyncAIMenuState();
