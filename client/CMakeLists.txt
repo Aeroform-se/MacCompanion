@@ -15,4 +15,5 @@ add_application(SpotiMac
 )
 
 target_compile_options(SpotiMac PRIVATE -O2 -Wall -Wno-multichar -Wno-pointer-sign)
-set_source_files_properties(src/visualizer_020.c PROPERTIES COMPILE_FLAGS "-O2 -m68020")
+set_source_files_properties(src/visualizer.c PROPERTIES COMPILE_FLAGS "-O3")
+set_source_files_properties(src/visualizer_020.c PROPERTIES COMPILE_FLAGS "-O3 -m68020")

@@ -2549,9 +2549,21 @@ static void RenderCanvas(void)
     if (gAboutModalOpen) {
         Rect dlgRect, shadowRect, btnOk;
         const char *verLine    = "SpotiMac " APP_VERSION_SHORT;
-        const char *codeLine   = "\"" APP_VERSION_CODENAME "\"";
+        char codeLine[48];
         const char *coffeeLine = "Like SpotiMac? Buy me a coffee!";
         short len, w;
+        short cpu = VisualizerGetCpuType();
+        Boolean is020 = VisualizerIs020Active();
+
+        if (cpu == 30) {
+            SafeCopy(codeLine, is020 ? "\"" APP_VERSION_CODENAME "\" (68030 020+ Turbo)" : "\"" APP_VERSION_CODENAME "\" (68030 Base)", sizeof(codeLine));
+        } else if (cpu == 20) {
+            SafeCopy(codeLine, is020 ? "\"" APP_VERSION_CODENAME "\" (68020 020+ Turbo)" : "\"" APP_VERSION_CODENAME "\" (68020 Base)", sizeof(codeLine));
+        } else if (cpu == 40) {
+            SafeCopy(codeLine, is020 ? "\"" APP_VERSION_CODENAME "\" (68040 020+ Turbo)" : "\"" APP_VERSION_CODENAME "\" (68040 Base)", sizeof(codeLine));
+        } else {
+            SafeCopy(codeLine, is020 ? "\"" APP_VERSION_CODENAME "\" (680x0 020+ Turbo)" : "\"" APP_VERSION_CODENAME "\" (68000 Base)", sizeof(codeLine));
+        }
 
         SetRect(&shadowRect, 140, 38, 380, 254);
         FillRoundRect(&shadowRect, 10, 10, &qd.gray);

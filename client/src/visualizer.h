@@ -46,4 +46,8 @@ void VisualizerRenderFrameFullscreen(
 /* Fast (<0.4ms) re-expansion of the latest 256x161 fullscreen frame into 512x322 without re-running shaders */
 void VisualizerBlitFullscreenCached(unsigned char *outCanvasBits);
 
+/* CPU architecture detection & 68020+ native visualizer status */
+Boolean VisualizerIs020Active(void);
+short VisualizerGetCpuType(void);
+
 #endif /* VISUALIZER_H */

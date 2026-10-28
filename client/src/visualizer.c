@@ -11,6 +11,7 @@
 #include <Memory.h>
 #include <Events.h>
 #include <OSUtils.h>
+#include <Gestalt.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -62,6 +63,7 @@ typedef struct {
 static Boolean gVizInited        = false;
 static Boolean gFsLutInited      = false;
 static Boolean gUse020Visualizer = false;
+static short   gDetectedCpu      = 0;
 
 /* 256-entry signed 8.8 fixed-point sine table (-127..+127) */
 const short gSinTbl[256] = {
@@ -2204,6 +2206,7 @@ void VisualizerInit(void)
 {
     short y, x, v, i;
     SysEnvRec env;
+    long procType = 0;
     static const unsigned char bayer4x4[4][4] = {
         {  0,  8,  2, 10 },
         { 12,  4, 14,  6 },
@@ -2213,11 +2216,24 @@ void VisualizerInit(void)
 
     if (gVizInited) return;
 
-    /* Detect 68020+ CPU (SE/30, Mac II, Quadra) at launch for native 68020+ visualizer dispatch */
-    if (SysEnvirons(1, &env) == noErr && env.processor >= env68020) {
-        gUse020Visualizer = true;
+    /* Detect CPU type and 68020+ capabilities via Gestalt (with SysEnvirons fallback) */
+    if (Gestalt(gestaltProcessorType, &procType) == noErr) {
+        gUse020Visualizer = (procType >= gestalt68020);
+        if (procType == gestalt68000)      gDetectedCpu = 0;
+        else if (procType == gestalt68010) gDetectedCpu = 10;
+        else if (procType == gestalt68020) gDetectedCpu = 20;
+        else if (procType == gestalt68030) gDetectedCpu = 30;
+        else if (procType >= gestalt68040) gDetectedCpu = 40;
+    } else if (SysEnvirons(1, &env) == noErr) {
+        gUse020Visualizer = (env.processor >= env68020);
+        if (env.processor == env68000)      gDetectedCpu = 0;
+        else if (env.processor == env68010) gDetectedCpu = 10;
+        else if (env.processor == env68020) gDetectedCpu = 20;
+        else if (env.processor == env68030) gDetectedCpu = 30;
+        else if (env.processor >= env68040) gDetectedCpu = 40;
     } else {
         gUse020Visualizer = false;
+        gDetectedCpu = 0;
     }
 
     for (y = 0; y < VIZ_H; y++) {
@@ -2652,6 +2668,22 @@ void VisualizerRenderFrameFullscreen(
     if (outCanvasBits) {
         VisualizerBlitFullscreenCached(outCanvasBits);
     }
+}
+
+Boolean VisualizerIs020Active(void)
+{
+    if (!gVizInited) {
+        VisualizerInit();
+    }
+    return gUse020Visualizer;
+}
+
+short VisualizerGetCpuType(void)
+{
+    if (!gVizInited) {
+        VisualizerInit();
+    }
+    return gDetectedCpu;
 }
 
 #endif /* !VIZ_BUILD_020 */
