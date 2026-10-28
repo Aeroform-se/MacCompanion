@@ -2459,9 +2459,9 @@ static void OnAIStatusCallback(const char *statusText)
 
 static void SendPromptToAI(const char *promptText, Boolean isRetry)
 {
-    static char encPrompt[600];
+    static char encPrompt[960];
     static char encModel[64];
-    static char path[768];
+    static char path[1200];
     long n;
     short pIdx = GetActiveProviderIdx();
     short mIdx = gProviders[pIdx].activeModelIdx;

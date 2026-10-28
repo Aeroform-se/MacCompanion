@@ -376,7 +376,7 @@ static long NetHttpRequestInternal(const char *method, const char *path,
     TCPiopb pb;
     StreamPtr stream = 0;
     Ptr tcpRcvBuf = NULL;
-    char reqHeader[512];
+    static char reqHeader[1536];
     char hostStr[32];
     wdsEntry wds[3];
     OSErr err;
