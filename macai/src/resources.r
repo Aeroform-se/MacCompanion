@@ -206,17 +206,17 @@ resource 'MENU' (129, "File") {
         "Search Chats...", noIcon, "F", noMark, plain,
         "Toggle Sidebar", noIcon, "S", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
-        "Server Connection...", noIcon, "R", noMark, plain,
-        "-", noIcon, noKey, noMark, plain,
         "Quit", noIcon, "Q", noMark, plain
     }
 };
 
-resource 'MENU' (130, "AI") {
+resource 'MENU' (130, "Settings") {
     130, textMenuProc,
     allEnabled,
-    enabled, "AI",
+    enabled, "Settings",
     {
+        "Server Connection...", noIcon, "R", noMark, plain,
+        "-", noIcon, noKey, noMark, plain,
         "Use Google Gemini", noIcon, "1", noMark, plain,
         "Use ChatGPT (OpenAI)", noIcon, "2", noMark, plain,
         "Use Claude (Anthropic)", noIcon, "3", noMark, plain,

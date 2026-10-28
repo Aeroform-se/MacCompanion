@@ -41,17 +41,18 @@
 #define iNewChat            1
 #define iSearchChats        2
 #define iToggleSidebar      3
-#define iReconnect          5
-#define iQuit               7
+#define iQuit               5
 
+#define mSettings           130
 #define mAI                 130
-#define iUseGemini          1
-#define iUseOpenAI          2
-#define iUseClaude          3
-#define iTierFast           5
-#define iTierPro            6
-#define iTierThinking       7
-#define iToggleTTS          9
+#define iServerConnection   1
+#define iUseGemini          3
+#define iUseOpenAI          4
+#define iUseClaude          5
+#define iTierFast           7
+#define iTierPro            8
+#define iTierThinking       9
+#define iToggleTTS          11
 
 #define MAX_CHATS           30
 #define MAX_MESSAGES        40
@@ -132,11 +133,15 @@ static short          gCopiedMsgIdx     = -1;
 static unsigned long  gCopiedTick       = 0;
 
 /* Bottom Prompt Input State (Multi-line auto-expanding up to 5 lines) */
-static char           gPromptBuf[1024]  = "";
-static Boolean        gPromptFocused    = false;
-static Boolean        gCaretVisible     = true;
-static unsigned long  gLastCaretTick    = 0;
-static short          gPromptScrollLine = 0;
+static char           gPromptBuf[1024]    = "";
+static Boolean        gPromptFocused      = false;
+static Boolean        gShowPlaceholder    = true;
+static short          gCursorPos          = 0;
+static short          gPromptSelAnchor    = 0;
+static short          gPromptLineStarts[32];
+static Boolean        gCaretVisible       = true;
+static unsigned long  gLastCaretTick      = 0;
+static short          gPromptScrollLine   = 0;
 static short          gPrevPromptVisLines = 1;
 
 /* Search Modal State */
@@ -153,9 +158,19 @@ static Boolean        gIsRecordingVoice = false;
 static char          *gNetBuf           = NULL;
 #define NET_BUF_SIZE  16384
 
-/* Custom 1-bit QuickDraw Patterns matching ui/MacAI PNGs */
-static const Pattern kPatLightDither = { { 0x88, 0x00, 0x22, 0x00, 0x88, 0x00, 0x22, 0x00 } };
+/* Custom 1-bit QuickDraw Patterns matching ui/MacAI v2 PNGs */
+static const Pattern kPatLightDither = { { 0x00, 0x44, 0x00, 0x11, 0x00, 0x44, 0x00, 0x11 } };
+static const Pattern kPatGrid50      = { { 0xAA, 0x00, 0xAA, 0x00, 0xAA, 0x00, 0xAA, 0x00 } };
 static const Pattern kPatModalDim    = { { 0xAA, 0x00, 0x55, 0x00, 0xAA, 0x00, 0x55, 0x00 } };
+
+/* Mouse Hover & Speech Bubble Inline Edit State */
+static short          gHoverBubbleIdx     = -1;
+static short          gEditingMsgIdx      = -1;
+static char           gEditBuf[1024]      = "";
+static short          gEditBufLen         = 0;
+static short          gEditCursorPos      = 0;
+static short          gEditSelAnchor      = 0;
+static short          gEditLineStarts[MAX_WRAPPED_LINES];
 
 /* Forward Declarations */
 static void RenderWindow(void);
@@ -166,6 +181,8 @@ static Boolean IsProviderEnabled(const char *id);
 static void FetchProvidersAndChats(void);
 static void LoadChatById(const char *chatId);
 static void SendPromptToAI(const char *promptText, Boolean isRetry);
+static short HitTestMessageBubble(Point pt);
+static void SubmitEditedMessage(short editIdx);
 
 /* ============================================================================
  * Preferences File ("MacAI Prefs" in System Folder:Preferences)
@@ -345,6 +362,19 @@ static void DrawCStringTruncated(const char *str, short maxPx)
     DrawCString(buf);
 }
 
+static void SafeCopyString(char *dest, const char *src, short destSize)
+{
+    short i = 0;
+    if (!dest || destSize <= 0) return;
+    if (src) {
+        while (src[i] != '\0' && i < destSize - 1) {
+            dest[i] = src[i];
+            i++;
+        }
+    }
+    dest[i] = '\0';
+}
+
 static void CopyTextToClipboard(const char *text)
 {
     long len;
@@ -430,8 +460,8 @@ static const char *GetTierDisplayName(const char *tier)
  * Fast Monospace Word Wrapping & Cached Bubble Metrics
  * ============================================================================ */
 
-static short WrapMessageLines(const char *text, short maxWidthPx,
-                              char lines[][96], short maxLines)
+static short WrapMessageLinesEx(const char *text, short maxWidthPx,
+                                char lines[][96], short lineStarts[], short maxLines)
 {
     short lineCount = 0;
     short maxChars = maxWidthPx / MONACO_CHAR_W;
@@ -446,6 +476,8 @@ static short WrapMessageLines(const char *text, short maxWidthPx,
         short lastSpaceInLine = -1;
         const char *lastSpacePtr = NULL;
         const char *scan = p;
+
+        if (lineStarts) lineStarts[lineCount] = (short)(p - text);
 
         while (*scan && *scan != '\n' && curLen < 90) {
             if (*scan == ' ') {
@@ -482,6 +514,7 @@ static short WrapMessageLines(const char *text, short maxWidthPx,
         if (*scan == '\n') {
             p = scan + 1;
             if (*p == '\0' && lineCount < maxLines) {
+                if (lineStarts) lineStarts[lineCount] = (short)(p - text);
                 if (lines) lines[lineCount][0] = '\0';
                 lineCount++;
             }
@@ -492,6 +525,12 @@ next_line:;
     }
 
     return (lineCount > 0) ? lineCount : 1;
+}
+
+static short WrapMessageLines(const char *text, short maxWidthPx,
+                              char lines[][96], short maxLines)
+{
+    return WrapMessageLinesEx(text, maxWidthPx, lines, NULL, maxLines);
 }
 
 static void EnsureMessageMetrics(ChatMessage *msg, short maxW)
@@ -651,7 +690,6 @@ static short GetPromptTextMaxWidthPx(void)
 
 static short WrapPromptInputLines(char outLines[][96], short maxLines, short *outVisLines)
 {
-    static char promptWithCaret[1032];
     short maxPromptPx = GetPromptTextMaxWidthPx();
     short totalLines;
     short visLines;
@@ -659,20 +697,199 @@ static short WrapPromptInputLines(char outLines[][96], short maxLines, short *ou
     if (gIsRecordingVoice) {
         if (outLines) strcpy(outLines[0], "Listening... (click mic)");
         if (outVisLines) *outVisLines = 1;
+        gPromptLineStarts[0] = 0;
         return 1;
     }
-    if (!gPromptFocused && gPromptBuf[0] == '\0') {
+    if (gShowPlaceholder && !gPromptFocused && gPromptBuf[0] == '\0') {
         if (outLines) strcpy(outLines[0], "Ask MacAI");
         if (outVisLines) *outVisLines = 1;
+        gPromptLineStarts[0] = 0;
         return 1;
     }
 
-    sprintf(promptWithCaret, "%s%s", gPromptBuf, (gPromptFocused && gCaretVisible) ? "|" : "");
-    totalLines = WrapMessageLines(promptWithCaret, maxPromptPx, outLines, maxLines);
+    if (gPromptBuf[0] == '\0') {
+        if (outLines) outLines[0][0] = '\0';
+        if (outVisLines) *outVisLines = 1;
+        gPromptLineStarts[0] = 0;
+        return 1;
+    }
+
+    totalLines = WrapMessageLinesEx(gPromptBuf, maxPromptPx, outLines, gPromptLineStarts, maxLines);
     if (totalLines < 1) totalLines = 1;
     visLines = (totalLines > MAX_PROMPT_VIS_LINES) ? MAX_PROMPT_VIS_LINES : totalLines;
     if (outVisLines) *outVisLines = visLines;
     return totalLines;
+}
+
+static void GetPromptCaretPos(short *outLine, short *outColPx, char promptLines[][96], short totalLines)
+{
+    short i;
+    short targetLine = 0;
+    short colChars = 0;
+    char tmp[96];
+
+    if (gCursorPos < 0) gCursorPos = 0;
+    if (gCursorPos > (short)strlen(gPromptBuf)) gCursorPos = (short)strlen(gPromptBuf);
+
+    for (i = 0; i < totalLines; i++) {
+        short startIdx = gPromptLineStarts[i];
+        short lineLen = (short)strlen(promptLines[i]);
+        if (gCursorPos >= startIdx && (gCursorPos <= startIdx + lineLen || i == totalLines - 1)) {
+            targetLine = i;
+            colChars = gCursorPos - startIdx;
+            if (colChars < 0) colChars = 0;
+            if (colChars > lineLen) colChars = lineLen;
+            break;
+        }
+        targetLine = i;
+    }
+
+    *outLine = targetLine;
+    if (colChars > 0 && promptLines[targetLine][0] != '\0') {
+        strncpy(tmp, promptLines[targetLine], colChars);
+        tmp[colChars] = '\0';
+        *outColPx = MeasureCString(tmp);
+    } else {
+        *outColPx = 0;
+    }
+}
+
+static void GetPromptSelection(short *outSelStart, short *outSelEnd)
+{
+    short len = (short)strlen(gPromptBuf);
+    short s = gPromptSelAnchor;
+    short e = gCursorPos;
+    if (s < 0) s = 0;
+    if (s > len) s = len;
+    if (e < 0) e = 0;
+    if (e > len) e = len;
+    if (s <= e) {
+        *outSelStart = s;
+        *outSelEnd   = e;
+    } else {
+        *outSelStart = e;
+        *outSelEnd   = s;
+    }
+}
+
+static Boolean DeletePromptSelection(void)
+{
+    short selStart, selEnd, curLen;
+    GetPromptSelection(&selStart, &selEnd);
+    if (selStart >= selEnd) return false;
+
+    curLen = (short)strlen(gPromptBuf);
+    memmove(&gPromptBuf[selStart], &gPromptBuf[selEnd], curLen - selEnd + 1);
+    gCursorPos       = selStart;
+    gPromptSelAnchor = selStart;
+    return true;
+}
+
+static short GetPromptCharPosAtPoint(Point pt, const Rect *pillR)
+{
+    static char pLines[32][96];
+    short visLines = 1;
+    short totalL = WrapPromptInputLines(pLines, 32, &visLines);
+    short clickRelY = pt.v - (pillR->top + 4);
+    short clickLine = clickRelY / 12;
+    short targetLine, lineLen, relX, col, pos;
+
+    if (gPromptBuf[0] == '\0') return 0;
+
+    if (clickLine < 0) clickLine = 0;
+    if (clickLine >= visLines) clickLine = visLines - 1;
+    targetLine = gPromptScrollLine + clickLine;
+    if (targetLine < 0) targetLine = 0;
+    if (targetLine >= totalL) targetLine = totalL - 1;
+
+    lineLen = (short)strlen(pLines[targetLine]);
+    relX = pt.h - (pillR->left + 12);
+    if (relX <= 0) {
+        col = 0;
+    } else {
+        col = (relX + (MONACO_CHAR_W / 2)) / MONACO_CHAR_W;
+        if (col > lineLen) col = lineLen;
+    }
+
+    pos = gPromptLineStarts[targetLine] + col;
+    if (pos < 0) pos = 0;
+    if (pos > (short)strlen(gPromptBuf)) pos = (short)strlen(gPromptBuf);
+    return pos;
+}
+
+static void GetEditSelection(short *outSelStart, short *outSelEnd)
+{
+    short len = gEditBufLen;
+    short s = gEditSelAnchor;
+    short e = gEditCursorPos;
+    if (s < 0) s = 0;
+    if (s > len) s = len;
+    if (e < 0) e = 0;
+    if (e > len) e = len;
+    if (s <= e) {
+        *outSelStart = s;
+        *outSelEnd   = e;
+    } else {
+        *outSelStart = e;
+        *outSelEnd   = s;
+    }
+}
+
+static Boolean DeleteEditSelection(void)
+{
+    short selStart, selEnd;
+    GetEditSelection(&selStart, &selEnd);
+    if (selStart >= selEnd) return false;
+
+    memmove(&gEditBuf[selStart], &gEditBuf[selEnd], gEditBufLen - selEnd + 1);
+    gEditBufLen    -= (selEnd - selStart);
+    gEditCursorPos  = selStart;
+    gEditSelAnchor  = selStart;
+    return true;
+}
+
+static short GetEditCharPosAtPoint(Point pt, const Rect *bubbleR, short curY, short nLines, char wrapped[][96])
+{
+    short clickRelY = pt.v - (curY + 4);
+    short clickLine = clickRelY / 12;
+    short lineLen, relX, col, pos;
+
+    if (gEditBufLen == 0) return 0;
+
+    if (clickLine < 0) clickLine = 0;
+    if (clickLine >= nLines) clickLine = nLines - 1;
+    lineLen = (short)strlen(wrapped[clickLine]);
+
+    relX = pt.h - (bubbleR->left + 10);
+    if (relX <= 0) col = 0;
+    else {
+        col = (relX + (MONACO_CHAR_W / 2)) / MONACO_CHAR_W;
+        if (col > lineLen) col = lineLen;
+    }
+
+    pos = gEditLineStarts[clickLine] + col;
+    if (pos < 0) pos = 0;
+    if (pos > gEditBufLen) pos = gEditBufLen;
+    return pos;
+}
+
+static void EnsureCaretVisible(void)
+{
+    static char lines[32][96];
+    short visLines = 1;
+    short totalLines = WrapPromptInputLines(lines, 32, &visLines);
+    short cLine, colPx;
+
+    GetPromptCaretPos(&cLine, &colPx, lines, totalLines);
+    if (cLine < gPromptScrollLine) {
+        gPromptScrollLine = cLine;
+    } else if (cLine >= gPromptScrollLine + visLines) {
+        gPromptScrollLine = cLine - visLines + 1;
+    }
+    if (gPromptScrollLine > totalLines - visLines) {
+        gPromptScrollLine = totalLines - visLines;
+    }
+    if (gPromptScrollLine < 0) gPromptScrollLine = 0;
 }
 
 static void GetPromptBarGeometry(Rect *outPillR, Rect *outTierR, Rect *outMicR)
@@ -716,12 +933,9 @@ static void SyncPromptExpansionWithScroll(void)
     short visLines = 1;
     short totalLines = WrapPromptInputLines(NULL, 32, &visLines);
 
-    /* Keep prompt scroll pinned to bottom when typing unless scrolled manually */
+    /* Keep prompt scroll pinned to bottom when typing */
     if (totalLines > MAX_PROMPT_VIS_LINES) {
-        if (gPromptScrollLine > totalLines - MAX_PROMPT_VIS_LINES) {
-            gPromptScrollLine = totalLines - MAX_PROMPT_VIS_LINES;
-        }
-        if (gPromptScrollLine < 0) gPromptScrollLine = 0;
+        gPromptScrollLine = totalLines - MAX_PROMPT_VIS_LINES;
     } else {
         gPromptScrollLine = 0;
     }
@@ -743,12 +957,12 @@ static void DrawPromptBar(const Rect *pillR, const Rect *tierR, const Rect *micR
     short totalLines = WrapPromptInputLines(promptLines, 32, &visLines);
     short i;
 
+    /* 50% dither shadow curving up sides, NO solid black outline (input-style-shadow-example.png) */
     {
         Rect pillShadow = *pillR;
-        OffsetRect(&pillShadow, 0, 2);
-        FillRoundRect(&pillShadow, 20, 20, &qd.black);
+        OffsetRect(&pillShadow, 0, 1);
+        FillRoundRect(&pillShadow, 20, 20, &qd.gray);
         EraseRoundRect(pillR, 20, 20);
-        FrameRoundRect(pillR, 20, 20);
     }
 
     if (totalLines > MAX_PROMPT_VIS_LINES) {
@@ -765,6 +979,46 @@ static void DrawPromptBar(const Rect *pillR, const Rect *tierR, const Rect *micR
         if (lineIdx >= 0 && lineIdx < totalLines) {
             MoveTo(pillR->left + 12, pillR->top + 14 + i * 12);
             DrawCString(promptLines[lineIdx]);
+        }
+    }
+
+    /* Caret indicator or selection highlight */
+    if (gPromptFocused && gEditingMsgIdx < 0) {
+        short selStart, selEnd;
+        GetPromptSelection(&selStart, &selEnd);
+
+        if (selStart < selEnd) {
+            for (i = 0; i < visLines; i++) {
+                short lineIdx = gPromptScrollLine + i;
+                if (lineIdx >= 0 && lineIdx < totalLines) {
+                    short startIdx = gPromptLineStarts[lineIdx];
+                    short lineLen  = (short)strlen(promptLines[lineIdx]);
+                    short endIdx   = startIdx + lineLen;
+                    short s0 = (selStart > startIdx) ? selStart : startIdx;
+                    short s1 = (selEnd   < endIdx)   ? selEnd   : endIdx;
+
+                    if (s1 > s0) {
+                        short col0 = s0 - startIdx;
+                        short col1 = s1 - startIdx;
+                        Rect selR;
+                        SetRect(&selR, pillR->left + 12 + col0 * MONACO_CHAR_W,
+                                       pillR->top + 4 + i * 12,
+                                       pillR->left + 12 + col1 * MONACO_CHAR_W,
+                                       pillR->top + 16 + i * 12);
+                        InvertRect(&selR);
+                    }
+                }
+            }
+        } else if (gCaretVisible) {
+            short cLine, colPx;
+            GetPromptCaretPos(&cLine, &colPx, promptLines, totalLines);
+            if (cLine >= gPromptScrollLine && cLine < gPromptScrollLine + visLines) {
+                short vIdx = cLine - gPromptScrollLine;
+                short caretX = pillR->left + 12 + colPx;
+                short caretY = pillR->top + 14 + vIdx * 12;
+                MoveTo(caretX, caretY - 9);
+                LineTo(caretX, caretY + 1);
+            }
         }
     }
 
@@ -820,9 +1074,15 @@ static void DrawSidebar(void)
     SetRect(&sideR, 0, 0, SIDEBAR_W, gWinH);
     EraseRect(&sideR);
 
-    /* Vertical dotted divider at x = 143 */
+    /* Vertical 1px 50% dotted column + 1px solid white column matching sidebar-right-border.png */
     PenNormal();
-    DrawDottedVLine(SIDEBAR_W, 0, gWinH);
+    {
+        Rect rDot, rWhite;
+        SetRect(&rDot, SIDEBAR_W, 0, SIDEBAR_W + 1, gWinH);
+        FillRect(&rDot, &qd.gray);
+        SetRect(&rWhite, SIDEBAR_W + 1, 0, SIDEBAR_W + 2, gWinH);
+        FillRect(&rWhite, &qd.white);
+    }
 
     TextFont(kFontIDMonaco);
     TextSize(9);
@@ -834,12 +1094,12 @@ static void DrawSidebar(void)
     provW = MeasureCString(provName);
     DrawChevronDown(12 + provW + 6, 11);
 
-    /* Top Right of Sidebar: Search icon (112, 7) and Collapse Sidebar icon (128, 7) */
-    BlitBitmap(kIconSearch10x10, 2, 10, 10, 112, 7, srcOr);
-    BlitBitmap(kIconSidebar10x10, 2, 10, 10, 128, 7, srcOr);
+    /* Top Right of Sidebar: Search icon (114, 6) and Collapse Sidebar icon (127, 6) */
+    BlitBitmap(kIconSearch12x12,   2, 12, 12, 114, 6, srcOr);
+    BlitBitmap(kIconCollapse12x12, 2, 12, 12, 127, 6, srcOr);
 
     /* "New chat" button row */
-    BlitBitmap(kIconNewChat11x11, 2, 11, 11, 11, 30, srcOr);
+    BlitBitmap(kIconNewChat12x12, 2, 12, 12, 11, 29, srcOr);
     MoveTo(27, 38);
     DrawCString("New chat");
 
@@ -858,16 +1118,27 @@ static void DrawSidebar(void)
         short rowY = listTop + i * 15;
         if (idx >= gChatCount) break;
 
-        if (idx == gSelectedChatIdx ||
-            (gActiveChatId[0] != '\0' && strcmp(gChats[idx].id, gActiveChatId) == 0)) {
+        Boolean isCurrentChat = (gActiveChatId[0] != '\0' && strcmp(gChats[idx].id, gActiveChatId) == 0);
+        if (isCurrentChat) {
             Rect selR;
-            SetRect(&selR, 5, rowY, 128, rowY + 14);
-            FillRoundRect(&selR, 6, 6, &kPatLightDither);
-            FrameRoundRect(&selR, 6, 6);
+            SetRect(&selR, 5, rowY - 1, SIDEBAR_W - 5, rowY + 14);
+            FillRoundRect(&selR, 12, 12, &kPatGrid50);
+
+            /* 1px white halo around text using srcBic */
+            TextMode(srcBic);
+            MoveTo(10, rowY + 10); DrawCStringTruncated(gChats[idx].title, 122);
+            MoveTo(12, rowY + 10); DrawCStringTruncated(gChats[idx].title, 122);
+            MoveTo(11, rowY + 9);  DrawCStringTruncated(gChats[idx].title, 122);
+            MoveTo(11, rowY + 11); DrawCStringTruncated(gChats[idx].title, 122);
+            MoveTo(10, rowY + 9);  DrawCStringTruncated(gChats[idx].title, 122);
+            MoveTo(12, rowY + 9);  DrawCStringTruncated(gChats[idx].title, 122);
+            MoveTo(10, rowY + 11); DrawCStringTruncated(gChats[idx].title, 122);
+            MoveTo(12, rowY + 11); DrawCStringTruncated(gChats[idx].title, 122);
+            TextMode(srcOr);
         }
 
-        MoveTo(11, rowY + 11);
-        DrawCStringTruncated(gChats[idx].title, 112);
+        MoveTo(11, rowY + 10);
+        DrawCStringTruncated(gChats[idx].title, 122);
     }
 
     /* Sidebar Scrollbar (only drawn if chats exceed visibleRows) */
@@ -889,14 +1160,19 @@ static void DrawSidebar(void)
 
 static void DrawCollapsedSidebarControls(void)
 {
-    /* Matches ui/MacAI/sidebar-collapsed.png: 3 icons at top-left on dithered bg */
-    Rect bgR;
-    SetRect(&bgR, 10, 5, 27, 51);
-    EraseRoundRect(&bgR, 6, 6);
+    /* 3 individual 12x12 rounded white badges matching Collapsed-icon-bg.png */
+    Rect b0, b1, b2;
+    SetRect(&b0, 12, 7, 24, 19);
+    EraseRoundRect(&b0, 4, 4);
+    BlitBitmap(kIconExtend12x12, 2, 12, 12, 12, 7, srcOr);
 
-    BlitBitmap(kIconSidebar10x10, 2, 10, 10, 13, 8,  srcOr);
-    BlitBitmap(kIconSearch10x10,  2, 10, 10, 13, 22, srcOr);
-    BlitBitmap(kIconNewChat11x11, 2, 11, 11, 13, 37, srcOr);
+    SetRect(&b1, 12, 22, 24, 34);
+    EraseRoundRect(&b1, 4, 4);
+    BlitBitmap(kIconSearch12x12, 2, 12, 12, 12, 22, srcOr);
+
+    SetRect(&b2, 12, 37, 24, 49);
+    EraseRoundRect(&b2, 4, 4);
+    BlitBitmap(kIconNewChat12x12, 2, 12, 12, 12, 37, srcOr);
 }
 
 static void DrawChatArea(void)
@@ -939,9 +1215,18 @@ static void DrawChatArea(void)
     /* Pass 1: Compute total height using cached bubble metrics (O(1) per message!) */
     for (i = 0; i < gMessageCount; i++) {
         short maxW = gMessages[i].isUser ? userMaxW : aiMaxW;
-        EnsureMessageMetrics(&gMessages[i], maxW);
-        /* AI responses have 15px (~1 line height) extra space below for Copy & Retry buttons */
-        totalContentH += gMessages[i].cachedBubbleH + (gMessages[i].isUser ? 8 : 23);
+        short bubbleH, stepH;
+        if (gEditingMsgIdx == i) {
+            short nLines = WrapMessageLines(gEditBuf, maxW, wrapped, MAX_WRAPPED_LINES);
+            bubbleH = nLines * 12 + 14;
+            if (bubbleH < 24) bubbleH = 24;
+            stepH = bubbleH + 24;
+        } else {
+            EnsureMessageMetrics(&gMessages[i], maxW);
+            bubbleH = gMessages[i].cachedBubbleH;
+            stepH = bubbleH + (gMessages[i].isUser ? 18 : 22);
+        }
+        totalContentH += stepH;
     }
     if (gWaitingForAI) {
         totalContentH += 34;
@@ -974,7 +1259,8 @@ static void DrawChatArea(void)
                 chatLeft + (chatWidth + tw) / 2 + 10,
                 (msgAreaBot / 2) + 10);
         EraseRoundRect(&badgeR, 12, 12);
-        FrameRoundRect(&badgeR, 12, 12);
+        MoveTo(badgeR.left + 6, badgeR.bottom);
+        LineTo(badgeR.right - 6, badgeR.bottom);
         MoveTo(badgeR.left + 10, badgeR.top + 14);
         DrawCString(welcomeFull);
     }
@@ -984,18 +1270,27 @@ static void DrawChatArea(void)
     /* Pass 2: Render ONLY visible message bubbles */
     for (i = 0; i < gMessageCount; i++) {
         short maxW      = gMessages[i].isUser ? userMaxW : aiMaxW;
-        short bubbleH   = gMessages[i].cachedBubbleH;
-        short widestLine = gMessages[i].cachedWidestPx;
-        short stepH     = bubbleH + (gMessages[i].isUser ? 8 : 23);
+        short bubbleH, stepH, widestLine;
+        Boolean isEditingThis = (gEditingMsgIdx == i);
 
-        if (curY + stepH >= 0 && curY <= msgAreaBot) {
-            short nLines = WrapMessageLines(gMessages[i].text, maxW, wrapped, MAX_WRAPPED_LINES);
-            Rect bubbleR;
+        if (isEditingThis) {
+            short nLines = WrapMessageLinesEx(gEditBuf, maxW, wrapped, gEditLineStarts, MAX_WRAPPED_LINES);
+            short L;
+            widestLine = 0;
+            for (L = 0; L < nLines; L++) {
+                short w = MeasureCString(wrapped[L]);
+                if (w > widestLine) widestLine = w;
+            }
+            bubbleH = nLines * 12 + 14;
+            if (bubbleH < 24) bubbleH = 24;
+            stepH = bubbleH + 24;
 
-            if (gMessages[i].isUser) {
-                /* Right-aligned white pill bubble (Main UI.png) */
+            if (curY + stepH >= 0 && curY <= msgAreaBot) {
                 short bw = widestLine + 20;
-                short rightEdge = gWinW - 14;
+                short rightEdge = gWinW - 25;
+                Rect bubbleR, cancelR, saveR;
+                short selStart, selEnd;
+                if (bw < 120) bw = 120;
                 SetRect(&bubbleR, rightEdge - bw, curY, rightEdge, curY + bubbleH);
                 EraseRoundRect(&bubbleR, 16, 16);
 
@@ -1003,41 +1298,126 @@ static void DrawChatArea(void)
                     MoveTo(bubbleR.left + 10, curY + 14 + L * 12);
                     DrawCString(wrapped[L]);
                 }
-            } else {
-                /* Left-aligned bordered card bubble with 2px bottom shadow (Main UI.png) */
-                short bw = widestLine + 24;
-                Rect shadowR;
-                short actionY = curY + bubbleH + 5;
-                short retryX  = aiLeftX + 24;
-                if (bw < 100) bw = 100;
-                SetRect(&bubbleR, aiLeftX, curY, aiLeftX + bw, curY + bubbleH);
 
-                shadowR = bubbleR;
-                OffsetRect(&shadowR, 0, 2);
-                FillRoundRect(&shadowR, 16, 16, &qd.black);
-                EraseRoundRect(&bubbleR, 16, 16);
-                FrameRoundRect(&bubbleR, 16, 16);
+                GetEditSelection(&selStart, &selEnd);
 
-                for (L = 0; L < nLines; L++) {
-                    MoveTo(bubbleR.left + 12, curY + 14 + L * 12);
-                    DrawCString(wrapped[L]);
+                if (selStart < selEnd) {
+                    /* Highlight selected characters */
+                    for (L = 0; L < nLines; L++) {
+                        short startIdx = gEditLineStarts[L];
+                        short lineLen  = (short)strlen(wrapped[L]);
+                        short endIdx   = startIdx + lineLen;
+                        short s0 = (selStart > startIdx) ? selStart : startIdx;
+                        short s1 = (selEnd   < endIdx)   ? selEnd   : endIdx;
+
+                        if (s1 > s0) {
+                            short col0 = s0 - startIdx;
+                            short col1 = s1 - startIdx;
+                            Rect selR;
+                            SetRect(&selR, bubbleR.left + 10 + col0 * MONACO_CHAR_W,
+                                           curY + 4 + L * 12,
+                                           bubbleR.left + 10 + col1 * MONACO_CHAR_W,
+                                           curY + 16 + L * 12);
+                            InvertRect(&selR);
+                        }
+                    }
+                } else if (gCaretVisible && nLines > 0) {
+                    /* Blinking caret inside the edit bubble at gEditCursorPos */
+                    short cLine = 0, cCol = 0;
+                    for (L = 0; L < nLines; L++) {
+                        short sIdx = gEditLineStarts[L];
+                        short lLen = (short)strlen(wrapped[L]);
+                        if (gEditCursorPos >= sIdx && (gEditCursorPos <= sIdx + lLen || L == nLines - 1)) {
+                            cLine = L;
+                            cCol  = gEditCursorPos - sIdx;
+                            if (cCol > lLen) cCol = lLen;
+                            break;
+                        }
+                    }
+                    {
+                        short cX = bubbleR.left + 10 + cCol * MONACO_CHAR_W;
+                        short cY = curY + 14 + cLine * 12;
+                        MoveTo(cX, cY - 9);
+                        LineTo(cX, cY + 1);
+                    }
                 }
 
-                /* Action row (1 line height below AI response): Copy to Clipboard + Retry */
-                {
-                    Rect actionBgR;
-                    Boolean showCopied = (gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 90);
-                    short bgW = showCopied ? 74 : 38;
-                    SetRect(&actionBgR, aiLeftX + 4, actionY - 1, aiLeftX + 4 + bgW, actionY + 12);
-                    EraseRoundRect(&actionBgR, 6, 6);
+                /* [Cancel] and [Save] buttons beneath the editable bubble */
+                SetRect(&cancelR, bubbleR.right - 92, curY + bubbleH + 3, bubbleR.right - 48, curY + bubbleH + 17);
+                EraseRoundRect(&cancelR, 6, 6);
+                FrameRoundRect(&cancelR, 6, 6);
+                MoveTo(cancelR.left + 5, cancelR.top + 10);
+                DrawCString("Cancel");
 
-                    BlitBitmap(kIconCopy10x11, 2, 10, 11, aiLeftX + 6, actionY, srcOr);
-                    if (showCopied) {
-                        MoveTo(aiLeftX + 19, actionY + 9);
-                        DrawCString("Copied");
-                        retryX = aiLeftX + 60;
+                SetRect(&saveR, bubbleR.right - 44, curY + bubbleH + 3, bubbleR.right, curY + bubbleH + 17);
+                FillRoundRect(&saveR, 6, 6, &qd.black);
+                TextMode(srcBic);
+                MoveTo(saveR.left + 10, saveR.top + 10);
+                DrawCString("Save");
+                TextMode(srcOr);
+            }
+        } else {
+            EnsureMessageMetrics(&gMessages[i], maxW);
+            bubbleH = gMessages[i].cachedBubbleH;
+            widestLine = gMessages[i].cachedWidestPx;
+            stepH = bubbleH + (gMessages[i].isUser ? 18 : 22);
+
+            if (curY + stepH >= 0 && curY <= msgAreaBot) {
+                short nLines = WrapMessageLines(gMessages[i].text, maxW, wrapped, MAX_WRAPPED_LINES);
+                Rect bubbleR;
+
+                if (gMessages[i].isUser) {
+                    /* Right-aligned solid white pill bubble, NO outline, NO shadow (Main_Normal.png) */
+                    short bw = widestLine + 20;
+                    short rightEdge = gWinW - 25;
+                    if (bw < 40) bw = 40;
+                    SetRect(&bubbleR, rightEdge - bw, curY, rightEdge, curY + bubbleH);
+                    EraseRoundRect(&bubbleR, 16, 16);
+
+                    for (L = 0; L < nLines; L++) {
+                        MoveTo(bubbleR.left + 10, curY + 14 + L * 12);
+                        DrawCString(wrapped[L]);
                     }
-                    BlitBitmap(kIconRetry10x10, 2, 10, 10, retryX, actionY, srcOr);
+
+                    /* Edit and Copy action icons on hover with pill background (retry-bg-example.png) */
+                    if (gHoverBubbleIdx == i) {
+                        short actionY = curY + bubbleH + 3;
+                        Rect actPill;
+                        const unsigned char *cIcon = (gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 120)
+                            ? kIconCopyOk12x12 : kIconCopy12x12;
+                        SetRect(&actPill, bubbleR.right - 31, actionY - 1, bubbleR.right + 1, actionY + 13);
+                        EraseRoundRect(&actPill, 8, 8);
+                        BlitBitmap(kIconEdit12x12, 2, 12, 12, bubbleR.right - 28, actionY, srcOr);
+                        BlitBitmap(cIcon,          2, 12, 12, bubbleR.right - 14, actionY, srcOr);
+                    }
+                } else {
+                    /* Left-aligned solid white bubble with curved 1px black shadow (bubble-shadow-example.png) */
+                    short bw = widestLine + 24;
+                    short actionY = curY + bubbleH + 4;
+                    if (bw < 100) bw = 100;
+                    SetRect(&bubbleR, aiLeftX, curY, aiLeftX + bw, curY + bubbleH);
+                    {
+                        Rect shadowR = bubbleR;
+                        OffsetRect(&shadowR, 0, 1);
+                        FillRoundRect(&shadowR, 16, 16, &qd.black);
+                        EraseRoundRect(&bubbleR, 16, 16);
+                    }
+
+                    for (L = 0; L < nLines; L++) {
+                        MoveTo(bubbleR.left + 12, curY + 14 + L * 12);
+                        DrawCString(wrapped[L]);
+                    }
+
+                    /* Retry and Copy action icons on hover with pill background (retry-bg-example.png) */
+                    if (gHoverBubbleIdx == i) {
+                        Rect actPill;
+                        const unsigned char *cIcon = (gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 120)
+                            ? kIconCopyOk12x12 : kIconCopy12x12;
+                        SetRect(&actPill, aiLeftX + 3, actionY - 1, aiLeftX + 37, actionY + 13);
+                        EraseRoundRect(&actPill, 8, 8);
+                        BlitBitmap(kIconRetry12x12, 2, 12, 12, aiLeftX + 6,  actionY, srcOr);
+                        BlitBitmap(cIcon,          2, 12, 12, aiLeftX + 22, actionY, srcOr);
+                    }
                 }
             }
         }
@@ -1045,13 +1425,14 @@ static void DrawChatArea(void)
     }
 
     if (gWaitingForAI) {
-        Rect waitR, shadowR;
+        Rect waitR;
         SetRect(&waitR, aiLeftX, curY, aiLeftX + 120, curY + 24);
-        shadowR = waitR;
-        OffsetRect(&shadowR, 0, 2);
-        FillRoundRect(&shadowR, 14, 14, &qd.black);
-        EraseRoundRect(&waitR, 14, 14);
-        FrameRoundRect(&waitR, 14, 14);
+        {
+            Rect shadowR = waitR;
+            OffsetRect(&shadowR, 0, 1);
+            FillRoundRect(&shadowR, 14, 14, &qd.black);
+            EraseRoundRect(&waitR, 14, 14);
+        }
         MoveTo(waitR.left + 12, waitR.top + 15);
         DrawCString("Thinking...");
     }
@@ -1060,19 +1441,31 @@ static void DrawChatArea(void)
     SetRect(&savedClip, 0, 0, gWinW, gWinH);
     ClipRect(&savedClip);
 
-    /* Right-edge Chat Scrollbar (only shown when messages overflow) */
+    /* Right-edge Chat Scrollbar (matching SpotiMac and Main_Normal.png) */
     if (gMsgMaxScrollY > 0) {
-        short sbX = gWinW - 6;
+        short sbX = gWinW - 11;
         short sbTop = 10;
         short sbBot = msgAreaBot - 4;
         short trackH = sbBot - sbTop;
-        short thumbH = 28;
-        short thumbTop = sbTop + (short)(((long)(trackH - thumbH) * gMsgScrollY) / gMsgMaxScrollY);
-        Rect thumbR;
+        short msgAreaH = msgAreaBot - msgAreaTop;
+        short thumbH = (totalContentH > 0) ? (short)(((long)trackH * msgAreaH) / totalContentH) : 28;
+        short thumbTop;
+        Rect trackR, thumbR;
 
-        DrawDottedVLine(sbX, sbTop, sbBot);
-        SetRect(&thumbR, sbX - 2, thumbTop, sbX + 3, thumbTop + thumbH);
-        FillRect(&thumbR, &qd.black);
+        if (thumbH < 20) thumbH = 20;
+        if (thumbH > trackH) thumbH = trackH;
+        thumbTop = sbTop + (short)(((long)(trackH - thumbH) * gMsgScrollY) / gMsgMaxScrollY);
+
+        /* 5px wide rounded white track */
+        SetRect(&trackR, sbX - 2, sbTop, sbX + 3, sbBot);
+        FillRoundRect(&trackR, 3, 3, &qd.white);
+
+        /* Center vertical dotted track line */
+        DrawDottedVLine(sbX, sbTop + 1, sbBot - 1);
+
+        /* 3px wide thumb filled with qd.gray */
+        SetRect(&thumbR, sbX - 1, thumbTop, sbX + 2, thumbTop + thumbH);
+        FillRect(&thumbR, &qd.gray);
     }
 
     /* Bottom Auto-Expanding Prompt Bar */
@@ -1094,7 +1487,7 @@ static void DrawProviderPopup(void)
 {
     Rect popR;
     short i;
-    SetRect(&popR, 8, 20, 98, 20 + 3 * 16 + 4);
+    SetRect(&popR, 8, 20, 102, 20 + 3 * 16 + 4);
     DrawShadowRoundRect(&popR, 8, 8, 2);
 
     TextFont(kFontIDMonaco);
@@ -1104,13 +1497,13 @@ static void DrawProviderPopup(void)
         Rect rowR;
         SetRect(&rowR, popR.left + 3, ry, popR.right - 3, ry + 15);
         if (strcmp(gProviders[i].id, gActiveProvider) == 0) {
-            FillRoundRect(&rowR, 4, 4, &kPatLightDither);
+            Rect dotR;
+            SetRect(&dotR, popR.left + 7, ry + 5, popR.left + 11, ry + 9);
+            PaintOval(&dotR);
         }
-        MoveTo(popR.left + 10, ry + 11);
+        MoveTo(popR.left + 16, ry + 11);
         DrawCString(gProviders[i].name);
         if (!gProviders[i].enabled) {
-            MoveTo(popR.right - 26, ry + 11);
-            DrawCString("(--)");
             PenPat(&qd.gray);
             PenMode(patBic);
             PaintRect(&rowR);
@@ -1126,19 +1519,19 @@ static void DrawTierPopup(void)
     short i;
 
     GetPromptBarGeometry(&pillR, &tierR, &micR);
-    SetRect(&popR, tierR.right - 78, pillR.top - 54, tierR.right, pillR.top - 2);
+    SetRect(&popR, tierR.right - 84, pillR.top - 54, tierR.right, pillR.top - 2);
     DrawShadowRoundRect(&popR, 8, 8, 2);
 
     TextFont(kFontIDMonaco);
     TextSize(9);
     for (i = 0; i < 3; i++) {
         short ry = popR.top + 2 + i * 16;
-        Rect rowR;
-        SetRect(&rowR, popR.left + 3, ry, popR.right - 3, ry + 15);
         if (strcmp(GetTierDisplayName(gActiveTier), tiers[i]) == 0) {
-            FillRoundRect(&rowR, 4, 4, &kPatLightDither);
+            Rect dotR;
+            SetRect(&dotR, popR.left + 7, ry + 5, popR.left + 11, ry + 9);
+            PaintOval(&dotR);
         }
-        MoveTo(popR.left + 10, ry + 11);
+        MoveTo(popR.left + 16, ry + 11);
         DrawCString(tiers[i]);
     }
 }
@@ -1173,7 +1566,7 @@ static void DrawSearchModal(void)
     DrawShadowRoundRect(&modalR, 16, 16, 2);
 
     /* Top Search Bar inside modal */
-    BlitBitmap(kIconSearch10x10, 2, 10, 10, modalR.left + 12, modalR.top + 12, srcOr);
+    BlitBitmap(kIconSearch12x12, 2, 12, 12, modalR.left + 12, modalR.top + 11, srcOr);
     BlitBitmap(kIconCloseX8x8,   2, 8,  8,  modalR.right - 19, modalR.top + 13, srcOr);
 
     TextFont(kFontIDMonaco);
@@ -1436,27 +1829,27 @@ static void NormalizeTierName(const char *inTier, char *outTier, short maxLen)
 
 static void SyncAIMenuState(void)
 {
-    MenuHandle aiMenu = GetMenuHandle(mAI);
-    if (!aiMenu) return;
+    MenuHandle setMenu = GetMenuHandle(mSettings);
+    if (!setMenu) return;
 
-    if (IsProviderEnabled("gemini")) EnableItem(aiMenu, iUseGemini);
-    else DisableItem(aiMenu, iUseGemini);
+    if (IsProviderEnabled("gemini")) EnableItem(setMenu, iUseGemini);
+    else DisableItem(setMenu, iUseGemini);
 
-    if (IsProviderEnabled("chatgpt")) EnableItem(aiMenu, iUseOpenAI);
-    else DisableItem(aiMenu, iUseOpenAI);
+    if (IsProviderEnabled("chatgpt")) EnableItem(setMenu, iUseOpenAI);
+    else DisableItem(setMenu, iUseOpenAI);
 
-    if (IsProviderEnabled("claude")) EnableItem(aiMenu, iUseClaude);
-    else DisableItem(aiMenu, iUseClaude);
+    if (IsProviderEnabled("claude")) EnableItem(setMenu, iUseClaude);
+    else DisableItem(setMenu, iUseClaude);
 
-    CheckItem(aiMenu, iUseGemini, (strcmp(gActiveProvider, "gemini") == 0));
-    CheckItem(aiMenu, iUseOpenAI, (strcmp(gActiveProvider, "chatgpt") == 0 || strcmp(gActiveProvider, "openai") == 0));
-    CheckItem(aiMenu, iUseClaude, (strcmp(gActiveProvider, "claude") == 0));
+    CheckItem(setMenu, iUseGemini, (strcmp(gActiveProvider, "gemini") == 0));
+    CheckItem(setMenu, iUseOpenAI, (strcmp(gActiveProvider, "chatgpt") == 0 || strcmp(gActiveProvider, "openai") == 0));
+    CheckItem(setMenu, iUseClaude, (strcmp(gActiveProvider, "claude") == 0));
 
-    CheckItem(aiMenu, iTierFast,     (gActiveTier[0] == 'F' || gActiveTier[0] == 'f'));
-    CheckItem(aiMenu, iTierPro,      (gActiveTier[0] == 'P' || gActiveTier[0] == 'p'));
-    CheckItem(aiMenu, iTierThinking, (gActiveTier[0] == 'T' || gActiveTier[0] == 't'));
+    CheckItem(setMenu, iTierFast,     (gActiveTier[0] == 'F' || gActiveTier[0] == 'f'));
+    CheckItem(setMenu, iTierPro,      (gActiveTier[0] == 'P' || gActiveTier[0] == 'p'));
+    CheckItem(setMenu, iTierThinking, (gActiveTier[0] == 'T' || gActiveTier[0] == 't'));
 
-    CheckItem(aiMenu, iToggleTTS, gReadRepliesTTS);
+    CheckItem(setMenu, iToggleTTS, gReadRepliesTTS);
 }
 
 static void CopyMessageToClipboard(short msgIdx)
@@ -1495,6 +1888,88 @@ static void RetryAIResponseAtIndex(short aiMsgIdx)
     SendPromptToAI(userPrompt, true);
 }
 
+static short HitTestMessageBubble(Point pt)
+{
+    short chatLeft  = gSidebarCollapsed ? 0 : (SIDEBAR_W + 1);
+    short chatWidth = gWinW - chatLeft;
+    short userMaxW  = chatWidth - 90;
+    short aiMaxW;
+    short aiLeftX   = chatLeft + (gSidebarCollapsed ? 34 : 18);
+    short msgAreaTop = 8;
+    Rect pillR, tierR, micR;
+    short curY;
+    short i;
+
+    if (userMaxW > 240) userMaxW = 240;
+    if (userMaxW < 120) userMaxW = 120;
+    aiMaxW  = (gWinW - 22) - aiLeftX - 24;
+    if (aiMaxW < 140) aiMaxW = 140;
+
+    if (pt.h < chatLeft || pt.h > gWinW - 12) return -1;
+    GetPromptBarGeometry(&pillR, &tierR, &micR);
+    if (pt.v < msgAreaTop || pt.v >= pillR.top - 6) return -1;
+
+    curY = msgAreaTop - gMsgScrollY;
+    for (i = 0; i < gMessageCount; i++) {
+        short maxW = gMessages[i].isUser ? userMaxW : aiMaxW;
+        short bubbleH, widestLine, stepH;
+        Rect hitR;
+
+        if (gEditingMsgIdx == i) {
+            short nLines = WrapMessageLines(gEditBuf, maxW, NULL, MAX_WRAPPED_LINES);
+            bubbleH = nLines * 12 + 14;
+            if (bubbleH < 24) bubbleH = 24;
+            stepH = bubbleH + 24;
+            widestLine = 120;
+        } else {
+            EnsureMessageMetrics(&gMessages[i], maxW);
+            bubbleH = gMessages[i].cachedBubbleH;
+            widestLine = gMessages[i].cachedWidestPx;
+            stepH = bubbleH + (gMessages[i].isUser ? 18 : 22);
+        }
+
+        if (gMessages[i].isUser) {
+            short bw = widestLine + 20;
+            short rightEdge = gWinW - 25;
+            if (bw < 40) bw = 40;
+            SetRect(&hitR, rightEdge - bw - 4, curY, rightEdge + 4, curY + bubbleH + 18);
+        } else {
+            short bw = widestLine + 24;
+            if (bw < 100) bw = 100;
+            SetRect(&hitR, aiLeftX - 4, curY, aiLeftX + bw + 4, curY + bubbleH + 20);
+        }
+
+        if (PtInRect(pt, &hitR)) {
+            return i;
+        }
+        curY += stepH;
+    }
+    return -1;
+}
+
+static void SubmitEditedMessage(short editIdx)
+{
+    if (editIdx < 0 || editIdx >= gMessageCount || gEditBufLen == 0) {
+        gEditingMsgIdx = -1;
+        gPromptFocused = true;
+        RenderWindow();
+        return;
+    }
+
+    snprintf(gMessages[editIdx].text, sizeof(gMessages[editIdx].text), "%s", gEditBuf);
+    gMessages[editIdx].cachedBubbleH = 0;
+    gMessages[editIdx].cachedWidestPx = 0;
+
+    /* Truncate conversation to this message */
+    gMessageCount = editIdx + 1;
+
+    gEditingMsgIdx = -1;
+    gPromptFocused = true;
+
+    /* Trigger AI regeneration for edited prompt */
+    SendPromptToAI(gMessages[editIdx].text, true);
+}
+
 /* ============================================================================
  * Middleware Network API Synchronization
  * ============================================================================ */
@@ -1528,11 +2003,11 @@ static void ParseChatsResponse(const char *buf, ChatSummary *outArr, short maxIt
                         p5 = strchr(p4, '|');
                         if (p5) *p5++ = '\0';
 
-                        strncpy(outArr[count].id, p1, sizeof(outArr[count].id) - 1);
-                        strncpy(outArr[count].title, p2, sizeof(outArr[count].title) - 1);
-                        strncpy(outArr[count].provider, p3, sizeof(outArr[count].provider) - 1);
-                        strncpy(outArr[count].tier, p4, sizeof(outArr[count].tier) - 1);
-                        strncpy(outArr[count].age, p5 ? p5 : "Today", sizeof(outArr[count].age) - 1);
+                        SafeCopyString(outArr[count].id, p1, sizeof(outArr[count].id));
+                        SafeCopyString(outArr[count].title, p2, sizeof(outArr[count].title));
+                        SafeCopyString(outArr[count].provider, p3, sizeof(outArr[count].provider));
+                        SafeCopyString(outArr[count].tier, p4, sizeof(outArr[count].tier));
+                        SafeCopyString(outArr[count].age, p5 ? p5 : "Today", sizeof(outArr[count].age));
                         count++;
                     }
                 }
@@ -1589,7 +2064,7 @@ static void FetchProvidersAndChats(void)
                     p3 = strchr(p2, '|');
                     if (p3) {
                         *p3++ = '\0';
-                        strncpy(gActiveProvider, p1, sizeof(gActiveProvider) - 1);
+                        SafeCopyString(gActiveProvider, p1, sizeof(gActiveProvider));
                         NormalizeTierName(p3, gActiveTier, sizeof(gActiveTier));
                     }
                 }
@@ -1726,6 +2201,11 @@ static void StartNewChat(void)
     gMsgScrollY         = 0;
     gMsgMaxScrollY      = 0;
     gCopiedMsgIdx       = -1;
+    gPromptBuf[0]       = '\0';
+    gCursorPos          = 0;
+    gPromptSelAnchor    = 0;
+    gShowPlaceholder    = true;
+    gPromptFocused      = false;
     gPromptScrollLine   = 0;
     gPrevPromptVisLines = 1;
     RenderWindow();
@@ -1736,13 +2216,21 @@ static void LoadChatById(const char *chatId)
     static char row[MAX_MSG_TEXT + 32];
     char path[96];
     const char *line;
+    short i;
 
     if (!chatId || !*chatId || !gNetBuf || !gServerConnected) return;
 
     sprintf(path, "/api/macai/chat/%s", chatId);
     if (NetHttpGet(path, gNetBuf, NET_BUF_SIZE) <= 0) return;
 
-    strncpy(gActiveChatId, chatId, sizeof(gActiveChatId) - 1);
+    SafeCopyString(gActiveChatId, chatId, sizeof(gActiveChatId));
+    gSelectedChatIdx = -1;
+    for (i = 0; i < gChatCount; i++) {
+        if (strcmp(gChats[i].id, chatId) == 0) {
+            gSelectedChatIdx = i;
+            break;
+        }
+    }
     gMessageCount = 0;
     gCopiedMsgIdx = -1;
 
@@ -1776,15 +2264,13 @@ static void LoadChatById(const char *chatId)
             gMessages[gMessageCount].isUser = true;
             gMessages[gMessageCount].cachedMaxW = 0;
             gMessages[gMessageCount].cachedBubbleH = 0;
-            strncpy(gMessages[gMessageCount].text, row + 9, MAX_MSG_TEXT - 1);
-            gMessages[gMessageCount].text[MAX_MSG_TEXT - 1] = '\0';
+            SafeCopyString(gMessages[gMessageCount].text, row + 9, MAX_MSG_TEXT);
             gMessageCount++;
         } else if (strncmp(row, "MSG|assistant|", 14) == 0) {
             gMessages[gMessageCount].isUser = false;
             gMessages[gMessageCount].cachedMaxW = 0;
             gMessages[gMessageCount].cachedBubbleH = 0;
-            strncpy(gMessages[gMessageCount].text, row + 14, MAX_MSG_TEXT - 1);
-            gMessages[gMessageCount].text[MAX_MSG_TEXT - 1] = '\0';
+            SafeCopyString(gMessages[gMessageCount].text, row + 14, MAX_MSG_TEXT);
             gMessageCount++;
         }
         line = next ? (next + 1) : NULL;
@@ -2233,109 +2719,212 @@ static void HandleContentClick(Point localPt)
                 return;
             }
 
-            if (!gPromptFocused) {
-                gPromptFocused = true;
-                gCaretVisible  = true;
-                gLastCaretTick = TickCount();
-                RenderPromptBarOnly();
+            gShowPlaceholder = false;
+            gPromptFocused   = true;
+            gCaretVisible    = true;
+            gLastCaretTick   = TickCount();
+
+            /* Set anchor and cursor at initial click point */
+            short clickPos = GetPromptCharPosAtPoint(localPt, &pillR);
+            gPromptSelAnchor = clickPos;
+            gCursorPos       = clickPos;
+            EnsureCaretVisible();
+            RenderPromptBarOnly();
+
+            /* Drag mouse to select text live */
+            while (StillDown()) {
+                Point curPt;
+                GetMouse(&curPt);
+                short dragPos = GetPromptCharPosAtPoint(curPt, &pillR);
+                if (dragPos != gCursorPos) {
+                    gCursorPos = dragPos;
+                    EnsureCaretVisible();
+                    RenderPromptBarOnly();
+                }
             }
             return;
         }
 
-        if (gPromptFocused && gPromptBuf[0] == '\0') {
-            gPromptFocused = false;
+        if (localPt.v < pillR.top - 6 && gPromptFocused) {
+            gPromptFocused   = false;
+            gPromptSelAnchor = gCursorPos;
             RenderPromptBarOnly();
         }
 
         /* Main Chat Area Draggable Scrollbar */
-        if (gMsgMaxScrollY > 0 && localPt.h >= gWinW - 14 && localPt.v >= 10 && localPt.v < pillR.top - 6) {
-            short sbTop    = 10;
-            short sbBot    = pillR.top - 6;
-            short trackH   = sbBot - sbTop;
-            short msgAreaH = pillR.top - 12;
-            short totalH   = msgAreaH + gMsgMaxScrollY;
-            short thumbH   = (totalH > 0) ? (short)(((long)trackH * msgAreaH) / totalH) : trackH;
-            short thumbY;
-            if (thumbH < 20) thumbH = 20;
-            if (thumbH > trackH) thumbH = trackH;
-            thumbY = sbTop + (short)(((long)(trackH - thumbH) * gMsgScrollY) / gMsgMaxScrollY);
+        {
+            short sbX = gWinW - 11;
+            short sbTop = 10;
+            short sbBot = pillR.top - 6;
+            if (gMsgMaxScrollY > 0 && localPt.h >= sbX - 4 && localPt.h <= gWinW && localPt.v >= sbTop && localPt.v <= sbBot) {
+                short trackH   = sbBot - sbTop;
+                short msgAreaH = pillR.top - 12;
+                short totalH   = msgAreaH + gMsgMaxScrollY;
+                short thumbH   = (totalH > 0) ? (short)(((long)trackH * msgAreaH) / totalH) : trackH;
+                short thumbY;
+                if (thumbH < 20) thumbH = 20;
+                if (thumbH > trackH) thumbH = trackH;
+                thumbY = sbTop + (short)(((long)(trackH - thumbH) * gMsgScrollY) / gMsgMaxScrollY);
 
-            if (localPt.v >= thumbY && localPt.v <= thumbY + thumbH) {
-                /* Smooth thumb drag throttled to VBL ticks */
-                short grabOff = localPt.v - thumbY;
-                unsigned long lastTick = 0;
-                while (StillDown()) {
-                    Point pt;
-                    short newThumbY, newScrollY;
-                    GetMouse(&pt);
-                    newThumbY = pt.v - grabOff;
-                    if (newThumbY < sbTop) newThumbY = sbTop;
-                    if (newThumbY > sbBot - thumbH) newThumbY = sbBot - thumbH;
-                    newScrollY = (trackH > thumbH)
-                        ? (short)(((long)(newThumbY - sbTop) * gMsgMaxScrollY) / (trackH - thumbH))
-                        : 0;
-                    if (newScrollY < 0) newScrollY = 0;
-                    if (newScrollY > gMsgMaxScrollY) newScrollY = gMsgMaxScrollY;
-                    if (newScrollY != gMsgScrollY && TickCount() != lastTick) {
-                        gMsgScrollY = newScrollY;
-                        lastTick = TickCount();
-                        RenderChatAreaOnly();
+                if (localPt.v >= thumbY && localPt.v <= thumbY + thumbH) {
+                    /* Direct thumb drag matching SpotiMac (instant 60fps tracking) */
+                    short grabOff = localPt.v - thumbY;
+                    while (StillDown()) {
+                        Point pt;
+                        short newThumbY, newScrollY;
+                        GetMouse(&pt);
+                        newThumbY = pt.v - grabOff;
+                        if (newThumbY < sbTop) newThumbY = sbTop;
+                        if (newThumbY > sbBot - thumbH) newThumbY = sbBot - thumbH;
+                        newScrollY = (trackH > thumbH)
+                            ? (short)(((long)(newThumbY - sbTop) * gMsgMaxScrollY) / (trackH - thumbH))
+                            : 0;
+                        if (newScrollY < 0) newScrollY = 0;
+                        if (newScrollY > gMsgMaxScrollY) newScrollY = gMsgMaxScrollY;
+                        if (newScrollY != gMsgScrollY) {
+                            gMsgScrollY = newScrollY;
+                            RenderChatAreaOnly();
+                        }
                     }
+                } else {
+                    /* Page up / down click & hold in track */
+                    Boolean pageUp = (localPt.v < thumbY);
+                    unsigned long lastStepTick = 0;
+                    do {
+                        if ((TickCount() - lastStepTick) >= 6) {
+                            lastStepTick = TickCount();
+                            if (pageUp) gMsgScrollY -= 80;
+                            else gMsgScrollY += 80;
+                            if (gMsgScrollY < 0) gMsgScrollY = 0;
+                            if (gMsgScrollY > gMsgMaxScrollY) gMsgScrollY = gMsgMaxScrollY;
+                            RenderChatAreaOnly();
+                        }
+                    } while (StillDown());
                 }
-            } else {
-                /* Page up / down click & hold in track */
-                Boolean pageUp = (localPt.v < thumbY);
-                unsigned long lastStepTick = 0;
-                do {
-                    if ((TickCount() - lastStepTick) >= 6) {
-                        lastStepTick = TickCount();
-                        if (pageUp) gMsgScrollY -= 80;
-                        else gMsgScrollY += 80;
-                        if (gMsgScrollY < 0) gMsgScrollY = 0;
-                        if (gMsgScrollY > gMsgMaxScrollY) gMsgScrollY = gMsgMaxScrollY;
-                        RenderChatAreaOnly();
-                    }
-                } while (StillDown());
+                return;
             }
-            return;
         }
 
-        /* Hit-test Copy & Retry buttons under AI response bubbles */
+        /* Hit-test Action Buttons under bubbles or Edit buttons */
         if (localPt.v >= 8 && localPt.v < pillR.top - 4) {
-            short chatLeft  = gSidebarCollapsed ? 0 : SIDEBAR_W;
+            short chatLeft  = gSidebarCollapsed ? 0 : (SIDEBAR_W + 1);
             short chatW     = gWinW - chatLeft;
-            short maxBubbleTextW = (chatW * 68) / 100;
-            short curY = 14;
+            short userMaxW  = chatW - 90;
+            short aiMaxW;
+            short aiLeftX   = chatLeft + (gSidebarCollapsed ? 34 : 18);
+            short curY      = 8 - gMsgScrollY;
             short i;
-            if (maxBubbleTextW < 150) maxBubbleTextW = 150;
+            static char wrappedBuf[MAX_WRAPPED_LINES][96];
+
+            if (userMaxW > 240) userMaxW = 240;
+            if (userMaxW < 120) userMaxW = 120;
+            aiMaxW  = (gWinW - 22) - aiLeftX - 24;
+            if (aiMaxW < 140) aiMaxW = 140;
 
             for (i = 0; i < gMessageCount; i++) {
-                short bubbleH, drawY;
-                EnsureMessageMetrics(&gMessages[i], maxBubbleTextW);
-                bubbleH = gMessages[i].cachedBubbleH;
-                drawY   = curY - gMsgScrollY;
+                short maxW = gMessages[i].isUser ? userMaxW : aiMaxW;
+                short bubbleH, stepH, widestLine;
+                Boolean isEditingThis = (gEditingMsgIdx == i);
 
-                if (!gMessages[i].isUser) {
-                    short bx = chatLeft + (gSidebarCollapsed ? 38 : 16);
-                    short actTop = drawY + bubbleH + 1;
-                    short actBot = drawY + bubbleH + 15;
-                    Rect copyHitR, retryHitR;
-
-                    SetRect(&copyHitR,  bx - 2,      actTop, bx + 42, actBot);
-                    SetRect(&retryHitR, bx + 43,     actTop, bx + 94, actBot);
-
-                    if (PtInRect(localPt, &copyHitR)) {
-                        CopyMessageToClipboard(i);
-                        return;
+                if (isEditingThis) {
+                    short nLines = WrapMessageLines(gEditBuf, maxW, wrappedBuf, MAX_WRAPPED_LINES);
+                    short L;
+                    widestLine = 0;
+                    for (L = 0; L < nLines; L++) {
+                        short w = MeasureCString(wrappedBuf[L]);
+                        if (w > widestLine) widestLine = w;
                     }
-                    if (PtInRect(localPt, &retryHitR)) {
-                        RetryAIResponseAtIndex(i);
-                        return;
+                    bubbleH = nLines * 12 + 14;
+                    if (bubbleH < 24) bubbleH = 24;
+                    stepH = bubbleH + 24;
+
+                    {
+                        short rightEdge = gWinW - 25;
+                        Rect bubbleR, cancelR, saveR;
+                        short bw = widestLine + 20;
+                        if (bw < 120) bw = 120;
+                        SetRect(&bubbleR, rightEdge - bw, curY, rightEdge, curY + bubbleH);
+                        SetRect(&cancelR, rightEdge - 92, curY + bubbleH + 3, rightEdge - 48, curY + bubbleH + 17);
+                        SetRect(&saveR,   rightEdge - 44, curY + bubbleH + 3, rightEdge,      curY + bubbleH + 17);
+
+                        if (PtInRect(localPt, &cancelR)) {
+                            gEditingMsgIdx = -1;
+                            gPromptFocused = true;
+                            RenderWindow();
+                            return;
+                        }
+                        if (PtInRect(localPt, &saveR)) {
+                            SubmitEditedMessage(gEditingMsgIdx);
+                            return;
+                        }
+                        if (PtInRect(localPt, &bubbleR)) {
+                            short clickPos = GetEditCharPosAtPoint(localPt, &bubbleR, curY, nLines, wrappedBuf);
+                            gEditSelAnchor = clickPos;
+                            gEditCursorPos = clickPos;
+                            gCaretVisible  = true;
+                            gLastCaretTick = TickCount();
+                            RenderChatAreaOnly();
+
+                            while (StillDown()) {
+                                Point curPt;
+                                GetMouse(&curPt);
+                                short dragPos = GetEditCharPosAtPoint(curPt, &bubbleR, curY, nLines, wrappedBuf);
+                                if (dragPos != gEditCursorPos) {
+                                    gEditCursorPos = dragPos;
+                                    RenderChatAreaOnly();
+                                }
+                            }
+                            return;
+                        }
                     }
-                    curY += bubbleH + 22;
                 } else {
-                    curY += bubbleH + 10;
+                    EnsureMessageMetrics(&gMessages[i], maxW);
+                    bubbleH = gMessages[i].cachedBubbleH;
+                    widestLine = gMessages[i].cachedWidestPx;
+                    stepH = bubbleH + (gMessages[i].isUser ? 18 : 22);
+
+                    if (gHoverBubbleIdx == i) {
+                        if (gMessages[i].isUser) {
+                            short rightEdge = gWinW - 25;
+                            short actionY = curY + bubbleH + 3;
+                            Rect editHitR, copyHitR;
+                            SetRect(&editHitR, rightEdge - 30, actionY - 2, rightEdge - 16, actionY + 14);
+                            SetRect(&copyHitR, rightEdge - 16, actionY - 2, rightEdge + 2,  actionY + 14);
+
+                            if (PtInRect(localPt, &editHitR)) {
+                                gEditingMsgIdx = i;
+                                SafeCopyString(gEditBuf, gMessages[i].text, sizeof(gEditBuf));
+                                gEditBufLen = (short)strlen(gEditBuf);
+                                gEditCursorPos = gEditBufLen;
+                                gEditSelAnchor = gEditBufLen;
+                                gPromptFocused = false;
+                                gCaretVisible = true;
+                                gLastCaretTick = TickCount();
+                                RenderWindow();
+                                return;
+                            }
+                            if (PtInRect(localPt, &copyHitR)) {
+                                CopyMessageToClipboard(i);
+                                return;
+                            }
+                        } else {
+                            short actionY = curY + bubbleH + 4;
+                            Rect retryHitR, copyHitR;
+                            SetRect(&retryHitR, aiLeftX + 4,  actionY - 2, aiLeftX + 18, actionY + 14);
+                            SetRect(&copyHitR,  aiLeftX + 20, actionY - 2, aiLeftX + 36, actionY + 14);
+
+                            if (PtInRect(localPt, &retryHitR)) {
+                                RetryAIResponseAtIndex(i);
+                                return;
+                            }
+                            if (PtInRect(localPt, &copyHitR)) {
+                                CopyMessageToClipboard(i);
+                                return;
+                            }
+                        }
+                    }
                 }
+                curY += stepH;
             }
         }
     }
@@ -2378,7 +2967,51 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
             RenderWindow();
             return;
         }
+        if (key == 'r' || key == 'R') {
+            gServerConnected = false;
+            gScanningServer  = false;
+            RenderWindow();
+            return;
+        }
+        if (key == 'a' || key == 'A') {
+            if (gEditingMsgIdx >= 0) {
+                gEditSelAnchor = 0;
+                gEditCursorPos = gEditBufLen;
+                RenderChatAreaOnly();
+                return;
+            } else if (gPromptFocused && gPromptBuf[0] != '\0') {
+                gPromptSelAnchor = 0;
+                gCursorPos       = (short)strlen(gPromptBuf);
+                RenderPromptBarOnly();
+                return;
+            }
+        }
         if (key == 'c' || key == 'C') {
+            if (gEditingMsgIdx >= 0) {
+                short sStart, sEnd;
+                GetEditSelection(&sStart, &sEnd);
+                if (sStart < sEnd) {
+                    char selText[1024];
+                    short sLen = sEnd - sStart;
+                    memcpy(selText, &gEditBuf[sStart], sLen);
+                    selText[sLen] = '\0';
+                    CopyTextToClipboard(selText);
+                } else if (gEditBufLen > 0) {
+                    CopyTextToClipboard(gEditBuf);
+                }
+                return;
+            } else if (gPromptFocused) {
+                short sStart, sEnd;
+                GetPromptSelection(&sStart, &sEnd);
+                if (sStart < sEnd) {
+                    char selText[1024];
+                    short sLen = sEnd - sStart;
+                    memcpy(selText, &gPromptBuf[sStart], sLen);
+                    selText[sLen] = '\0';
+                    CopyTextToClipboard(selText);
+                    return;
+                }
+            }
             /* Cmd+C copies the latest AI response to the Clipboard */
             short i;
             for (i = gMessageCount - 1; i >= 0; i--) {
@@ -2389,30 +3022,104 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
             }
             return;
         }
+        if (key == 'x' || key == 'X') {
+            if (gEditingMsgIdx >= 0) {
+                short sStart, sEnd;
+                GetEditSelection(&sStart, &sEnd);
+                if (sStart < sEnd) {
+                    char selText[1024];
+                    short sLen = sEnd - sStart;
+                    memcpy(selText, &gEditBuf[sStart], sLen);
+                    selText[sLen] = '\0';
+                    CopyTextToClipboard(selText);
+                    DeleteEditSelection();
+                    gCaretVisible  = true;
+                    gLastCaretTick = TickCount();
+                    RenderChatAreaOnly();
+                }
+                return;
+            } else if (gPromptFocused) {
+                short sStart, sEnd;
+                GetPromptSelection(&sStart, &sEnd);
+                if (sStart < sEnd) {
+                    char selText[1024];
+                    short sLen = sEnd - sStart;
+                    short prevVis = gPrevPromptVisLines;
+                    memcpy(selText, &gPromptBuf[sStart], sLen);
+                    selText[sLen] = '\0';
+                    CopyTextToClipboard(selText);
+                    DeletePromptSelection();
+                    SyncPromptExpansionWithScroll();
+                    EnsureCaretVisible();
+                    if (gPrevPromptVisLines != prevVis) {
+                        RenderChatAreaOnly();
+                    } else {
+                        RenderPromptBarOnly();
+                    }
+                }
+                return;
+            }
+        }
         if (key == 'v' || key == 'V') {
-            /* Cmd+V pastes text from Clipboard into prompt input */
+            /* Cmd+V pastes text from Clipboard */
             if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen) {
                 Handle hScrap = NewHandle(0);
                 long offset = 0;
                 long scrapLen = GetScrap(hScrap, 'TEXT', &offset);
                 if (scrapLen > 0 && hScrap && *hScrap) {
-                    short curLen = (short)strlen(gPromptBuf);
-                    short i;
+                    char pasteChars[512];
+                    short pLen = 0, i;
                     HLock(hScrap);
-                    for (i = 0; i < scrapLen && curLen < (short)(sizeof(gPromptBuf) - 2); i++) {
+                    for (i = 0; i < scrapLen && pLen < (short)(sizeof(pasteChars) - 1); i++) {
                         char ch = (*hScrap)[i];
                         if (ch == '\r' || ch == '\n' || ch == '\t') ch = ' ';
                         if (ch >= 32 && ch < 127) {
-                            gPromptBuf[curLen++] = ch;
+                            pasteChars[pLen++] = ch;
                         }
                     }
-                    gPromptBuf[curLen] = '\0';
+                    pasteChars[pLen] = '\0';
                     HUnlock(hScrap);
-                    gPromptFocused = true;
-                    gCaretVisible  = true;
-                    gLastCaretTick = TickCount();
-                    SyncPromptExpansionWithScroll();
-                    RenderChatAreaOnly();
+
+                    if (gEditingMsgIdx >= 0) {
+                        DeleteEditSelection();
+                        if (pLen > 0 && gEditBufLen + pLen < (short)(sizeof(gEditBuf) - 2)) {
+                            if (gEditCursorPos < gEditBufLen) {
+                                memmove(&gEditBuf[gEditCursorPos + pLen], &gEditBuf[gEditCursorPos], gEditBufLen - gEditCursorPos + 1);
+                            }
+                            memcpy(&gEditBuf[gEditCursorPos], pasteChars, pLen);
+                            gEditCursorPos += pLen;
+                            gEditSelAnchor  = gEditCursorPos;
+                            gEditBufLen    += pLen;
+                            gEditBuf[gEditBufLen] = '\0';
+                        }
+                        gCaretVisible  = true;
+                        gLastCaretTick = TickCount();
+                        RenderChatAreaOnly();
+                    } else if (gPromptFocused) {
+                        DeletePromptSelection();
+                        short curLen = (short)strlen(gPromptBuf);
+                        if (pLen > 0 && curLen + pLen < (short)(sizeof(gPromptBuf) - 2)) {
+                            short prevVis = gPrevPromptVisLines;
+                            if (gCursorPos < curLen) {
+                                memmove(&gPromptBuf[gCursorPos + pLen], &gPromptBuf[gCursorPos], curLen - gCursorPos + 1);
+                            }
+                            memcpy(&gPromptBuf[gCursorPos], pasteChars, pLen);
+                            gCursorPos += pLen;
+                            gPromptSelAnchor = gCursorPos;
+                            gPromptBuf[curLen + pLen] = '\0';
+
+                            gShowPlaceholder = false;
+                            gCaretVisible    = true;
+                            gLastCaretTick   = TickCount();
+                            SyncPromptExpansionWithScroll();
+                            EnsureCaretVisible();
+                            if (gPrevPromptVisLines != prevVis) {
+                                RenderChatAreaOnly();
+                            } else {
+                                RenderPromptBarOnly();
+                            }
+                        }
+                    }
                 }
                 if (hScrap) DisposeHandle(hScrap);
             }
@@ -2474,14 +3181,224 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
         return;
     }
 
-    /* Arrow keys for scrolling chat messages */
+    /* In-place Speech Bubble editing */
+    if (gEditingMsgIdx >= 0) {
+        if (key == 27) { /* Escape: Cancel edit */
+            gEditingMsgIdx = -1;
+            gPromptFocused = true;
+            RenderWindow();
+            return;
+        }
+        if (key == '\r' || key == 3) { /* Enter: Save and re-run */
+            if (gEditBufLen > 0) {
+                SubmitEditedMessage(gEditingMsgIdx);
+            }
+            return;
+        }
+        if (key == 28) { /* Left arrow */
+            short sStart, sEnd;
+            GetEditSelection(&sStart, &sEnd);
+            if (sStart < sEnd) {
+                gEditCursorPos = sStart;
+                gEditSelAnchor = sStart;
+            } else if (gEditCursorPos > 0) {
+                gEditCursorPos--;
+                gEditSelAnchor = gEditCursorPos;
+            }
+            gCaretVisible  = true;
+            gLastCaretTick = TickCount();
+            RenderChatAreaOnly();
+            return;
+        }
+        if (key == 29) { /* Right arrow */
+            short sStart, sEnd;
+            GetEditSelection(&sStart, &sEnd);
+            if (sStart < sEnd) {
+                gEditCursorPos = sEnd;
+                gEditSelAnchor = sEnd;
+            } else if (gEditCursorPos < gEditBufLen) {
+                gEditCursorPos++;
+                gEditSelAnchor = gEditCursorPos;
+            }
+            gCaretVisible  = true;
+            gLastCaretTick = TickCount();
+            RenderChatAreaOnly();
+            return;
+        }
+        if (key == 30 || key == 31) { /* Up/Down arrow */
+            static char tmpW[MAX_WRAPPED_LINES][96];
+            short userMaxW = (gWinW - (gSidebarCollapsed ? 0 : (SIDEBAR_W + 1))) - 90;
+            short nLines, cLine = 0, cCol = 0, L;
+            if (userMaxW > 240) userMaxW = 240;
+            if (userMaxW < 120) userMaxW = 120;
+            nLines = WrapMessageLinesEx(gEditBuf, userMaxW, tmpW, gEditLineStarts, MAX_WRAPPED_LINES);
+            for (L = 0; L < nLines; L++) {
+                short sIdx = gEditLineStarts[L];
+                short lLen = (short)strlen(tmpW[L]);
+                if (gEditCursorPos >= sIdx && (gEditCursorPos <= sIdx + lLen || L == nLines - 1)) {
+                    cLine = L;
+                    cCol  = gEditCursorPos - sIdx;
+                    if (cCol > lLen) cCol = lLen;
+                    break;
+                }
+            }
+            if (key == 30) {
+                if (cLine > 0) {
+                    short targetCol = cCol;
+                    short pLen = (short)strlen(tmpW[cLine - 1]);
+                    if (targetCol > pLen) targetCol = pLen;
+                    gEditCursorPos = gEditLineStarts[cLine - 1] + targetCol;
+                } else {
+                    gEditCursorPos = 0;
+                }
+            } else {
+                if (cLine < nLines - 1) {
+                    short targetCol = cCol;
+                    short nextLen = (short)strlen(tmpW[cLine + 1]);
+                    if (targetCol > nextLen) targetCol = nextLen;
+                    gEditCursorPos = gEditLineStarts[cLine + 1] + targetCol;
+                } else {
+                    gEditCursorPos = gEditBufLen;
+                }
+            }
+            gEditSelAnchor = gEditCursorPos;
+            gCaretVisible  = true;
+            gLastCaretTick = TickCount();
+            RenderChatAreaOnly();
+            return;
+        }
+        if (key == 8) { /* Backspace */
+            if (DeleteEditSelection()) {
+                gCaretVisible  = true;
+                gLastCaretTick = TickCount();
+                RenderChatAreaOnly();
+                return;
+            } else if (gEditCursorPos > 0) {
+                memmove(&gEditBuf[gEditCursorPos - 1], &gEditBuf[gEditCursorPos], gEditBufLen - gEditCursorPos + 1);
+                gEditCursorPos--;
+                gEditSelAnchor = gEditCursorPos;
+                gEditBufLen--;
+                gCaretVisible  = true;
+                gLastCaretTick = TickCount();
+                RenderChatAreaOnly();
+                return;
+            }
+            return;
+        }
+        if (key >= 32 && key < 127) {
+            DeleteEditSelection();
+            if (gEditBufLen < (short)(sizeof(gEditBuf) - 2)) {
+                if (gEditCursorPos < gEditBufLen) {
+                    memmove(&gEditBuf[gEditCursorPos + 1], &gEditBuf[gEditCursorPos], gEditBufLen - gEditCursorPos + 1);
+                }
+                gEditBuf[gEditCursorPos] = key;
+                gEditCursorPos++;
+                gEditSelAnchor = gEditCursorPos;
+                gEditBufLen++;
+                gEditBuf[gEditBufLen] = '\0';
+                gCaretVisible  = true;
+                gLastCaretTick = TickCount();
+                RenderChatAreaOnly();
+                return;
+            }
+            return;
+        }
+        return;
+    }
+
+    /* Arrow keys for prompt navigation or scrolling chat */
+    if (key == 28) { /* Left arrow */
+        if (gPromptFocused) {
+            short sStart, sEnd;
+            GetPromptSelection(&sStart, &sEnd);
+            if (sStart < sEnd) {
+                gCursorPos       = sStart;
+                gPromptSelAnchor = sStart;
+            } else if (gCursorPos > 0) {
+                gCursorPos--;
+                gPromptSelAnchor = gCursorPos;
+            }
+            gCaretVisible  = true;
+            gLastCaretTick = TickCount();
+            EnsureCaretVisible();
+            RenderPromptBarOnly();
+            return;
+        }
+    }
+    if (key == 29) { /* Right arrow */
+        if (gPromptFocused) {
+            short bLen = (short)strlen(gPromptBuf);
+            short sStart, sEnd;
+            GetPromptSelection(&sStart, &sEnd);
+            if (sStart < sEnd) {
+                gCursorPos       = sEnd;
+                gPromptSelAnchor = sEnd;
+            } else if (gCursorPos < bLen) {
+                gCursorPos++;
+                gPromptSelAnchor = gCursorPos;
+            }
+            gCaretVisible  = true;
+            gLastCaretTick = TickCount();
+            EnsureCaretVisible();
+            RenderPromptBarOnly();
+            return;
+        }
+    }
     if (key == 30) { /* Up arrow */
+        if (gPromptFocused) {
+            static char pLines[32][96];
+            short visLines = 1;
+            short totalLines = WrapPromptInputLines(pLines, 32, &visLines);
+            if (totalLines > 1) {
+                short cLine, colPx;
+                GetPromptCaretPos(&cLine, &colPx, pLines, totalLines);
+                if (cLine > 0) {
+                    short prevLineLen = (short)strlen(pLines[cLine - 1]);
+                    short prevStart   = gPromptLineStarts[cLine - 1];
+                    short targetCol   = colPx / MONACO_CHAR_W;
+                    if (targetCol > prevLineLen) targetCol = prevLineLen;
+                    gCursorPos = prevStart + targetCol;
+                } else {
+                    gCursorPos = 0;
+                }
+                gPromptSelAnchor = gCursorPos;
+                gCaretVisible    = true;
+                gLastCaretTick   = TickCount();
+                EnsureCaretVisible();
+                RenderPromptBarOnly();
+                return;
+            }
+        }
         gMsgScrollY -= 24;
         if (gMsgScrollY < 0) gMsgScrollY = 0;
         RenderChatAreaOnly();
         return;
     }
     if (key == 31) { /* Down arrow */
+        if (gPromptFocused) {
+            static char pLines[32][96];
+            short visLines = 1;
+            short totalLines = WrapPromptInputLines(pLines, 32, &visLines);
+            if (totalLines > 1) {
+                short cLine, colPx;
+                GetPromptCaretPos(&cLine, &colPx, pLines, totalLines);
+                if (cLine < totalLines - 1) {
+                    short nextLineLen = (short)strlen(pLines[cLine + 1]);
+                    short nextStart   = gPromptLineStarts[cLine + 1];
+                    short targetCol   = colPx / MONACO_CHAR_W;
+                    if (targetCol > nextLineLen) targetCol = nextLineLen;
+                    gCursorPos = nextStart + targetCol;
+                } else {
+                    gCursorPos = (short)strlen(gPromptBuf);
+                }
+                gPromptSelAnchor = gCursorPos;
+                gCaretVisible    = true;
+                gLastCaretTick   = TickCount();
+                EnsureCaretVisible();
+                RenderPromptBarOnly();
+                return;
+            }
+        }
         gMsgScrollY += 24;
         if (gMsgScrollY > gMsgMaxScrollY) gMsgScrollY = gMsgMaxScrollY;
         RenderChatAreaOnly();
@@ -2496,35 +3413,63 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
                 ToggleVoiceRecording();
             } else if (len > 0) {
                 static char toSend[sizeof(gPromptBuf)];
-                strncpy(toSend, gPromptBuf, sizeof(toSend) - 1);
-                toSend[sizeof(toSend) - 1] = '\0';
+                SafeCopyString(toSend, gPromptBuf, sizeof(toSend));
                 gPromptBuf[0]       = '\0';
+                gCursorPos          = 0;
+                gPromptSelAnchor    = 0;
                 gPromptScrollLine   = 0;
                 gPrevPromptVisLines = 1;
                 gCaretVisible       = true;
                 gLastCaretTick      = TickCount();
                 SendPromptToAI(toSend, false);
             }
-        } else if (key == 8 && len > 0) {
+        } else if (key == 8) {
             short prevVis = gPrevPromptVisLines;
-            gPromptFocused = true;
-            gCaretVisible  = true;
-            gLastCaretTick = TickCount();
-            gPromptBuf[len - 1] = '\0';
-            SyncPromptExpansionWithScroll();
-            if (gPrevPromptVisLines != prevVis) {
-                RenderChatAreaOnly();
-            } else {
-                RenderPromptBarOnly();
+            if (DeletePromptSelection()) {
+                gPromptFocused = true;
+                gCaretVisible  = true;
+                gLastCaretTick = TickCount();
+                SyncPromptExpansionWithScroll();
+                EnsureCaretVisible();
+                if (gPrevPromptVisLines != prevVis) {
+                    RenderChatAreaOnly();
+                } else {
+                    RenderPromptBarOnly();
+                }
+            } else if (gCursorPos > 0) {
+                memmove(&gPromptBuf[gCursorPos - 1], &gPromptBuf[gCursorPos], len - gCursorPos + 1);
+                gCursorPos--;
+                gPromptSelAnchor = gCursorPos;
+                gPromptFocused   = true;
+                gCaretVisible    = true;
+                gLastCaretTick   = TickCount();
+                SyncPromptExpansionWithScroll();
+                EnsureCaretVisible();
+                if (gPrevPromptVisLines != prevVis) {
+                    RenderChatAreaOnly();
+                } else {
+                    RenderPromptBarOnly();
+                }
             }
-        } else if (key >= 32 && key < 127 && len < (short)(sizeof(gPromptBuf) - 2)) {
+        } else if (key >= 32 && key < 127) {
             short prevVis = gPrevPromptVisLines;
-            gPromptFocused = true;
-            gCaretVisible  = true;
-            gLastCaretTick = TickCount();
-            gPromptBuf[len] = key;
-            gPromptBuf[len + 1] = '\0';
+            DeletePromptSelection();
+            len = (short)strlen(gPromptBuf);
+            if (len < (short)(sizeof(gPromptBuf) - 2)) {
+                if (gCursorPos < len) {
+                    memmove(&gPromptBuf[gCursorPos + 1], &gPromptBuf[gCursorPos], len - gCursorPos + 1);
+                }
+                gPromptBuf[gCursorPos] = key;
+                gCursorPos++;
+                gPromptSelAnchor = gCursorPos;
+                gPromptBuf[len + 1] = '\0';
+            }
+            gShowPlaceholder = false;
+            gPromptFocused   = true;
+            gCaretVisible    = true;
+            gLastCaretTick   = TickCount();
             SyncPromptExpansionWithScroll();
+            EnsureCaretVisible();
             if (gPrevPromptVisLines != prevVis) {
                 RenderChatAreaOnly();
             } else {
@@ -2567,17 +3512,17 @@ static void HandleMenuChoice(long menuChoice)
                 gSidebarCollapsed = !gSidebarCollapsed;
                 RenderWindow();
                 break;
-            case iReconnect:
-                gServerConnected = false;
-                gScanningServer  = false;
-                RenderWindow();
-                break;
             case iQuit:
                 gRunning = false;
                 break;
         }
-    } else if (menuID == mAI) {
+    } else if (menuID == mSettings) {
         switch (itemID) {
+            case iServerConnection:
+                gServerConnected = false;
+                gScanningServer  = false;
+                RenderWindow();
+                break;
             case iUseGemini:    SelectProviderOrTier("gemini", NULL); break;
             case iUseOpenAI:    SelectProviderOrTier("chatgpt", NULL); break;
             case iUseClaude:    SelectProviderOrTier("claude", NULL); break;
@@ -2663,18 +3608,33 @@ int main(void)
                 ToggleVoiceRecording();
             }
         }
-        if (gCopiedMsgIdx >= 0 && (TickCount() - gCopiedTick) >= 90) {
+        if (gCopiedMsgIdx >= 0 && (TickCount() - gCopiedTick) >= 120) {
             gCopiedMsgIdx = -1;
             if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
                 RenderChatAreaOnly();
             }
         }
-        if (gPromptFocused && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
+        if ((gPromptFocused || gEditingMsgIdx >= 0) && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
             unsigned long nowTicks = TickCount();
             if ((nowTicks - gLastCaretTick) >= 30) {
                 gLastCaretTick = nowTicks;
                 gCaretVisible = !gCaretVisible;
-                RenderPromptBarOnly();
+                if (gEditingMsgIdx >= 0) {
+                    RenderChatAreaOnly();
+                } else {
+                    RenderPromptBarOnly();
+                }
+            }
+        }
+
+        /* Mouse hover tracking over message bubbles */
+        if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen && !Button()) {
+            Point pt;
+            GetMouse(&pt);
+            short hov = HitTestMessageBubble(pt);
+            if (hov != gHoverBubbleIdx) {
+                gHoverBubbleIdx = hov;
+                RenderChatAreaOnly();
             }
         }
 

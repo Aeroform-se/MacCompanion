@@ -41,3 +41,8 @@ scripts/deploy-basilisk.sh
 logs/
 *.log
 npm-debug.log*
+
+# Local AI Agent Configuration
+AGENTS.md
+GEMINI.md
+.agents/
