@@ -17,9 +17,8 @@ static ip_addr        gServerIP       = 0;
 static unsigned short gServerHttpPort = DEFAULT_HTTP_PORT;
 static void         (*gIdleCallback)(void) = NULL;
 
-/* Persistent Reusable HTTP Stream & Receive Buffer (avoids per-request NewPtr/TCPCreate/TCPRelease) */
+/* Persistent HTTP Receive Buffer (avoids per-request NewPtr/DisposePtr heap churn) */
 #define HTTP_TCP_RCV_SIZE   8192
-static StreamPtr      gHttpStream     = 0;
 static Ptr            gHttpTcpRcvBuf  = NULL;
 
 /* ============================================================================
@@ -178,7 +177,7 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
 {
     OSErr err;
     unsigned long startTicks = TickCount();
-    unsigned long lastIdleTick = 0;
+    unsigned long lastIdleTick = startTicks;
 
     pb->ioCompletion = NULL;
     pb->ioCRefNum    = gMacTCPRef;
@@ -196,7 +195,6 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
          */
         if (nowTicks != lastIdleTick) {
             lastIdleTick = nowTicks;
-            SystemTask();
             if (pumpAudioWhileWaiting && gAudioRunning) {
                 AudioStreamPump();
             }
@@ -348,51 +346,10 @@ static long ParseContentLength(const char *headers, long headerLen)
     return -1;
 }
 
-static Boolean EnsureHttpStream(void)
-{
-    TCPiopb pb;
-
-    if (!gHttpTcpRcvBuf) {
-        gHttpTcpRcvBuf = NewPtr(HTTP_TCP_RCV_SIZE);
-        if (!gHttpTcpRcvBuf) return false;
-    }
-    if (gHttpStream != 0) {
-        return true;
-    }
-
-    memset(&pb, 0, sizeof(pb));
-    pb.csCode                    = TCPCreate;
-    pb.csParam.create.rcvBuff    = gHttpTcpRcvBuf;
-    pb.csParam.create.rcvBuffLen = HTTP_TCP_RCV_SIZE;
-    pb.csParam.create.notifyProc = NULL;
-    if (RunTCPControl(&pb, true) != noErr) {
-        return false;
-    }
-    gHttpStream = pb.tcpStream;
-    return (gHttpStream != 0);
-}
-
-static void ResetAndRecreateHttpStream(void)
-{
-    TCPiopb pb;
-    if (gHttpStream != 0) {
-        memset(&pb, 0, sizeof(pb));
-        pb.csCode    = TCPAbort;
-        pb.tcpStream = gHttpStream;
-        RunTCPControl(&pb, true);
-
-        memset(&pb, 0, sizeof(pb));
-        pb.csCode    = TCPRelease;
-        pb.tcpStream = gHttpStream;
-        RunTCPControl(&pb, true);
-        gHttpStream = 0;
-    }
-    EnsureHttpStream();
-}
-
 long NetHttpGet(const char *path, char *outBody, long maxLen)
 {
     TCPiopb pb;
+    StreamPtr stream = 0;
     wdsEntry wds[2];
     char reqBuf[512];
     long totalRead = 0;
@@ -405,12 +362,26 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     outBody[0] = '\0';
 
     if (!NetInit() || gServerIP == 0) return -1;
-    if (!EnsureHttpStream()) return -1;
 
-    /* Active Open to gServerIP : gServerHttpPort (reusing persistent gHttpStream) */
+    if (!gHttpTcpRcvBuf) {
+        gHttpTcpRcvBuf = NewPtr(HTTP_TCP_RCV_SIZE);
+        if (!gHttpTcpRcvBuf) return -1;
+    }
+
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode                    = TCPCreate;
+    pb.csParam.create.rcvBuff    = gHttpTcpRcvBuf;
+    pb.csParam.create.rcvBuffLen = HTTP_TCP_RCV_SIZE;
+    pb.csParam.create.notifyProc = NULL;
+    if (RunTCPControl(&pb, true) != noErr) {
+        return -1;
+    }
+    stream = pb.tcpStream;
+
+    /* Active Open to gServerIP : gServerHttpPort */
     memset(&pb, 0, sizeof(pb));
     pb.csCode                           = TCPActiveOpen;
-    pb.tcpStream                        = gHttpStream;
+    pb.tcpStream                        = stream;
     pb.csParam.open.ulpTimeoutValue     = 4;
     pb.csParam.open.ulpTimeoutAction    = 1;
     pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
@@ -419,22 +390,7 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
     pb.csParam.open.remotePort          = gServerHttpPort;
     pb.csParam.open.localPort           = 0;
     if (RunTCPControl(&pb, true) != noErr) {
-        /* If stream was in a non-closed state, recreate once and retry */
-        ResetAndRecreateHttpStream();
-        if (gHttpStream == 0) return -1;
-        memset(&pb, 0, sizeof(pb));
-        pb.csCode                           = TCPActiveOpen;
-        pb.tcpStream                        = gHttpStream;
-        pb.csParam.open.ulpTimeoutValue     = 4;
-        pb.csParam.open.ulpTimeoutAction    = 1;
-        pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
-        pb.csParam.open.commandTimeoutValue = 4;
-        pb.csParam.open.remoteHost          = gServerIP;
-        pb.csParam.open.remotePort          = gServerHttpPort;
-        pb.csParam.open.localPort           = 0;
-        if (RunTCPControl(&pb, true) != noErr) {
-            goto close_conn;
-        }
+        goto cleanup;
     }
 
     /* Send HTTP/1.0 GET request */
@@ -451,7 +407,7 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
 
     memset(&pb, 0, sizeof(pb));
     pb.csCode                  = TCPSend;
-    pb.tcpStream               = gHttpStream;
+    pb.tcpStream               = stream;
     pb.csParam.send.wdsPtr     = (Ptr)wds;
     pb.csParam.send.pushFlag   = true;
     if (RunTCPControl(&pb, true) != noErr) {
@@ -469,13 +425,14 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
 
         memset(&pb, 0, sizeof(pb));
         pb.csCode                              = TCPRcv;
-        pb.tcpStream                           = gHttpStream;
+        pb.tcpStream                           = stream;
         pb.csParam.receive.commandTimeoutValue = 4;
         pb.csParam.receive.rcvBuff             = outBody + totalRead;
         pb.csParam.receive.rcvBuffLen          = chunkAsk;
 
         err = RunTCPControl(&pb, true);
-        if (err == noErr && pb.csParam.receive.rcvBuffLen > 0) {
+        if ((err == noErr || err == connectionClosing || err == connectionTerminated) &&
+            pb.csParam.receive.rcvBuffLen > 0) {
             totalRead += pb.csParam.receive.rcvBuffLen;
 
             /* Strip HTTP headers as soon as "\r\n\r\n" is received */
@@ -501,19 +458,33 @@ long NetHttpGet(const char *path, char *outBody, long maxLen)
             if (headerStripped && expectedBodyLen >= 0 && totalRead >= expectedBodyLen) {
                 break;
             }
+            if (err == connectionClosing || err == connectionTerminated) {
+                break;
+            }
         } else {
             break;
         }
     }
 
-    outBody[totalRead] = '\0';
-    bodyLen = totalRead;
+    if (headerStripped) {
+        outBody[totalRead] = '\0';
+        bodyLen = totalRead;
+    } else {
+        outBody[0] = '\0';
+        bodyLen = -1;
+    }
 
 close_conn:
-    /* Immediate TCPAbort returns gHttpStream to closed state ready for next request without TCPRelease */
+    /* Immediate TCPAbort + TCPRelease avoids waiting several seconds on FIN timeout */
     memset(&pb, 0, sizeof(pb));
     pb.csCode    = TCPAbort;
-    pb.tcpStream = gHttpStream;
+    pb.tcpStream = stream;
+    RunTCPControl(&pb, true);
+
+cleanup:
+    memset(&pb, 0, sizeof(pb));
+    pb.csCode    = TCPRelease;
+    pb.tcpStream = stream;
     RunTCPControl(&pb, true);
 
     return bodyLen;

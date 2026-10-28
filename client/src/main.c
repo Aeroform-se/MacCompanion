@@ -4046,18 +4046,44 @@ static void ConnectAndLoadAll(void)
 
 static Boolean VerifyServerReachable(void)
 {
-    long n;
+    short attempt;
     if (!NetHasServer() || !gHttpBuf) return false;
-    n = NetHttpGet("/api/ping", gHttpBuf, HTTP_BUF_SIZE);
-    return (n > 0 && strncmp(gHttpBuf, "MACCOMPANION_SERVER|", 20) == 0);
+    for (attempt = 0; attempt < 3; attempt++) {
+        long n = NetHttpGet("/api/ping", gHttpBuf, HTTP_BUF_SIZE);
+        if (n > 0 && strncmp(gHttpBuf, "MACCOMPANION_SERVER|", 20) == 0) {
+            return true;
+        }
+        if (attempt < 2) {
+            unsigned long waitStart = TickCount();
+            while ((TickCount() - waitStart) < 6) {
+                SystemTask();
+            }
+        }
+    }
+    return false;
 }
 
 static Boolean VerifySpotifyLoggedIn(void)
 {
-    long n;
+    short attempt;
     if (!NetHasServer() || !gHttpBuf) return false;
-    n = NetHttpGet("/api/spotify/ping", gHttpBuf, HTTP_BUF_SIZE);
-    return (n > 0 && strncmp(gHttpBuf, "SPOTIFY|1|", 10) == 0);
+    for (attempt = 0; attempt < 3; attempt++) {
+        long n = NetHttpGet("/api/spotify/ping", gHttpBuf, HTTP_BUF_SIZE);
+        if (n > 0 && strncmp(gHttpBuf, "SPOTIFY|1|", 10) == 0) {
+            return true;
+        }
+        /* If server explicitly responded that Spotify is not logged in, no need to retry */
+        if (n > 0 && strncmp(gHttpBuf, "SPOTIFY|0|", 10) == 0) {
+            return false;
+        }
+        if (attempt < 2) {
+            unsigned long waitStart = TickCount();
+            while ((TickCount() - waitStart) < 6) {
+                SystemTask();
+            }
+        }
+    }
+    return false;
 }
 
 static void TransitionToServerFound(void)
@@ -4080,6 +4106,9 @@ static void RunInitialDiscovery(void)
     RenderCanvas();
 
     if (NetDiscoverServer()) {
+        FormatIPAddress(NetGetServerIP(), gIpInput);
+        TransitionToServerFound();
+    } else if (NetHasServer() && VerifyServerReachable()) {
         FormatIPAddress(NetGetServerIP(), gIpInput);
         TransitionToServerFound();
     } else {
