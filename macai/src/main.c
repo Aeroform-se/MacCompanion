@@ -183,6 +183,8 @@ static short          gMsgMaxScrollY    = 0;
 static Boolean        gWaitingForAI     = false;
 static short          gCopiedMsgIdx     = -1;
 static unsigned long  gCopiedTick       = 0;
+static short          gSaveSuccessMsgIdx = -1;
+static unsigned long  gSaveSuccessTick   = 0;
 
 /* Bottom Prompt Input State (Multi-line auto-expanding up to 5 lines) */
 static char           gPromptBuf[1024]    = "";
@@ -225,6 +227,7 @@ static short          gEditSelAnchor      = 0;
 static short          gEditLineStarts[MAX_WRAPPED_LINES];
 
 /* Forward Declarations */
+static void SafeCopyString(char *dest, const char *src, short destSize);
 static void RenderWindow(void);
 static void RenderChatAreaOnly(void);
 static void RenderPromptBarOnly(void);
@@ -246,7 +249,14 @@ static void SubmitEditedMessage(short editIdx);
 typedef struct {
     unsigned long magic;
     ip_addr       serverIp;
-} HeaderPrefs;
+    char          activeProvider[12];
+    short         activeThinkingIdx;
+    short         activeModelIdx[3];
+    char          reserved[36];
+} MacAIPrefs;
+
+static Boolean gUserHasSavedPrefs = false;
+static ip_addr gLastSavedServerIP = 0;
 
 static Boolean GetPrefsFileSpec(FSSpec *outSpec, Boolean spotiMacFallback)
 {
@@ -270,17 +280,31 @@ static Boolean GetPrefsFileSpec(FSSpec *outSpec, Boolean spotiMacFallback)
     return (err == noErr || err == fnfErr);
 }
 
-static void SaveLastServerIP(ip_addr ip)
+static void SaveMacAIPrefs(void)
 {
     short refNum = 0;
-    long count = sizeof(HeaderPrefs);
+    long count = sizeof(MacAIPrefs);
     FSSpec spec;
-    HeaderPrefs prefs;
+    MacAIPrefs prefs;
+    ip_addr ip = NetGetServerIP();
+    short k;
     OSErr err;
 
+    if (ip != 0) {
+        gLastSavedServerIP = ip;
+    } else {
+        ip = gLastSavedServerIP;
+    }
     if (ip == 0) return;
-    prefs.magic    = MACAI_PREFS_MAGIC;
+
+    memset(&prefs, 0, sizeof(prefs));
+    prefs.magic = MACAI_PREFS_MAGIC;
     prefs.serverIp = ip;
+    SafeCopyString(prefs.activeProvider, gActiveProvider, sizeof(prefs.activeProvider));
+    prefs.activeThinkingIdx = gActiveThinkingIdx;
+    for (k = 0; k < 3; k++) {
+        prefs.activeModelIdx[k] = gProviders[k].activeModelIdx;
+    }
 
     if (GetPrefsFileSpec(&spec, false)) {
         FSpCreate(&spec, 'MCAI', 'pref', smSystemScript);
@@ -289,21 +313,28 @@ static void SaveLastServerIP(ip_addr ip)
             SetEOF(refNum, 0);
             FSWrite(refNum, &count, &prefs);
             FSClose(refNum);
+            gUserHasSavedPrefs = true;
         }
     }
 }
 
-static Boolean LoadLastServerIP(ip_addr *outIP)
+static void SaveLastServerIP(ip_addr ip)
+{
+    if (ip != 0) gLastSavedServerIP = ip;
+    SaveMacAIPrefs();
+}
+
+static Boolean LoadMacAIPrefs(ip_addr *outIP)
 {
     short refNum = 0;
     long count;
     FSSpec spec;
-    HeaderPrefs prefs;
+    MacAIPrefs prefs;
     short attempt;
+    short k;
     OSErr err;
 
-    if (!outIP) return false;
-    *outIP = 0;
+    if (outIP) *outIP = 0;
 
     /* Remove any legacy "MacAI Prefs" file sitting in the application folder from v0.1.0 */
     FSDelete("\pMacAI Prefs", 0);
@@ -312,21 +343,45 @@ static Boolean LoadLastServerIP(ip_addr *outIP)
         if (GetPrefsFileSpec(&spec, attempt == 1)) {
             err = FSpOpenDF(&spec, fsRdPerm, &refNum);
             if (err == noErr) {
-                count = sizeof(HeaderPrefs);
+                count = sizeof(MacAIPrefs);
                 memset(&prefs, 0, sizeof(prefs));
                 err = FSRead(refNum, &count, &prefs);
                 FSClose(refNum);
                 if ((err == noErr || err == eofErr) &&
-                    count >= (long)sizeof(HeaderPrefs) &&
+                    count >= 8 &&
                     (prefs.magic == MACAI_PREFS_MAGIC || prefs.magic == SPOTIMAC_PREFS_MAGIC) &&
                     prefs.serverIp != 0) {
-                    *outIP = prefs.serverIp;
+                    if (outIP) *outIP = prefs.serverIp;
+                    gLastSavedServerIP = prefs.serverIp;
+
+                    if (count >= 28 && prefs.activeProvider[0] != '\0') {
+                        if (strcmp(prefs.activeProvider, "gemini") == 0 ||
+                            strcmp(prefs.activeProvider, "chatgpt") == 0 ||
+                            strcmp(prefs.activeProvider, "claude") == 0) {
+                            SafeCopyString(gActiveProvider, prefs.activeProvider, sizeof(gActiveProvider));
+                        }
+                        if (prefs.activeThinkingIdx >= 0 && prefs.activeThinkingIdx < 3) {
+                            gActiveThinkingIdx = prefs.activeThinkingIdx;
+                            SafeCopyString(gActiveTier, gThinkingLevels[gActiveThinkingIdx], sizeof(gActiveTier));
+                        }
+                        for (k = 0; k < 3; k++) {
+                            if (prefs.activeModelIdx[k] >= 0 && prefs.activeModelIdx[k] <= 4) {
+                                gProviders[k].activeModelIdx = prefs.activeModelIdx[k];
+                            }
+                        }
+                        gUserHasSavedPrefs = true;
+                    }
                     return true;
                 }
             }
         }
     }
     return false;
+}
+
+static Boolean LoadLastServerIP(ip_addr *outIP)
+{
+    return LoadMacAIPrefs(outIP);
 }
 
 /* ============================================================================
@@ -1288,7 +1343,10 @@ static void DrawChatArea(void)
         totalContentH += stepH;
     }
     if (gWaitingForAI) {
-        totalContentH += 34;
+        short nWaitLines = WrapMessageLines(gWaitStatusText, aiMaxW - 24, NULL, 8);
+        short waitH = nWaitLines * 12 + 14;
+        if (waitH < 24) waitH = 24;
+        totalContentH += waitH + 10;
     }
 
     {
@@ -1304,14 +1362,9 @@ static void DrawChatArea(void)
 
     if (gMessageCount == 0 && !gWaitingForAI) {
         /* Friendly empty chat state */
-        const char *welcome = "Ready to chat with ";
-        char welcomeFull[64];
+        const char *welcome = "Let's dive in!";
         Rect badgeR;
-        short tw;
-        sprintf(welcomeFull, "%s%s (%s)", welcome,
-                GetProviderDisplayName(gActiveProvider),
-                GetTierDisplayName(gActiveTier));
-        tw = MeasureCString(welcomeFull);
+        short tw = MeasureCString(welcome);
         SetRect(&badgeR,
                 chatLeft + (chatWidth - tw) / 2 - 10,
                 (msgAreaBot / 2) - 12,
@@ -1321,7 +1374,7 @@ static void DrawChatArea(void)
         MoveTo(badgeR.left + 6, badgeR.bottom);
         LineTo(badgeR.right - 6, badgeR.bottom);
         MoveTo(badgeR.left + 10, badgeR.top + 14);
-        DrawCString(welcomeFull);
+        DrawCString(welcome);
     }
 
     curY = msgAreaTop - gMsgScrollY;
@@ -1487,11 +1540,15 @@ static void DrawChatArea(void)
                         MoveTo(copyBtnR.left + 8, copyBtnR.top + 11);
                         DrawCString((gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 120) ? "Copied" : "Copy");
 
-                        SetRect(&saveBtnR, imgX + 60, btnY, imgX + 172, btnY + 16);
+                        SetRect(&saveBtnR, imgX + 60, btnY, imgX + 192, btnY + 16);
                         EraseRoundRect(&saveBtnR, 6, 6);
                         FrameRoundRect(&saveBtnR, 6, 6);
                         MoveTo(saveBtnR.left + 8, saveBtnR.top + 11);
-                        DrawCString("Save PICT...");
+                        if (gSaveSuccessMsgIdx == i && (TickCount() - gSaveSuccessTick) < 120) {
+                            DrawCString("Save succesful");
+                        } else {
+                            DrawCString("Download full size");
+                        }
                     }
 
                     /* Retry and Copy action icons on hover with pill background (retry-bg-example.png) */
@@ -1511,21 +1568,36 @@ static void DrawChatArea(void)
     }
 
     if (gWaitingForAI) {
+        char waitLines[8][96];
+        short nWaitLines = WrapMessageLines(gWaitStatusText, aiMaxW - 24, waitLines, 8);
+        short widestWaitLine = 0;
+        short waitL;
+        short waitW, waitH;
         Rect waitR;
-        short textW = MeasureCString(gWaitStatusText);
-        short waitW = textW + 24;
-        short maxW  = aiMaxW;
+
+        for (waitL = 0; waitL < nWaitLines; waitL++) {
+            short w = MeasureCString(waitLines[waitL]);
+            if (w > widestWaitLine) widestWaitLine = w;
+        }
+
+        waitW = widestWaitLine + 24;
         if (waitW < 96) waitW = 96;
-        if (waitW > maxW) waitW = maxW;
-        SetRect(&waitR, aiLeftX, curY, aiLeftX + waitW, curY + 24);
+        if (waitW > aiMaxW) waitW = aiMaxW;
+
+        waitH = nWaitLines * 12 + 14;
+        if (waitH < 24) waitH = 24;
+
+        SetRect(&waitR, aiLeftX, curY, aiLeftX + waitW, curY + waitH);
         {
             Rect shadowR = waitR;
             OffsetRect(&shadowR, 0, 1);
             FillRoundRect(&shadowR, 14, 14, &qd.black);
             EraseRoundRect(&waitR, 14, 14);
         }
-        MoveTo(waitR.left + 12, waitR.top + 15);
-        DrawCString(gWaitStatusText);
+        for (waitL = 0; waitL < nWaitLines; waitL++) {
+            MoveTo(waitR.left + 12, curY + 14 + waitL * 12);
+            DrawCString(waitLines[waitL]);
+        }
     }
 
     /* Restore full window clip */
@@ -2031,7 +2103,7 @@ static void SaveImagePictToFile(short msgIdx)
     msg = &gMessages[msgIdx];
     if (msg->imageId[0] == '\0') return;
 
-    StandardPutFile("\pSave 24-bit PICT as:", "\pMacAI Image.pict", &sfReply);
+    StandardPutFile("\pSave image as:", "\pMacAI Image.pict", &sfReply);
     if (!sfReply.sfGood) return;
 
     if (sfReply.sfReplacing) {
@@ -2059,6 +2131,10 @@ static void SaveImagePictToFile(short msgIdx)
     FSClose(refNum);
     InitCursor();
     SysBeep(1);
+
+    gSaveSuccessMsgIdx = msgIdx;
+    gSaveSuccessTick   = TickCount();
+    RenderWindow();
 }
 
 static void RetryAIResponseAtIndex(short aiMsgIdx)
@@ -2081,9 +2157,10 @@ static void RetryAIResponseAtIndex(short aiMsgIdx)
     userPrompt[MAX_MSG_TEXT - 1] = '\0';
 
     /* Remove the AI response being retried (and any messages after it) */
-    gMessageCount = aiMsgIdx;
-    gCopiedMsgIdx = -1;
-    gMsgScrollY   = 30000;
+    gMessageCount      = aiMsgIdx;
+    gCopiedMsgIdx      = -1;
+    gSaveSuccessMsgIdx = -1;
+    gMsgScrollY        = 30000;
 
     SendPromptToAI(userPrompt, true);
 }
@@ -2264,8 +2341,10 @@ static void FetchProvidersAndChats(void)
                     p3 = strchr(p2, '|');
                     if (p3) {
                         *p3++ = '\0';
-                        SafeCopyString(gActiveProvider, p1, sizeof(gActiveProvider));
-                        NormalizeTierName(p3, gActiveTier, sizeof(gActiveTier));
+                        if (!gUserHasSavedPrefs) {
+                            SafeCopyString(gActiveProvider, p1, sizeof(gActiveProvider));
+                            NormalizeTierName(p3, gActiveTier, sizeof(gActiveTier));
+                        }
                     }
                 }
             } else if (strncmp(row, "PROVIDER|", 9) == 0) {
@@ -2419,6 +2498,7 @@ static void SelectProvider(const char *provider)
         gActiveProvider[sizeof(gActiveProvider) - 1] = '\0';
     }
     SyncAIMenuState();
+    SaveMacAIPrefs();
     RenderWindow();
 }
 
@@ -2432,6 +2512,7 @@ static void SelectModel(short mIdx)
     if (mIdx >= 0 && mIdx <= 4) {
         gProviders[pIdx].activeModelIdx = mIdx;
         SyncAIMenuState();
+        SaveMacAIPrefs();
         RenderWindow();
     }
 }
@@ -2442,6 +2523,7 @@ static void SelectThinkingLevel(short tIdx)
         gActiveThinkingIdx = tIdx;
         strncpy(gActiveTier, gThinkingLevels[tIdx], sizeof(gActiveTier) - 1);
         SyncAIMenuState();
+        SaveMacAIPrefs();
         RenderWindow();
     }
 }
@@ -2524,6 +2606,7 @@ static void StartNewChat(void)
     ClearAllMessages();
     gMsgMaxScrollY      = 0;
     gCopiedMsgIdx       = -1;
+    gSaveSuccessMsgIdx  = -1;
     gPromptBuf[0]       = '\0';
     gCursorPos          = 0;
     gPromptSelAnchor    = 0;
@@ -2555,7 +2638,8 @@ static void LoadChatById(const char *chatId)
         }
     }
     ClearAllMessages();
-    gCopiedMsgIdx = -1;
+    gCopiedMsgIdx      = -1;
+    gSaveSuccessMsgIdx = -1;
 
     line = gNetBuf;
     while (line && *line && gMessageCount < MAX_MESSAGES) {
@@ -2575,11 +2659,13 @@ static void LoadChatById(const char *chatId)
                     char *p4 = strchr(p3 + 1, '|');
                     if (p4) {
                         *p4 = '\0';
-                        if (IsProviderEnabled(p3 + 1)) {
+                        if (!gUserHasSavedPrefs && IsProviderEnabled(p3 + 1)) {
                             strncpy(gActiveProvider, p3 + 1, sizeof(gActiveProvider) - 1);
                         }
-                        NormalizeTierName(p4 + 1, gActiveTier, sizeof(gActiveTier));
-                        SyncAIMenuState();
+                        if (!gUserHasSavedPrefs) {
+                            NormalizeTierName(p4 + 1, gActiveTier, sizeof(gActiveTier));
+                            SyncAIMenuState();
+                        }
                     }
                 }
             }
@@ -3281,7 +3367,7 @@ static void HandleContentClick(Point localPt)
                         short btnY = imgY + gMessages[i].imageH + 6;
                         Rect copyImgBtnR, saveImgBtnR;
                         SetRect(&copyImgBtnR, imgX, btnY, imgX + 54, btnY + 16);
-                        SetRect(&saveImgBtnR, imgX + 60, btnY, imgX + 172, btnY + 16);
+                        SetRect(&saveImgBtnR, imgX + 60, btnY, imgX + 192, btnY + 16);
 
                         if (PtInRect(localPt, &copyImgBtnR)) {
                             CopyImageToClipboard(i);
@@ -4082,6 +4168,9 @@ int main(void)
     gNetBuf = NewPtrClear(NET_BUF_SIZE);
     NetSetIdleCallback(NetworkIdleProc);
 
+    /* Load saved preferences (IP, provider, model, thinking level) */
+    LoadMacAIPrefs(NULL);
+
     /* Set up Menus */
     menuBar = GetNewMBar(128);
     if (menuBar) {
@@ -4128,6 +4217,12 @@ int main(void)
         }
         if (gCopiedMsgIdx >= 0 && (TickCount() - gCopiedTick) >= 120) {
             gCopiedMsgIdx = -1;
+            if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
+                RenderChatAreaOnly();
+            }
+        }
+        if (gSaveSuccessMsgIdx >= 0 && (TickCount() - gSaveSuccessTick) >= 120) {
+            gSaveSuccessMsgIdx = -1;
             if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
                 RenderChatAreaOnly();
             }
