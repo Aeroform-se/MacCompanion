@@ -326,9 +326,9 @@ class RealTimePacer extends Transform {
       const durationMs = (slice.length / LIBRESPOT_BYTES_PER_SEC) * 1000;
       const now = performance.now();
 
-      // If starting fresh or resuming after a pause (> 200ms gap), allow a 300ms pre-fill burst
+      // If starting fresh or resuming after a pause (> 500ms gap), allow a 300ms pre-fill burst
       // so the 68k client's double-buffer fills immediately without initial underrun jitter
-      if (now - this.nextFrameTimeMs > 200) {
+      if (now - this.nextFrameTimeMs > 500) {
         this.nextFrameTimeMs = now - 300;
       }
 
