@@ -19,6 +19,16 @@ Spotify for your 68k Mac. Supports local playback and multitasking so you can ge
 
 ---
 
+### MacAI
+AI for your vintage 68k Mac. Converse with Gemini, ChatGPT and Claude right from System 7, featuring image generation and voice for that cutting edge computing experience.
+
+**Requirements:**
+- **Account:** Free or paid API key for Google Gemini, OpenAI, or Anthropic Claude.
+- **Minimum:** Macintosh Plus or SE / Classic, System 6.0.8+
+- **Recommended:** Macintosh SE/30, Classic II, LC, Mac II, or Quadra running System 7.1–7.5.5.
+
+---
+
 ## Quick Start
 
 1. **Start the MacCompanion server:**
