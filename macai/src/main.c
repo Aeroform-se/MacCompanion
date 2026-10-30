@@ -16,6 +16,7 @@
 #include <Sound.h>
 #include <StandardFile.h>
 #include <OSUtils.h>
+#include <LowMem.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,6 +71,9 @@
 #define iSpeechVoiceShimmer 8
 #define iSpeechVoiceRetro   9
 
+#define mView               132
+#define iScifiMode          1
+
 #define MAX_CHATS           30
 #define MAX_MESSAGES        40
 #define MAX_MSG_TEXT        1024
@@ -81,6 +85,7 @@ typedef struct {
     char provider[12];
     char tier[12];
     char age[12];
+    Boolean isScifi;
 } ChatSummary;
 
 typedef struct {
@@ -208,6 +213,18 @@ static unsigned long  gCopiedTick       = 0;
 static short          gSaveSuccessMsgIdx = -1;
 static unsigned long  gSaveSuccessTick   = 0;
 
+typedef enum {
+    kActionIconNone = 0,
+    kActionIconRetry,
+    kActionIconCopy,
+    kActionIconDownload,
+    kActionIconEdit
+} ActionIconType;
+
+static ActionIconType gHoverActionIcon   = kActionIconNone;
+static Rect           gHoverActionRect;
+static unsigned long  gLastWaitAnimTick  = 0;
+
 /* Bottom Prompt Input State (Multi-line auto-expanding up to 5 lines) */
 static char           gPromptBuf[1024]    = "";
 static Boolean        gPromptFocused      = false;
@@ -248,6 +265,34 @@ static short          gEditCursorPos      = 0;
 static short          gEditSelAnchor      = 0;
 static short          gEditLineStarts[MAX_WRAPPED_LINES];
 
+/* Sci-Fi Mode State */
+#define SCIFI_MAX_LINES       128
+#define SCIFI_LINE_MAX_LEN    256
+#define SCIFI_QUEUE_MAX       4096
+
+static Boolean        gActiveChatIsScifi  = false;
+static Boolean        gScifiMode          = false;
+static WindowPtr      gScifiWindow        = NULL;
+static unsigned long  gScifiLaunchTick    = 0;
+static Boolean        gScifiAwaitingReply = false;
+static short          gSavedMBarHeight    = 20;
+
+static char           gScifiLines[SCIFI_MAX_LINES][SCIFI_LINE_MAX_LEN];
+static short          gScifiLineCount     = 0;
+static short          gScifiScroll        = 0;
+static char           gScifiInputBuf[256] = "";
+static short          gScifiInputLen      = 0;
+
+static char           gScifiTypewriterQueue[SCIFI_QUEUE_MAX];
+static short          gScifiTypewriterLen = 0;
+static short          gScifiTypewriterPos = 0;
+static unsigned long  gScifiLastTypeTick  = 0;
+static long           gScifiTypeAccum     = 0;
+
+static Boolean        gScifiCursorVisible = true;
+static unsigned long  gScifiLastBlinkTick = 0;
+static Rect           gScifiCursorRect;
+
 /* Forward Declarations */
 static void SafeCopyString(char *dest, const char *src, short destSize);
 static void RenderWindow(void);
@@ -257,6 +302,11 @@ static void SyncAIMenuState(void);
 static void SyncSpeechMenuState(void);
 static Boolean ActiveModelSupportsThinking(void);
 static void SelectVoice(short vIdx);
+static void EnterScifiMode(void);
+static void ExitScifiMode(void);
+static void ScifiIdle(void);
+static void HandleScifiKeyPress(char key, short keyCode, short modifiers);
+static void RenderScifiWindow(void);
 static Boolean IsProviderEnabled(const char *id);
 static void FetchProvidersAndChats(void);
 static void LoadChatById(const char *chatId);
@@ -462,6 +512,15 @@ static void EnsureOffscreenBuffer(short w, short h)
     }
 }
 
+static const BitMap *GetWindowPortBitMap(WindowPtr win)
+{
+    if (!win) return &qd.screenBits;
+    if (((CGrafPtr)win)->portVersion & 0xC000) {
+        return (const BitMap *)*(((CGrafPtr)win)->portPixMap);
+    }
+    return &win->portBits;
+}
+
 /* ============================================================================
  * QuickDraw Drawing Helpers
  * ============================================================================ */
@@ -527,6 +586,7 @@ static void CopyTextToClipboard(const char *text)
     if (len > 0) {
         PutScrap(len, 'TEXT', (Ptr)text);
     }
+    UnloadScrap();
 }
 
 static void BlitBitmap(const unsigned char *bits, short rowBytes,
@@ -623,7 +683,7 @@ static short WrapMessageLinesEx(const char *text, short maxWidthPx,
 
         if (lineStarts) lineStarts[lineCount] = (short)(p - text);
 
-        while (*scan && *scan != '\n' && curLen < 90) {
+        while (*scan && *scan != '\n' && *scan != '\r' && curLen < 90) {
             if (*scan == ' ') {
                 lastSpaceInLine = curLen;
                 lastSpacePtr = scan;
@@ -655,8 +715,9 @@ static short WrapMessageLinesEx(const char *text, short maxWidthPx,
             lines[lineCount][curLen] = '\0';
         }
         lineCount++;
-        if (*scan == '\n') {
+        if (*scan == '\n' || *scan == '\r') {
             p = scan + 1;
+            if (*scan == '\r' && *p == '\n') p++;
             if (*p == '\0' && lineCount < maxLines) {
                 if (lineStarts) lineStarts[lineCount] = (short)(p - text);
                 if (lines) lines[lineCount][0] = '\0';
@@ -695,8 +756,12 @@ static void EnsureMessageMetrics(ChatMessage *msg, short maxW)
 
     if (msg->imageH > 0) {
         if (msg->imageW > widestPx) widestPx = msg->imageW;
-        if (widestPx < 180) widestPx = 180;
-        msg->cachedBubbleH = (nLines > 0 ? (nLines * 12 + 10) : 6) + msg->imageH + 6 + 18 + 8;
+        if (widestPx < 140) widestPx = 140;
+        if (nLines > 0) {
+            msg->cachedBubbleH = nLines * 12 + 10 + msg->imageH + 20;
+        } else {
+            msg->cachedBubbleH = msg->imageH + 20;
+        }
     } else {
         msg->cachedBubbleH = nLines * 12 + 12;
     }
@@ -852,7 +917,13 @@ static short WrapPromptInputLines(char outLines[][96], short maxLines, short *ou
         return 1;
     }
     if (gShowPlaceholder && !gPromptFocused && gPromptBuf[0] == '\0') {
-        if (outLines) strcpy(outLines[0], "Ask MacAI");
+        if (outLines) {
+            if (gActiveChatIsScifi) {
+                strcpy(outLines[0], "Ask Mainframe (Sci-Fi)");
+            } else {
+                strcpy(outLines[0], "Ask MacAI");
+            }
+        }
         if (outVisLines) *outVisLines = 1;
         gPromptLineStarts[0] = 0;
         return 1;
@@ -1330,6 +1401,42 @@ static void DrawCollapsedSidebarControls(void)
     BlitBitmap(kIconNewChat12x12, 2, 12, 12, 12, 37, srcOr);
 }
 
+static void DrawActionTooltipPill(void)
+{
+    const char *tipText = NULL;
+    short textW, tipW, tipH, iconCenter, tipLeft, tipTop;
+    Rect tipR;
+
+    if (gHoverBubbleIdx < 0 || gHoverActionIcon == kActionIconNone) return;
+
+    if (gHoverActionIcon == kActionIconRetry) {
+        tipText = "Retry";
+    } else if (gHoverActionIcon == kActionIconCopy) {
+        tipText = (gCopiedMsgIdx == gHoverBubbleIdx && (TickCount() - gCopiedTick) < 120) ? "Copied" : "Copy";
+    } else if (gHoverActionIcon == kActionIconDownload) {
+        tipText = (gSaveSuccessMsgIdx == gHoverBubbleIdx && (TickCount() - gSaveSuccessTick) < 120) ? "Saved" : "Download";
+    } else if (gHoverActionIcon == kActionIconEdit) {
+        tipText = "Edit";
+    }
+    if (!tipText) return;
+
+    textW = MeasureCString(tipText);
+    tipW  = textW + 16;
+    tipH  = 14;
+    iconCenter = gHoverActionRect.left + (gHoverActionRect.right - gHoverActionRect.left) / 2;
+    tipLeft = iconCenter - tipW / 2;
+    if (tipLeft < 2) tipLeft = 2;
+    if (tipLeft + tipW > gWinW - 2) tipLeft = gWinW - 2 - tipW;
+    tipTop  = gHoverActionRect.bottom + 2;
+    SetRect(&tipR, tipLeft, tipTop, tipLeft + tipW, tipTop + tipH);
+
+    FillRoundRect(&tipR, 8, 8, &qd.black);
+    TextMode(srcBic);
+    MoveTo(tipR.left + 8, tipR.top + 10);
+    DrawCString(tipText);
+    TextMode(srcOr);
+}
+
 static void DrawChatArea(void)
 {
     static char wrapped[MAX_WRAPPED_LINES][96];
@@ -1403,7 +1510,7 @@ static void DrawChatArea(void)
 
     if (gMessageCount == 0 && !gWaitingForAI) {
         /* Friendly empty chat state */
-        const char *welcome = "Let's dive in!";
+        const char *welcome = gActiveChatIsScifi ? "Mainframe Online (Press Cmd+F)" : "Let's dive in!";
         Rect badgeR;
         short tw = MeasureCString(welcome);
         SetRect(&badgeR,
@@ -1565,7 +1672,7 @@ static void DrawChatArea(void)
                         short imgX = bubbleR.left + 12;
                         short imgY = curY + (nLines > 0 ? (14 + nLines * 12 + 4) : 10);
                         BitMap bm;
-                        Rect srcR, dstR, copyBtnR, saveBtnR;
+                        Rect srcR, dstR;
                         SetRect(&srcR, 0, 0, gMessages[i].imageW, gMessages[i].imageH);
                         SetRect(&dstR, imgX, imgY, imgX + gMessages[i].imageW, imgY + gMessages[i].imageH);
                         bm.baseAddr = *(gMessages[i].imageHandle);
@@ -1573,34 +1680,27 @@ static void DrawChatArea(void)
                         bm.bounds   = srcR;
                         CopyBits(&bm, &qd.thePort->portBits, &srcR, &dstR, srcCopy, NULL);
                         FrameRect(&dstR);
-
-                        short btnY = imgY + gMessages[i].imageH + 6;
-                        SetRect(&copyBtnR, imgX, btnY, imgX + 54, btnY + 16);
-                        EraseRoundRect(&copyBtnR, 6, 6);
-                        FrameRoundRect(&copyBtnR, 6, 6);
-                        MoveTo(copyBtnR.left + 8, copyBtnR.top + 11);
-                        DrawCString((gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 120) ? "Copied" : "Copy");
-
-                        SetRect(&saveBtnR, imgX + 60, btnY, imgX + 192, btnY + 16);
-                        EraseRoundRect(&saveBtnR, 6, 6);
-                        FrameRoundRect(&saveBtnR, 6, 6);
-                        MoveTo(saveBtnR.left + 8, saveBtnR.top + 11);
-                        if (gSaveSuccessMsgIdx == i && (TickCount() - gSaveSuccessTick) < 120) {
-                            DrawCString("Save succesful");
-                        } else {
-                            DrawCString("Download full size");
-                        }
                     }
 
-                    /* Retry and Copy action icons on hover with pill background (retry-bg-example.png) */
+                    /* Action icons on hover with pill background */
                     if (gHoverBubbleIdx == i) {
                         Rect actPill;
                         const unsigned char *cIcon = (gCopiedMsgIdx == i && (TickCount() - gCopiedTick) < 120)
                             ? kIconCopyOk12x12 : kIconCopy12x12;
-                        SetRect(&actPill, aiLeftX + 3, actionY - 1, aiLeftX + 37, actionY + 13);
-                        EraseRoundRect(&actPill, 8, 8);
-                        BlitBitmap(kIconRetry12x12, 2, 12, 12, aiLeftX + 6,  actionY, srcOr);
-                        BlitBitmap(cIcon,          2, 12, 12, aiLeftX + 22, actionY, srcOr);
+                        if (gMessages[i].imageHandle && *(gMessages[i].imageHandle) && gMessages[i].imageH > 0) {
+                            /* 3 action icons for image bubbles: Retry, Copy, Download (image-bubble.png) */
+                            SetRect(&actPill, aiLeftX + 3, actionY - 1, aiLeftX + 53, actionY + 13);
+                            EraseRoundRect(&actPill, 8, 8);
+                            BlitBitmap(kIconRetry12x12,    2, 12, 12, aiLeftX + 6,  actionY, srcOr);
+                            BlitBitmap(cIcon,              2, 12, 12, aiLeftX + 22, actionY, srcOr);
+                            BlitBitmap(kIconDownload12x12, 2, 12, 12, aiLeftX + 38, actionY, srcOr);
+                        } else {
+                            /* 2 action icons for text bubbles: Retry, Copy */
+                            SetRect(&actPill, aiLeftX + 3, actionY - 1, aiLeftX + 37, actionY + 13);
+                            EraseRoundRect(&actPill, 8, 8);
+                            BlitBitmap(kIconRetry12x12, 2, 12, 12, aiLeftX + 6,  actionY, srcOr);
+                            BlitBitmap(cIcon,          2, 12, 12, aiLeftX + 22, actionY, srcOr);
+                        }
                     }
                 }
             }
@@ -1636,8 +1736,29 @@ static void DrawChatArea(void)
             EraseRoundRect(&waitR, 14, 14);
         }
         for (waitL = 0; waitL < nWaitLines; waitL++) {
-            MoveTo(waitR.left + 12, curY + 14 + waitL * 12);
-            DrawCString(waitLines[waitL]);
+            char lineBuf[96];
+            short len;
+            SafeCopyString(lineBuf, waitLines[waitL], sizeof(lineBuf));
+            len = (short)strlen(lineBuf);
+            if (len >= 3 && lineBuf[len - 1] == '.' && lineBuf[len - 2] == '.' && lineBuf[len - 3] == '.') {
+                Point penPt;
+                short d;
+                static const short kDotWave[8] = { 0, -1, -2, -3, -2, -1, 0, 0 };
+                unsigned long phase = (TickCount() / 5) % 8;
+
+                lineBuf[len - 3] = '\0';
+                MoveTo(waitR.left + 12, curY + 14 + waitL * 12);
+                DrawCString(lineBuf);
+                GetPen(&penPt);
+                for (d = 0; d < 3; d++) {
+                    short dy = kDotWave[(phase + d * 2) % 8];
+                    MoveTo(penPt.h + d * 6, curY + 14 + waitL * 12 + dy);
+                    DrawChar('.');
+                }
+            } else {
+                MoveTo(waitR.left + 12, curY + 14 + waitL * 12);
+                DrawCString(waitLines[waitL]);
+            }
         }
     }
 
@@ -1681,6 +1802,31 @@ static void DrawChatArea(void)
     LineTo(gWinW - 3,  gWinH - 11);
     MoveTo(gWinW - 7,  gWinH - 3);
     LineTo(gWinW - 3,  gWinH - 7);
+
+    /* Description tooltip pill on hover with highest z-order (image-bubble.png) */
+    DrawActionTooltipPill();
+
+    /* Indicator badge with highest z-depth when active chat is a Sci-Fi mode session */
+    if (gActiveChatIsScifi) {
+        const char *tagStr = "[Sci-Fi Mode (Cmd+F)]";
+        short tw = MeasureCString(tagStr);
+        Rect tagR, frameR;
+        SetRect(&tagR, gWinW - tw - 24, 7, gWinW - 12, 23);
+
+        /* 1px white halo clearance so it stands out cleanly on top of any message bubbles or shadows */
+        frameR = tagR;
+        InsetRect(&frameR, -1, -1);
+        FillRoundRect(&frameR, 8, 8, &qd.white);
+        FillRoundRect(&tagR, 6, 6, &qd.black);
+
+        TextFont(kFontIDMonaco);
+        TextSize(9);
+        TextFace(normal);
+        TextMode(srcBic);
+        MoveTo(tagR.left + 6, tagR.top + 11);
+        DrawCString(tagStr);
+        TextMode(srcOr);
+    }
 }
 
 /* ============================================================================
@@ -1897,7 +2043,7 @@ static void RenderPromptBarOnly(void)
 
     if (gHasOffscreen) {
         SetPort(gMainWindow);
-        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &dirtyR, &dirtyR, srcCopy, NULL);
+        CopyBits(&gOffscreenPort.portBits, GetWindowPortBitMap(gMainWindow), &dirtyR, &dirtyR, srcCopy, NULL);
     }
 
     SetPort(savePort);
@@ -1907,7 +2053,7 @@ static void RenderChatAreaOnly(void)
 {
     GrafPtr savePort;
     Rect chatR;
-    short chatLeft = gSidebarCollapsed ? 0 : (SIDEBAR_W + 1);
+    short chatLeft = (gHoverActionIcon != kActionIconNone || gSidebarCollapsed) ? 0 : (SIDEBAR_W + 1);
 
     if (!gMainWindow || !gServerConnected || gAwaitingLogin ||
         gSearchModalOpen || gAboutModalOpen || gProviderMenuOpen) {
@@ -1938,7 +2084,7 @@ static void RenderChatAreaOnly(void)
 
     if (gHasOffscreen) {
         SetPort(gMainWindow);
-        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &chatR, &chatR, srcCopy, NULL);
+        CopyBits(&gOffscreenPort.portBits, GetWindowPortBitMap(gMainWindow), &chatR, &chatR, srcCopy, NULL);
     }
 
     SetPort(savePort);
@@ -1991,7 +2137,7 @@ static void RenderWindow(void)
 
     if (gHasOffscreen) {
         SetPort(gMainWindow);
-        CopyBits(&gOffscreenPort.portBits, &gMainWindow->portBits, &winR, &winR, srcCopy, NULL);
+        CopyBits(&gOffscreenPort.portBits, GetWindowPortBitMap(gMainWindow), &winR, &winR, srcCopy, NULL);
     }
 
     SetPort(savePort);
@@ -2148,6 +2294,17 @@ static void SyncAIMenuState(void)
     }
 
     SyncSpeechMenuState();
+
+    {
+        MenuHandle viewMenu = GetMenuHandle(mView);
+        if (viewMenu) {
+            if (gServerConnected && !gAwaitingLogin) {
+                EnableItem(viewMenu, iScifiMode);
+            } else {
+                DisableItem(viewMenu, iScifiMode);
+            }
+        }
+    }
 }
 
 static void CopyMessageToClipboard(short msgIdx)
@@ -2184,6 +2341,7 @@ static void CopyImageToClipboard(short msgIdx)
         PutScrap(GetHandleSize((Handle)myPic), 'PICT', *(Handle)myPic);
         HUnlock((Handle)myPic);
         KillPicture(myPic);
+        UnloadScrap();
 
         gCopiedMsgIdx = msgIdx;
         gCopiedTick   = TickCount();
@@ -2258,7 +2416,17 @@ static void RetryAIResponseAtIndex(short aiMsgIdx)
     userPrompt[MAX_MSG_TEXT - 1] = '\0';
 
     /* Remove the AI response being retried (and any messages after it) */
-    gMessageCount      = aiMsgIdx;
+    short cutIdx = aiMsgIdx;
+    if (aiMsgIdx > 0 && !gMessages[aiMsgIdx - 1].isUser && gMessages[aiMsgIdx].imageHandle) {
+        cutIdx = aiMsgIdx - 1;
+    }
+    for (i = cutIdx; i < gMessageCount; i++) {
+        if (gMessages[i].imageHandle) {
+            DisposeHandle(gMessages[i].imageHandle);
+            gMessages[i].imageHandle = NULL;
+        }
+    }
+    gMessageCount      = cutIdx;
     gCopiedMsgIdx      = -1;
     gSaveSuccessMsgIdx = -1;
     gMsgScrollY        = 30000;
@@ -2318,10 +2486,53 @@ static short HitTestMessageBubble(Point pt)
         }
 
         if (PtInRect(pt, &hitR)) {
+            gHoverActionIcon = kActionIconNone;
+            if (gMessages[i].isUser) {
+                short rightEdge = gWinW - 25;
+                short actionY = curY + bubbleH + 3;
+                Rect editHitR, copyHitR;
+                SetRect(&editHitR, rightEdge - 30, actionY - 2, rightEdge - 16, actionY + 14);
+                SetRect(&copyHitR, rightEdge - 16, actionY - 2, rightEdge + 2,  actionY + 14);
+                if (PtInRect(pt, &editHitR)) {
+                    gHoverActionIcon = kActionIconEdit;
+                    gHoverActionRect = editHitR;
+                } else if (PtInRect(pt, &copyHitR)) {
+                    gHoverActionIcon = kActionIconCopy;
+                    gHoverActionRect = copyHitR;
+                }
+            } else {
+                short actionY = curY + bubbleH + 4;
+                Rect retryHitR, copyHitR;
+                SetRect(&retryHitR, aiLeftX + 4,  actionY - 2, aiLeftX + 18, actionY + 14);
+                SetRect(&copyHitR,  aiLeftX + 20, actionY - 2, aiLeftX + 34, actionY + 14);
+                if (gMessages[i].imageHandle && *(gMessages[i].imageHandle) && gMessages[i].imageH > 0) {
+                    Rect dlHitR;
+                    SetRect(&dlHitR, aiLeftX + 36, actionY - 2, aiLeftX + 50, actionY + 14);
+                    if (PtInRect(pt, &retryHitR)) {
+                        gHoverActionIcon = kActionIconRetry;
+                        gHoverActionRect = retryHitR;
+                    } else if (PtInRect(pt, &copyHitR)) {
+                        gHoverActionIcon = kActionIconCopy;
+                        gHoverActionRect = copyHitR;
+                    } else if (PtInRect(pt, &dlHitR)) {
+                        gHoverActionIcon = kActionIconDownload;
+                        gHoverActionRect = dlHitR;
+                    }
+                } else {
+                    if (PtInRect(pt, &retryHitR)) {
+                        gHoverActionIcon = kActionIconRetry;
+                        gHoverActionRect = retryHitR;
+                    } else if (PtInRect(pt, &copyHitR)) {
+                        gHoverActionIcon = kActionIconCopy;
+                        gHoverActionRect = copyHitR;
+                    }
+                }
+            }
             return i;
         }
         curY += stepH;
     }
+    gHoverActionIcon = kActionIconNone;
     return -1;
 }
 
@@ -2379,7 +2590,19 @@ static void ParseChatsResponse(const char *buf, ChatSummary *outArr, short maxIt
                     if (p4) {
                         *p4++ = '\0';
                         p5 = strchr(p4, '|');
-                        if (p5) *p5++ = '\0';
+                        if (p5) {
+                            char *p6;
+                            *p5++ = '\0';
+                            p6 = strchr(p5, '|');
+                            if (p6) {
+                                *p6++ = '\0';
+                                outArr[count].isScifi = (atoi(p6) != 0);
+                            } else {
+                                outArr[count].isScifi = (strncmp(p2, "[Sci-Fi]", 8) == 0);
+                            }
+                        } else {
+                            outArr[count].isScifi = (strncmp(p2, "[Sci-Fi]", 8) == 0);
+                        }
 
                         SafeCopyString(outArr[count].id, p1, sizeof(outArr[count].id));
                         SafeCopyString(outArr[count].title, p2, sizeof(outArr[count].title));
@@ -2727,6 +2950,7 @@ static void StartNewChat(void)
 {
     gActiveChatId[0]    = '\0';
     gSelectedChatIdx    = -1;
+    gActiveChatIsScifi  = false;
     ClearAllMessages();
     gMsgMaxScrollY      = 0;
     gCopiedMsgIdx       = -1;
@@ -2755,9 +2979,11 @@ static void LoadChatById(const char *chatId)
 
     SafeCopyString(gActiveChatId, chatId, sizeof(gActiveChatId));
     gSelectedChatIdx = -1;
+    gActiveChatIsScifi = false;
     for (i = 0; i < gChatCount; i++) {
         if (strcmp(gChats[i].id, chatId) == 0) {
             gSelectedChatIdx = i;
+            gActiveChatIsScifi = gChats[i].isScifi || (strncmp(gChats[i].title, "[Sci-Fi]", 8) == 0);
             break;
         }
     }
@@ -2810,7 +3036,10 @@ static void LoadChatById(const char *chatId)
                         pRb = strchr(pH, '|');
                         if (pRb) {
                             *pRb++ = '\0';
-                            AppendMessageEx(false, pText, pImg, (short)atoi(pW), (short)atoi(pH), (short)atoi(pRb), NULL);
+                            if (pText && *pText) {
+                                AppendMessage(false, pText);
+                            }
+                            AppendMessageEx(false, "", pImg, (short)atoi(pW), (short)atoi(pH), (short)atoi(pRb), NULL);
                         } else {
                             AppendMessage(false, pText);
                         }
@@ -2938,7 +3167,10 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
                         HLock(imgH);
                         BlockMove(gNetBuf + 8, *imgH, imgBytes - 8);
                         HUnlock(imgH);
-                        AppendMessageEx(false, replyCopy, imgIdCopy, w, h, rb, imgH);
+                        if (replyCopy[0] != '\0') {
+                            AppendMessage(false, replyCopy);
+                        }
+                        AppendMessageEx(false, "", imgIdCopy, w, h, rb, imgH);
                     } else {
                         AppendMessage(false, replyCopy);
                     }
@@ -3264,6 +3496,18 @@ static void HandleContentClick(Point localPt)
     {
         Rect pillR, tierR, micR;
         short totalLines = 1, maxScrollLine = 0;
+
+        if (gActiveChatIsScifi) {
+            const char *tagStr = "[Sci-Fi Mode (Cmd+F)]";
+            short tw = MeasureCString(tagStr);
+            Rect tagR;
+            SetRect(&tagR, gWinW - tw - 24, 7, gWinW - 12, 21);
+            if (PtInRect(localPt, &tagR)) {
+                EnterScifiMode();
+                return;
+            }
+        }
+
         GetPromptBarGeometry(&pillR, &tierR, &micR);
         totalLines = WrapPromptInputLines(NULL, 32, NULL);
         maxScrollLine = totalLines - MAX_PROMPT_VIS_LINES;
@@ -3486,25 +3730,6 @@ static void HandleContentClick(Point localPt)
                     widestLine = gMessages[i].cachedWidestPx;
                     stepH = bubbleH + (gMessages[i].isUser ? 18 : 22);
 
-                    if (!gMessages[i].isUser && gMessages[i].imageHandle && *(gMessages[i].imageHandle) && gMessages[i].imageH > 0) {
-                        short nLines = gMessages[i].cachedLines;
-                        short imgX = aiLeftX + 12;
-                        short imgY = curY + (nLines > 0 ? (14 + nLines * 12 + 4) : 10);
-                        short btnY = imgY + gMessages[i].imageH + 6;
-                        Rect copyImgBtnR, saveImgBtnR;
-                        SetRect(&copyImgBtnR, imgX, btnY, imgX + 54, btnY + 16);
-                        SetRect(&saveImgBtnR, imgX + 60, btnY, imgX + 192, btnY + 16);
-
-                        if (PtInRect(localPt, &copyImgBtnR)) {
-                            CopyImageToClipboard(i);
-                            return;
-                        }
-                        if (PtInRect(localPt, &saveImgBtnR)) {
-                            SaveImagePictToFile(i);
-                            return;
-                        }
-                    }
-
                     if (gHoverBubbleIdx == i) {
                         if (gMessages[i].isUser) {
                             short rightEdge = gWinW - 25;
@@ -3533,15 +3758,32 @@ static void HandleContentClick(Point localPt)
                             short actionY = curY + bubbleH + 4;
                             Rect retryHitR, copyHitR;
                             SetRect(&retryHitR, aiLeftX + 4,  actionY - 2, aiLeftX + 18, actionY + 14);
-                            SetRect(&copyHitR,  aiLeftX + 20, actionY - 2, aiLeftX + 36, actionY + 14);
+                            SetRect(&copyHitR,  aiLeftX + 20, actionY - 2, aiLeftX + 34, actionY + 14);
 
-                            if (PtInRect(localPt, &retryHitR)) {
-                                RetryAIResponseAtIndex(i);
-                                return;
-                            }
-                            if (PtInRect(localPt, &copyHitR)) {
-                                CopyMessageToClipboard(i);
-                                return;
+                            if (gMessages[i].imageHandle && *(gMessages[i].imageHandle) && gMessages[i].imageH > 0) {
+                                Rect dlHitR;
+                                SetRect(&dlHitR, aiLeftX + 36, actionY - 2, aiLeftX + 50, actionY + 14);
+                                if (PtInRect(localPt, &retryHitR)) {
+                                    RetryAIResponseAtIndex(i);
+                                    return;
+                                }
+                                if (PtInRect(localPt, &copyHitR)) {
+                                    CopyImageToClipboard(i);
+                                    return;
+                                }
+                                if (PtInRect(localPt, &dlHitR)) {
+                                    SaveImagePictToFile(i);
+                                    return;
+                                }
+                            } else {
+                                if (PtInRect(localPt, &retryHitR)) {
+                                    RetryAIResponseAtIndex(i);
+                                    return;
+                                }
+                                if (PtInRect(localPt, &copyHitR)) {
+                                    CopyMessageToClipboard(i);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -3573,7 +3815,7 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
             StartNewChat();
             return;
         }
-        if (key == 'f' || key == 'F') {
+        if (key == 'k' || key == 'K') {
             if (gServerConnected && !gAwaitingLogin) {
                 gSearchModalOpen = !gSearchModalOpen;
                 if (gSearchModalOpen) {
@@ -3581,6 +3823,12 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
                     RunSearchQuery();
                 }
                 RenderWindow();
+            }
+            return;
+        }
+        if (key == 'f' || key == 'F') {
+            if (gServerConnected && !gAwaitingLogin) {
+                EnterScifiMode();
             }
             return;
         }
@@ -4184,6 +4432,14 @@ static void HandleMenuChoice(long menuChoice)
                 SelectVoice(itemID - iSpeechVoiceAlloy);
                 break;
         }
+    } else if (menuID == mView) {
+        if (itemID == iScifiMode) {
+            if (gScifiMode) {
+                ExitScifiMode();
+            } else if (gServerConnected && !gAwaitingLogin) {
+                EnterScifiMode();
+            }
+        }
     }
     HiliteMenu(0);
 }
@@ -4192,7 +4448,7 @@ static void NetworkIdleProc(void)
 {
     EventRecord ev;
 
-    if (gWaitingForAI) {
+    if (gWaitingForAI && !gScifiMode) {
         unsigned long elapsed = TickCount() - gWaitStartTick;
         const char *newStatus = NULL;
         char apiStatusBuf[96];
@@ -4217,7 +4473,9 @@ static void NetworkIdleProc(void)
         switch (ev.what) {
             case mouseDown: {
                 WindowPtr hitWin = NULL;
-                short part = FindWindow(ev.where, &hitWin);
+                short part;
+                if (gScifiMode) break;
+                part = FindWindow(ev.where, &hitWin);
                 if (part == inMenuBar) {
                     long mChoice;
                     SyncAIMenuState();
@@ -4267,19 +4525,27 @@ static void NetworkIdleProc(void)
                 char key = (char)(ev.message & charCodeMask);
                 if (ev.modifiers & cmdKey) {
                     if (key == 'q' || key == 'Q') {
+                        if (gScifiMode) ExitScifiMode();
                         gRunning = false;
                         gUserCancelledWait = true;
                         NetAbortCurrentOperation();
-                    } else if (key == '.') {
+                    } else if (key == '.' || (gScifiMode && (key == 'f' || key == 'F' || key == 'w' || key == 'W'))) {
                         gUserCancelledWait = true;
                         NetAbortCurrentOperation();
                     }
+                } else if (gScifiMode && key == 0x1B) {
+                    gUserCancelledWait = true;
+                    NetAbortCurrentOperation();
                 }
                 break;
             }
             case updateEvt: {
                 WindowPtr updWin = (WindowPtr)ev.message;
-                if (updWin == gMainWindow) {
+                if (updWin == gScifiWindow) {
+                    BeginUpdate(gScifiWindow);
+                    RenderScifiWindow();
+                    EndUpdate(gScifiWindow);
+                } else if (updWin == gMainWindow) {
                     BeginUpdate(gMainWindow);
                     RenderWindow();
                     EndUpdate(gMainWindow);
@@ -4288,6 +4554,656 @@ static void NetworkIdleProc(void)
             }
         }
     }
+}
+
+/* ============================================================================
+ * Sci-Fi Mode (Retro Fullscreen Terminal / Mainframe)
+ * ============================================================================ */
+
+static void HideMenuBarClassic(void)
+{
+    RgnHandle mbarRgn;
+    Rect mbarRect;
+
+    gSavedMBarHeight = LMGetMBarHeight();
+    if (gSavedMBarHeight <= 0) gSavedMBarHeight = 20;
+
+    LMSetMBarHeight(0);
+
+    mbarRgn = NewRgn();
+    if (mbarRgn) {
+        SetRect(&mbarRect, qd.screenBits.bounds.left, qd.screenBits.bounds.top,
+                           qd.screenBits.bounds.right, qd.screenBits.bounds.top + gSavedMBarHeight);
+        RectRgn(mbarRgn, &mbarRect);
+        UnionRgn(LMGetGrayRgn(), mbarRgn, LMGetGrayRgn());
+        DisposeRgn(mbarRgn);
+    }
+}
+
+static void ShowMenuBarClassic(void)
+{
+    RgnHandle mbarRgn;
+    Rect mbarRect;
+
+    if (gSavedMBarHeight <= 0) gSavedMBarHeight = 20;
+    LMSetMBarHeight(gSavedMBarHeight);
+
+    mbarRgn = NewRgn();
+    if (mbarRgn) {
+        SetRect(&mbarRect, qd.screenBits.bounds.left, qd.screenBits.bounds.top,
+                           qd.screenBits.bounds.right, qd.screenBits.bounds.top + gSavedMBarHeight);
+        RectRgn(mbarRgn, &mbarRect);
+        DiffRgn(LMGetGrayRgn(), mbarRgn, LMGetGrayRgn());
+        DisposeRgn(mbarRgn);
+    }
+}
+
+static short MeasureScifiString(const char *str)
+{
+    if (!str) return 0;
+    return (short)(strlen(str) * 6);
+}
+
+static short GetScifiMaxCols(void)
+{
+    short scrW = qd.screenBits.bounds.right - qd.screenBits.bounds.left;
+    short maxCols = (scrW - 32) / 6;
+    if (maxCols < 32) maxCols = 32;
+    if (maxCols > SCIFI_LINE_MAX_LEN - 4) maxCols = SCIFI_LINE_MAX_LEN - 4;
+    return maxCols;
+}
+
+static Boolean EqualStringNoCase(const char *s1, const char *s2)
+{
+    if (!s1 || !s2) return false;
+    while (*s1 && *s2) {
+        char c1 = (*s1 >= 'A' && *s1 <= 'Z') ? (*s1 + 32) : *s1;
+        char c2 = (*s2 >= 'A' && *s2 <= 'Z') ? (*s2 + 32) : *s2;
+        if (c1 != c2) return false;
+        s1++;
+        s2++;
+    }
+    return (*s1 == '\0' && *s2 == '\0');
+}
+
+static void ScifiAppendChar(char c)
+{
+    static char sLastScifiChar = '\0';
+    short maxCols;
+
+    if (gScifiLineCount == 0) {
+        gScifiLineCount = 1;
+        gScifiLines[0][0] = '\0';
+    }
+
+    if (sLastScifiChar == '\r' && c == '\n') {
+        sLastScifiChar = c;
+        return;
+    }
+    sLastScifiChar = c;
+
+    if (c == '\r' || c == '\n') {
+        if (gScifiLineCount < SCIFI_MAX_LINES) {
+            gScifiLineCount++;
+        } else {
+            short k;
+            for (k = 0; k < SCIFI_MAX_LINES - 1; k++) {
+                strcpy(gScifiLines[k], gScifiLines[k + 1]);
+            }
+        }
+        gScifiLines[gScifiLineCount - 1][0] = '\0';
+        return;
+    }
+
+    if (c == '\t') {
+        ScifiAppendChar(' ');
+        ScifiAppendChar(' ');
+        ScifiAppendChar(' ');
+        ScifiAppendChar(' ');
+        return;
+    }
+
+    if ((unsigned char)c >= 32 && (unsigned char)c < 127) {
+        short curLen = (short)strlen(gScifiLines[gScifiLineCount - 1]);
+        maxCols = GetScifiMaxCols();
+
+        if (curLen >= maxCols) {
+            if (c == ' ') {
+                if (gScifiLineCount < SCIFI_MAX_LINES) {
+                    gScifiLineCount++;
+                } else {
+                    short k;
+                    for (k = 0; k < SCIFI_MAX_LINES - 1; k++) {
+                        strcpy(gScifiLines[k], gScifiLines[k + 1]);
+                    }
+                }
+                gScifiLines[gScifiLineCount - 1][0] = '\0';
+                return;
+            }
+
+            /* Look backwards for word boundary */
+            short spaceIdx = -1;
+            short j;
+            for (j = curLen - 1; j >= 0; j--) {
+                if (gScifiLines[gScifiLineCount - 1][j] == ' ') {
+                    spaceIdx = j;
+                    break;
+                }
+            }
+
+            if (spaceIdx > 0 && (curLen - spaceIdx) < 32) {
+                char partialWord[SCIFI_LINE_MAX_LEN];
+                SafeCopyString(partialWord, &gScifiLines[gScifiLineCount - 1][spaceIdx + 1], sizeof(partialWord));
+                gScifiLines[gScifiLineCount - 1][spaceIdx] = '\0';
+                while (spaceIdx > 0 && gScifiLines[gScifiLineCount - 1][spaceIdx - 1] == ' ') {
+                    gScifiLines[gScifiLineCount - 1][--spaceIdx] = '\0';
+                }
+
+                if (gScifiLineCount < SCIFI_MAX_LINES) {
+                    gScifiLineCount++;
+                } else {
+                    short k;
+                    for (k = 0; k < SCIFI_MAX_LINES - 1; k++) {
+                        strcpy(gScifiLines[k], gScifiLines[k + 1]);
+                    }
+                }
+
+                strcpy(gScifiLines[gScifiLineCount - 1], partialWord);
+                curLen = (short)strlen(partialWord);
+            } else {
+                if (gScifiLineCount < SCIFI_MAX_LINES) {
+                    gScifiLineCount++;
+                } else {
+                    short k;
+                    for (k = 0; k < SCIFI_MAX_LINES - 1; k++) {
+                        strcpy(gScifiLines[k], gScifiLines[k + 1]);
+                    }
+                }
+                gScifiLines[gScifiLineCount - 1][0] = '\0';
+                curLen = 0;
+            }
+        }
+
+        if (curLen < SCIFI_LINE_MAX_LEN - 2) {
+            gScifiLines[gScifiLineCount - 1][curLen] = c;
+            gScifiLines[gScifiLineCount - 1][curLen + 1] = '\0';
+        }
+    }
+}
+
+static void ScifiAppendText(const char *text)
+{
+    if (!text) return;
+    while (*text) {
+        ScifiAppendChar(*text++);
+    }
+}
+
+static void ScifiQueueTypewriter(const char *text)
+{
+    short len;
+    if (!text) return;
+    SafeCopyString(gScifiTypewriterQueue, text, sizeof(gScifiTypewriterQueue) - 6);
+    len = (short)strlen(gScifiTypewriterQueue);
+    while (len > 0 && (gScifiTypewriterQueue[len - 1] == '\n' || gScifiTypewriterQueue[len - 1] == '\r')) {
+        gScifiTypewriterQueue[--len] = '\0';
+    }
+    gScifiTypewriterQueue[len++] = '\n';
+    gScifiTypewriterQueue[len++] = '\n';
+    gScifiTypewriterQueue[len] = '\0';
+    gScifiTypewriterLen = len;
+    gScifiTypewriterPos = 0;
+    gScifiLastTypeTick  = TickCount();
+    gScifiTypeAccum     = 0;
+}
+
+static void ScifiFastForwardTypewriter(void)
+{
+    if (gScifiTypewriterPos < gScifiTypewriterLen) {
+        while (gScifiTypewriterPos < gScifiTypewriterLen) {
+            ScifiAppendChar(gScifiTypewriterQueue[gScifiTypewriterPos++]);
+        }
+        RenderScifiWindow();
+    }
+}
+
+static void RenderScifiWindow(void)
+{
+    GrafPtr savePort;
+    Rect winR;
+    short winW, winH;
+    short termMarginLeft = 16;
+    short termMarginTop  = 16;
+    short termMarginBot  = 16;
+    short lineHeight     = 12;
+    short availH, visibleRows;
+    short i, startLine, lineY;
+
+    if (!gScifiWindow) return;
+    GetPort(&savePort);
+
+    winR = gScifiWindow->portRect;
+    winW = winR.right - winR.left;
+    winH = winR.bottom - winR.top;
+
+    EnsureOffscreenBuffer(winW, winH);
+
+    if (gHasOffscreen) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gScifiWindow);
+    }
+
+    FillRect(&winR, &qd.black);
+
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+    TextMode(srcBic); /* White text on black background */
+
+    availH = winH - termMarginTop - termMarginBot;
+    visibleRows = availH / lineHeight;
+    if (visibleRows < 4) visibleRows = 4;
+
+    /* Total active lines: gScifiLineCount lines in buffer (the last line gScifiLineCount - 1
+     * is the current line where typewriter is printing, or where prompt is being typed). */
+    if (gScifiLineCount > visibleRows) {
+        startLine = gScifiLineCount - visibleRows;
+    } else {
+        startLine = 0;
+    }
+    gScifiScroll = startLine;
+
+    lineY = termMarginTop + 9;
+    for (i = startLine; i < gScifiLineCount - 1; i++) {
+        MoveTo(termMarginLeft, lineY);
+        DrawCString(gScifiLines[i]);
+        lineY += lineHeight;
+    }
+
+    if (gScifiLineCount > 0) {
+        short curX;
+        Point penPt;
+
+        MoveTo(termMarginLeft, lineY);
+        DrawCString(gScifiLines[gScifiLineCount - 1]);
+
+        if (gScifiTypewriterPos >= gScifiTypewriterLen) {
+            if (!gScifiAwaitingReply) {
+                DrawCString("> ");
+                DrawCString(gScifiInputBuf);
+            }
+            GetPen(&penPt);
+
+            curX = penPt.h;
+            SetRect(&gScifiCursorRect, curX, lineY - 8, curX + 6, lineY + 1);
+            if (gScifiCursorVisible) {
+                InvertRect(&gScifiCursorRect);
+            }
+        } else {
+            GetPen(&penPt);
+            SetRect(&gScifiCursorRect, penPt.h, lineY - 8, penPt.h + 6, lineY + 1);
+            InvertRect(&gScifiCursorRect);
+        }
+    }
+
+    /* 2-second Launch hint banner: [ Press ESC or Cmd+F to exit Sci-Fi Mode ] */
+    if (gScifiLaunchTick != 0 && (TickCount() < gScifiLaunchTick + 120)) {
+        const char *hint = "[ Press ESC or Cmd+F to exit Sci-Fi Mode ]";
+        short tw = MeasureScifiString(hint);
+        short hx = (winW - tw) / 2;
+        MoveTo(hx, 11);
+        DrawCString(hint);
+    }
+
+    if (gHasOffscreen) {
+        SetPort(gScifiWindow);
+        {
+            RGBColor blackRGB = { 0, 0, 0 };
+            RGBColor whiteRGB = { 0xFFFF, 0xFFFF, 0xFFFF };
+            RGBForeColor(&blackRGB);
+            RGBBackColor(&whiteRGB);
+        }
+        CopyBits(&gOffscreenPort.portBits, GetWindowPortBitMap(gScifiWindow), &winR, &winR, srcCopy, NULL);
+    }
+
+    SetPort(savePort);
+}
+
+static void ScifiIdle(void)
+{
+    unsigned long now = TickCount();
+
+    if (!gScifiMode || !gScifiWindow) return;
+
+    /* Typewriter speed: ~38 characters/sec (approx 1 char every 1.58 ticks) */
+    if (gScifiTypewriterPos < gScifiTypewriterLen) {
+        unsigned long elapsed = now - gScifiLastTypeTick;
+        if (elapsed > 0) {
+            gScifiTypeAccum += elapsed * 38;
+            gScifiLastTypeTick = now;
+            if (gScifiTypeAccum >= 60) {
+                while (gScifiTypeAccum >= 60 && gScifiTypewriterPos < gScifiTypewriterLen) {
+                    ScifiAppendChar(gScifiTypewriterQueue[gScifiTypewriterPos++]);
+                    gScifiTypeAccum -= 60;
+                }
+                RenderScifiWindow();
+            }
+        }
+    } else {
+        /* Cursor blink every 30 ticks (~500ms) */
+        if (now - gScifiLastBlinkTick >= 30) {
+            gScifiLastBlinkTick = now;
+            gScifiCursorVisible = !gScifiCursorVisible;
+            if (gScifiCursorRect.right > gScifiCursorRect.left) {
+                GrafPtr savePort;
+                GetPort(&savePort);
+                SetPort(gScifiWindow);
+                {
+                    RGBColor blackRGB = { 0, 0, 0 };
+                    RGBColor whiteRGB = { 0xFFFF, 0xFFFF, 0xFFFF };
+                    RGBForeColor(&blackRGB);
+                    RGBBackColor(&whiteRGB);
+                }
+                InvertRect(&gScifiCursorRect);
+                SetPort(savePort);
+            }
+        }
+    }
+
+    /* Clear the 2-second launch hint banner once expired */
+    if (gScifiLaunchTick != 0 && now >= gScifiLaunchTick + 120) {
+        gScifiLaunchTick = 0;
+        RenderScifiWindow();
+    }
+}
+
+static void ScifiSendPrompt(const char *promptText)
+{
+    char encPrompt[512];
+    char url[768];
+
+    if (!promptText || !*promptText || !gNetBuf || !gServerConnected) return;
+
+    gScifiAwaitingReply = true;
+    RenderScifiWindow();
+
+    UrlEncode(promptText, encPrompt, sizeof(encPrompt));
+    sprintf(url, "/api/macai/ask?chat_id=%s&q=%s&provider=%s&tier=%s&tts=%d",
+            gActiveChatId, encPrompt, gActiveProvider, gActiveTier, gReadRepliesTTS ? 1 : 0);
+
+    if (NetHttpGet(url, gNetBuf, NET_BUF_SIZE) > 0) {
+        if (strncmp(gNetBuf, "REPLY|", 6) == 0) {
+            char *pId = gNetBuf + 6;
+            char *pTitle = strchr(pId, '|');
+            if (pTitle) {
+                *pTitle++ = '\0';
+                char *pProv = strchr(pTitle, '|');
+                if (pProv) {
+                    *pProv++ = '\0';
+                    char *pTier = strchr(pProv, '|');
+                    if (pTier) {
+                        *pTier++ = '\0';
+                        char *pReply = strchr(pTier, '|');
+                        if (pReply) {
+                            *pReply++ = '\0';
+                            char *pNextPipe = strchr(pReply, '|');
+                            if (pNextPipe) *pNextPipe = '\0';
+                            SafeCopyString(gActiveChatId, pId, sizeof(gActiveChatId));
+                            {
+                                short c;
+                                for (c = 0; c < gChatCount; c++) {
+                                    if (strcmp(gChats[c].id, pId) == 0) {
+                                        SafeCopyString(gChats[c].title, pTitle, sizeof(gChats[c].title));
+                                        break;
+                                    }
+                                }
+                            }
+                            gScifiAwaitingReply = false;
+                            ScifiQueueTypewriter(pReply);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    gScifiAwaitingReply = false;
+    ScifiAppendText("MAINFRAME TRANSMISSION FAILED. PLEASE RETRY.\n\n");
+    RenderScifiWindow();
+}
+
+static void HandleScifiKeyPress(char key, short keyCode, short modifiers)
+{
+    /* Exit conditions: ESC, Cmd+F, Cmd+W, Cmd+Q */
+    if (key == 0x1B) { /* ESC */
+        ExitScifiMode();
+        return;
+    }
+    if (modifiers & cmdKey) {
+        if (key == 'f' || key == 'F' || key == 'w' || key == 'W') {
+            ExitScifiMode();
+            return;
+        }
+        if (key == 'q' || key == 'Q') {
+            ExitScifiMode();
+            gRunning = false;
+            return;
+        }
+    }
+
+    /* Any keypress while typewriter is active fast-forwards to the end */
+    if (gScifiTypewriterPos < gScifiTypewriterLen) {
+        ScifiFastForwardTypewriter();
+        return;
+    }
+
+    /* While awaiting reply, ignore normal typing */
+    if (gScifiAwaitingReply) {
+        return;
+    }
+
+    /* Return / Enter */
+    if (key == '\r' || key == '\n' || key == 0x03) {
+        short curLen = (short)strlen(gScifiInputBuf);
+        if (EqualStringNoCase(gScifiInputBuf, "exit") || EqualStringNoCase(gScifiInputBuf, "quit")) {
+            ExitScifiMode();
+            return;
+        }
+        if (curLen > 0) {
+            char userPrompt[280];
+            SafeCopyString(userPrompt, gScifiInputBuf, sizeof(userPrompt));
+            ScifiAppendText("> ");
+            ScifiAppendText(userPrompt);
+            ScifiAppendText("\n\n");
+            gScifiInputBuf[0] = '\0';
+            gScifiInputLen = 0;
+            RenderScifiWindow();
+            ScifiSendPrompt(userPrompt);
+        } else {
+            ScifiAppendText("> \n");
+            RenderScifiWindow();
+        }
+        return;
+    }
+
+    /* Backspace / Delete */
+    if (key == 0x08 || (unsigned char)key == 0x7F || keyCode == 0x33) {
+        short curLen = (short)strlen(gScifiInputBuf);
+        if (curLen > 0) {
+            gScifiInputBuf[curLen - 1] = '\0';
+            gScifiInputLen = curLen - 1;
+            gScifiCursorVisible = true;
+            gScifiLastBlinkTick = TickCount();
+            RenderScifiWindow();
+        }
+        return;
+    }
+
+    /* Printable ASCII character */
+    if ((unsigned char)key >= 32 && (unsigned char)key < 127) {
+        short maxCols = GetScifiMaxCols();
+        short curLen = (short)strlen(gScifiInputBuf);
+        if (curLen < (short)(sizeof(gScifiInputBuf) - 2) && curLen + 4 < maxCols) {
+            gScifiInputBuf[curLen] = key;
+            gScifiInputBuf[curLen + 1] = '\0';
+            gScifiInputLen = curLen + 1;
+            gScifiCursorVisible = true;
+            gScifiLastBlinkTick = TickCount();
+            RenderScifiWindow();
+        }
+    }
+}
+
+static void EnterScifiMode(void)
+{
+    Rect scrR;
+    Boolean isResume = false;
+
+    if (!gServerConnected || gAwaitingLogin) return;
+
+    /* Check if currently active chat is a Sci-Fi conversation */
+    if (gSelectedChatIdx >= 0 && gSelectedChatIdx < gChatCount) {
+        if (gChats[gSelectedChatIdx].isScifi || strncmp(gChats[gSelectedChatIdx].title, "[Sci-Fi]", 8) == 0) {
+            isResume = true;
+        }
+    } else if (gActiveChatIsScifi || (gChatCount > 0 && strncmp(gChats[0].title, "[Sci-Fi]", 8) == 0 && strcmp(gChats[0].id, gActiveChatId) == 0)) {
+        isResume = true;
+    }
+
+    HideMenuBarClassic();
+    if (gMainWindow) {
+        HideWindow(gMainWindow);
+    }
+
+    scrR = qd.screenBits.bounds;
+    gScifiWindow = NewWindow(NULL, &scrR, "\p", false, plainDBox, (WindowPtr)-1L, false, 0);
+    if (!gScifiWindow) {
+        ShowMenuBarClassic();
+        if (gMainWindow) ShowWindow(gMainWindow);
+        return;
+    }
+
+    SetPort(gScifiWindow);
+    BackPat(&qd.black);
+    {
+        RGBColor blackRGB = { 0, 0, 0 };
+        RGBColor whiteRGB = { 0xFFFF, 0xFFFF, 0xFFFF };
+        RGBForeColor(&blackRGB);
+        RGBBackColor(&whiteRGB);
+    }
+    ShowWindow(gScifiWindow);
+    SelectWindow(gScifiWindow);
+
+    gScifiMode          = true;
+    gActiveChatIsScifi  = true;
+    gScifiLaunchTick    = TickCount();
+    gScifiLastBlinkTick = TickCount();
+    gScifiCursorVisible = true;
+    gScifiInputBuf[0]   = '\0';
+    gScifiInputLen      = 0;
+    gScifiLineCount     = 0;
+    gScifiScroll        = 0;
+    gScifiTypewriterPos = 0;
+    gScifiTypewriterLen = 0;
+    gScifiTypeAccum     = 0;
+    SetRect(&gScifiCursorRect, 0, 0, 0, 0);
+
+    if (isResume) {
+        short m;
+        ScifiAppendText("Connected to mainframe\n\n");
+        for (m = 0; m < gMessageCount; m++) {
+            if (gMessages[m].isUser) {
+                ScifiAppendText("> ");
+                ScifiAppendText(gMessages[m].text);
+                ScifiAppendText("\n\n");
+            } else {
+                ScifiAppendText(gMessages[m].text);
+                ScifiAppendText("\n\n");
+            }
+        }
+        RenderScifiWindow();
+    } else {
+        ScifiAppendText("Connected to mainframe\n\n");
+        RenderScifiWindow();
+        gScifiAwaitingReply = true;
+
+        {
+            char url[256];
+            sprintf(url, "/api/macai/scifi/start?provider=%s&tier=%s&tts=%d",
+                    gActiveProvider, gActiveTier, gReadRepliesTTS ? 1 : 0);
+
+            if (NetHttpGet(url, gNetBuf, NET_BUF_SIZE) > 0) {
+                if (strncmp(gNetBuf, "REPLY|", 6) == 0) {
+                    char *pId = gNetBuf + 6;
+                    char *pTitle = strchr(pId, '|');
+                    if (pTitle) {
+                        *pTitle++ = '\0';
+                        char *pProv = strchr(pTitle, '|');
+                        if (pProv) {
+                            *pProv++ = '\0';
+                            char *pTier = strchr(pProv, '|');
+                            if (pTier) {
+                                *pTier++ = '\0';
+                                char *pReply = strchr(pTier, '|');
+                                if (pReply) {
+                                    *pReply++ = '\0';
+                                    char *pNextPipe = strchr(pReply, '|');
+                                    if (pNextPipe) *pNextPipe = '\0';
+                                    SafeCopyString(gActiveChatId, pId, sizeof(gActiveChatId));
+                                    {
+                                        short c;
+                                        for (c = 0; c < gChatCount; c++) {
+                                            if (strcmp(gChats[c].id, pId) == 0) {
+                                                SafeCopyString(gChats[c].title, pTitle, sizeof(gChats[c].title));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    gScifiAwaitingReply = false;
+                                    ScifiQueueTypewriter(pReply);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        gScifiAwaitingReply = false;
+        ScifiAppendText("CONNECTION FAILED. PLEASE RETRY OR EXIT.\n\n");
+        RenderScifiWindow();
+    }
+}
+
+static void ExitScifiMode(void)
+{
+    if (!gScifiMode) return;
+    gScifiMode = false;
+    if (gScifiWindow) {
+        DisposeWindow(gScifiWindow);
+        gScifiWindow = NULL;
+    }
+    ShowMenuBarClassic();
+    if (gMainWindow) {
+        ShowWindow(gMainWindow);
+        SelectWindow(gMainWindow);
+        SetPort(gMainWindow);
+        {
+            RGBColor blackRGB = { 0, 0, 0 };
+            RGBColor whiteRGB = { 0xFFFF, 0xFFFF, 0xFFFF };
+            RGBForeColor(&blackRGB);
+            RGBBackColor(&whiteRGB);
+        }
+    }
+    DrawMenuBar();
+    RefreshChatList();
+    if (gActiveChatId[0] != '\0') {
+        LoadChatById(gActiveChatId);
+    }
+    RenderWindow();
 }
 
 /* ============================================================================
@@ -4353,6 +5269,11 @@ int main(void)
         long sleepTicks = 6;
         SystemTask();
 
+        if (gScifiMode) {
+            ScifiIdle();
+            sleepTicks = 1;
+        }
+
         if (AudioStreamIsRunning()) {
             AudioStreamPump();
             sleepTicks = 1;
@@ -4364,19 +5285,26 @@ int main(void)
                 ToggleVoiceRecording();
             }
         }
-        if (gCopiedMsgIdx >= 0 && (TickCount() - gCopiedTick) >= 120) {
+        if (!gScifiMode && gWaitingForAI) {
+            sleepTicks = 3;
+            if ((TickCount() - gLastWaitAnimTick) >= 5) {
+                gLastWaitAnimTick = TickCount();
+                RenderChatAreaOnly();
+            }
+        }
+        if (!gScifiMode && gCopiedMsgIdx >= 0 && (TickCount() - gCopiedTick) >= 120) {
             gCopiedMsgIdx = -1;
             if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
                 RenderChatAreaOnly();
             }
         }
-        if (gSaveSuccessMsgIdx >= 0 && (TickCount() - gSaveSuccessTick) >= 120) {
+        if (!gScifiMode && gSaveSuccessMsgIdx >= 0 && (TickCount() - gSaveSuccessTick) >= 120) {
             gSaveSuccessMsgIdx = -1;
             if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
                 RenderChatAreaOnly();
             }
         }
-        if ((gPromptFocused || gEditingMsgIdx >= 0) && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
+        if (!gScifiMode && (gPromptFocused || gEditingMsgIdx >= 0) && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen) {
             unsigned long nowTicks = TickCount();
             if ((nowTicks - gLastCaretTick) >= 30) {
                 gLastCaretTick = nowTicks;
@@ -4389,12 +5317,13 @@ int main(void)
             }
         }
 
-        /* Mouse hover tracking over message bubbles */
-        if (gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen && !Button()) {
+        /* Mouse hover tracking over message bubbles & action icons */
+        if (!gScifiMode && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen && !Button()) {
             Point pt;
             GetMouse(&pt);
+            ActionIconType prevIcon = gHoverActionIcon;
             short hov = HitTestMessageBubble(pt);
-            if (hov != gHoverBubbleIdx) {
+            if (hov != gHoverBubbleIdx || prevIcon != gHoverActionIcon) {
                 gHoverBubbleIdx = hov;
                 RenderChatAreaOnly();
             }
@@ -4405,6 +5334,9 @@ int main(void)
                 case mouseDown: {
                     WindowPtr hitWin = NULL;
                     short part = FindWindow(ev.where, &hitWin);
+                    if (gScifiMode) {
+                        break;
+                    }
                     if (part == inMenuBar) {
                         SyncAIMenuState();
                         HandleMenuChoice(MenuSelect(ev.where));
@@ -4450,12 +5382,20 @@ int main(void)
                 case autoKey: {
                     char key = (char)(ev.message & charCodeMask);
                     short keyCode = (short)((ev.message & keyCodeMask) >> 8);
-                    HandleKeyPress(key, keyCode, ev.modifiers);
+                    if (gScifiMode) {
+                        HandleScifiKeyPress(key, keyCode, ev.modifiers);
+                    } else {
+                        HandleKeyPress(key, keyCode, ev.modifiers);
+                    }
                     break;
                 }
                 case updateEvt: {
                     WindowPtr updWin = (WindowPtr)ev.message;
-                    if (updWin == gMainWindow) {
+                    if (updWin == gScifiWindow) {
+                        BeginUpdate(gScifiWindow);
+                        RenderScifiWindow();
+                        EndUpdate(gScifiWindow);
+                    } else if (updWin == gMainWindow) {
                         BeginUpdate(gMainWindow);
                         RenderWindow();
                         EndUpdate(gMainWindow);
@@ -4464,6 +5404,10 @@ int main(void)
                 }
             }
         }
+    }
+
+    if (gScifiMode) {
+        ExitScifiMode();
     }
 
     ClearAllMessages();

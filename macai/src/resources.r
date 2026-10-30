@@ -184,7 +184,7 @@ resource 'SIZE' (-1) {
 };
 
 resource 'MBAR' (128) {
-    { 128, 129, 130, 131 }
+    { 128, 129, 130, 131, 132 }
 };
 
 resource 'MENU' (128, "Apple") {
@@ -203,7 +203,7 @@ resource 'MENU' (129, "File") {
     enabled, "File",
     {
         "New Chat", noIcon, "N", noMark, plain,
-        "Search Chats...", noIcon, "F", noMark, plain,
+        "Search Chats...", noIcon, "K", noMark, plain,
         "Toggle Sidebar", noIcon, "S", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Quit", noIcon, "Q", noMark, plain
@@ -248,5 +248,14 @@ resource 'MENU' (131, "Speech") {
         "Voice: Nova (Bright)", noIcon, noKey, noMark, plain,
         "Voice: Shimmer (Soft)", noIcon, noKey, noMark, plain,
         "Voice: Retro Synth (Robotic)", noIcon, noKey, noMark, plain
+    }
+};
+
+resource 'MENU' (132, "View") {
+    132, textMenuProc,
+    allEnabled,
+    enabled, "View",
+    {
+        "Sci-Fi Mode", noIcon, "F", noMark, plain
     }
 };

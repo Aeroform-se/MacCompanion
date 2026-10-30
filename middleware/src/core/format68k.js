@@ -17,6 +17,27 @@ const TYPOGRAPHY_MAP = {
   '\u2026': '...', // Horizontal ellipsis
   '\u00A0': ' ', // Non-breaking space
   '\u00D7': 'x', // Multiplication sign
+  // Box Drawing & Block Elements mapped to clean ASCII
+  '\u2500': '-', '\u2501': '-', '\u2502': '|', '\u2503': '|',
+  '\u250C': '+', '\u250D': '+', '\u250E': '+', '\u250F': '+',
+  '\u2510': '+', '\u2511': '+', '\u2512': '+', '\u2513': '+',
+  '\u2514': '+', '\u2515': '+', '\u2516': '+', '\u2517': '+',
+  '\u2518': '+', '\u2519': '+', '\u251A': '+', '\u251B': '+',
+  '\u251C': '+', '\u251D': '+', '\u251E': '+', '\u251F': '+',
+  '\u2524': '+', '\u2525': '+', '\u2526': '+', '\u2527': '+',
+  '\u252C': '+', '\u252D': '+', '\u252E': '+', '\u252F': '+',
+  '\u2534': '+', '\u2535': '+', '\u2536': '+', '\u2537': '+',
+  '\u253C': '+', '\u253D': '+', '\u253E': '+', '\u253F': '+',
+  '\u2550': '=', '\u2551': '|', '\u2552': '+', '\u2553': '+',
+  '\u2554': '+', '\u2555': '+', '\u2556': '+', '\u2557': '+',
+  '\u2558': '+', '\u2559': '+', '\u255A': '+', '\u255B': '+',
+  '\u255C': '+', '\u255D': '+', '\u255E': '+', '\u255F': '+',
+  '\u2560': '+', '\u2561': '+', '\u2562': '+', '\u2563': '+',
+  '\u2564': '+', '\u2565': '+', '\u2566': '+', '\u2567': '+',
+  '\u2568': '+', '\u2569': '+', '\u256A': '+', '\u256B': '+',
+  '\u256C': '+',
+  '\u2588': '#', '\u2584': '_', '\u2580': '^', '\u2591': '.',
+  '\u2592': ':', '\u2593': '#',
 };
 
 // Unicode code point to Mac OS Roman byte value (0x80 - 0xFF)
@@ -51,7 +72,7 @@ function hasRenderableLatinText(value) {
  * strips non-Latin scripts (Arabic, Hebrew, CJK, Thai, Cyrillic) that System 7 fonts lack,
  * and replaces pipes with '/' and newlines/tabs with spaces.
  */
-function sanitizeField(value) {
+function sanitizeField(value, options = {}) {
   if (value === null || value === undefined) return '';
   let str = String(value);
   for (const [char, replacement] of Object.entries(TYPOGRAPHY_MAP)) {
@@ -60,7 +81,7 @@ function sanitizeField(value) {
   const out = [];
   for (const ch of str) {
     const code = ch.codePointAt(0);
-    if (code >= 0x20 && code <= 0x7E) {
+    if ((code >= 0x20 && code <= 0x7E) || (options.allowCr && (code === 0x0D || code === 0x0A || code === 0x09))) {
       out.push(ch);
     } else if (UNICODE_TO_MACROMAN.has(code)) {
       out.push(ch);
@@ -80,9 +101,15 @@ function sanitizeField(value) {
     }
     // Non-Latin scripts (code > 0x024F, e.g. Arabic, Hebrew, Thai, CJK, Cyrillic) are omitted cleanly
   }
-  return out
-    .join('')
-    .replace(/\|/g, '/')
+  let res = out.join('').replace(/\|/g, '/');
+  if (options.allowCr) {
+    return res
+      .replace(/\r\n/g, '\r')
+      .replace(/\n/g, '\r')
+      .replace(/\t/g, '    ')
+      .trim();
+  }
+  return res
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\(\s*\)/g, '')
     .replace(/\[\s*\]/g, '')

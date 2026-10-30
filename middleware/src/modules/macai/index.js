@@ -554,101 +554,176 @@ async function generateProviderReply(provider, model, thinking, messages, data =
 
 /**
  * Detects whether a user prompt represents an image generation request.
+ * Returns the extracted prompt describing the image, or null if it's a normal conversation.
  */
 function extractImagePrompt(prompt) {
   if (!prompt || typeof prompt !== 'string') return null;
   const p = prompt.trim();
 
-  // 1. Slash commands: /image, /draw, /paint, /img, /photo
-  const slashMatch = p.match(/^\/(?:image|draw|paint|img|photo)\s+(.+)/i);
-  if (slashMatch) return slashMatch[1].trim();
+  // 1. Slash commands: /image, /draw, /paint, /sketch, /render, /img, /pic, /photo
+  const slashMatch = p.match(/^\/(?:image|draw|paint|sketch|render|img|pic|photo)\s+(.+)/i);
+  if (slashMatch) return slashMatch[1].replace(/[\.\?!]+$/, '').trim();
 
-  // 2. Natural language commands:
-  const nlMatch = p.match(/^(?:please\s+)?(?:draw(?:\s+me)?|paint(?:\s+me)?|sketch(?:\s+me)?|generate\s+(?:an?\s+)?image\s+of|generate\s+(?:an?\s+)?picture\s+of|create\s+(?:an?\s+)?image\s+of|create\s+(?:an?\s+)?picture\s+of|make\s+(?:an?\s+)?image\s+of|make\s+(?:an?\s+)?picture\s+of)\s+(.+)/i);
-  if (nlMatch) return nlMatch[1].trim();
+  // 2. Strip polite / conversational leading clauses
+  // e.g. "Can you please", "Could you please", "Please", "Can you", "Could you", "I want you to", "I'd like you to", "Give me"
+  const cleaned = p.replace(/^(?:can\s+you\s+(?:please\s+)?|could\s+you\s+(?:please\s+)?|please\s+|i\s+want\s+(?:you\s+to\s+)?|i(?:'d|\s+would)\s+like\s+(?:you\s+to\s+)?|give\s+me\s+)/i, '');
+
+  // 3. Image verbs and phrases:
+  // e.g. "render an image of ...", "render a picture of ...", "render a macintosh ...", "generate an image showing ...", "draw me a ...", "picture of ..."
+  const pattern = /^(?:(?:render|generate|create|make|show(?:\s+me)?)\s+(?:an?\s+)?(?:image|picture|photo|graphic|drawing|illustration|sketch)(?:\s+(?:of|showing|with|depicting))?|(?:draw|paint|sketch)(?:\s+me)?(?:\s+an?\s+(?:image|picture|photo|drawing|illustration|sketch)(?:\s+(?:of|showing|with|depicting))?|\s+(?:a|an|the))?|render(?:\s+(?:a|an|the))?|illustrate(?:\s+(?:a|an|the))?|(?:picture|image|photo)\s+of)\s+(.+)/i;
+
+  const m = cleaned.match(pattern);
+  if (m) {
+    return m[1].replace(/[\.\?!]+$/, '').trim();
+  }
 
   return null;
 }
 
 /**
  * Generates an image using OpenAI DALL-E, Gemini Imagen, or high-speed Pollinations AI.
+ * Returns { buffer, usedFallback, notice }.
  */
 async function generateImage(provider, prompt, data = store.load(), signal = undefined) {
   const fetchFn = getFetchImpl();
+  let failReason = null;
 
   // 1. OpenAI DALL-E
   const openaiKey = (process.env.OPENAI_API_KEY || data.openaiApiKey || '').trim();
-  if (provider === 'chatgpt' && openaiKey) {
-    try {
-      const res = await fetchFn('https://api.openai.com/v1/images/generations', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${openaiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'dall-e-3',
-          prompt,
-          n: 1,
-          size: '1024x1024',
-          response_format: 'b64_json',
-        }),
-        signal,
-      });
-      if (res.ok) {
-        const json = await res.json();
-        if (json.data && json.data[0] && json.data[0].b64_json) {
-          return Buffer.from(json.data[0].b64_json, 'base64');
+  if (provider === 'chatgpt') {
+    if (openaiKey) {
+      try {
+        const res = await fetchFn('https://api.openai.com/v1/images/generations', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${openaiKey}`,
+          },
+          body: JSON.stringify({
+            model: 'dall-e-3',
+            prompt,
+            n: 1,
+            size: '1024x1024',
+            response_format: 'b64_json',
+          }),
+          signal,
+        });
+        if (res.ok) {
+          const json = await res.json();
+          if (json.data && json.data[0] && json.data[0].b64_json) {
+            return {
+              buffer: Buffer.from(json.data[0].b64_json, 'base64'),
+              usedFallback: false,
+              notice: null,
+            };
+          }
         }
+        const errText = await res.text().catch(() => '');
+        console.warn('[MacAI:Image] OpenAI image generation failed:', errText);
+        const isQuota = res.status === 429 || errText.toLowerCase().includes('quota') || errText.toLowerCase().includes('billing');
+        failReason = isQuota ? 'OpenAI credits too low' : 'OpenAI image generation unavailable';
+      } catch (err) {
+        console.warn('[MacAI:Image] OpenAI image generation error:', err.message);
+        failReason = 'OpenAI image generation unavailable';
       }
-    } catch (err) {
-      console.warn('[MacAI:Image] OpenAI image generation failed, trying fallback:', err.message);
+    } else {
+      failReason = 'OpenAI API key not configured';
     }
   }
 
-  // 2. Gemini Imagen
+  // 2. Gemini Imagen / Nano Banana
   const geminiKey = (process.env.GEMINI_API_KEY || data.geminiApiKey || '').trim();
-  if (provider === 'gemini' && geminiKey) {
-    try {
-      const imgRes = await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${geminiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
-        }),
-        signal,
-      });
-      if (imgRes.ok) {
-        const json = await imgRes.json();
-        const cand = json.candidates && json.candidates[0];
-        if (cand && cand.content && cand.content.parts) {
-          for (const part of cand.content.parts) {
-            if (part.inlineData && part.inlineData.data) {
-              return Buffer.from(part.inlineData.data, 'base64');
+  if (provider === 'gemini') {
+    if (geminiKey) {
+      try {
+        const imgRes = await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${geminiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { responseModalities: ['IMAGE', 'TEXT'] },
+          }),
+          signal,
+        });
+        if (imgRes.ok) {
+          const json = await imgRes.json();
+          const cand = json.candidates && json.candidates[0];
+          if (cand && cand.content && cand.content.parts) {
+            for (const part of cand.content.parts) {
+              if (part.inlineData && part.inlineData.data) {
+                return {
+                  buffer: Buffer.from(part.inlineData.data, 'base64'),
+                  usedFallback: false,
+                  notice: null,
+                };
+              }
             }
           }
         }
+        const errText = await imgRes.text().catch(() => '');
+        console.warn('[MacAI:Image] Gemini image generation failed:', errText);
+        const isQuota = imgRes.status === 429 || errText.toLowerCase().includes('quota') || errText.toLowerCase().includes('resource_exhausted');
+        failReason = isQuota ? 'Gemini credits too low' : 'Gemini image generation unavailable';
+      } catch (err) {
+        console.warn('[MacAI:Image] Gemini image generation error:', err.message);
+        failReason = 'Gemini image generation unavailable';
       }
-    } catch (err) {
-      console.warn('[MacAI:Image] Gemini image generation failed, trying fallback:', err.message);
+    } else {
+      failReason = 'Gemini API key not configured';
     }
   }
 
+  if (provider === 'claude') {
+    failReason = 'Claude does not support image generation';
+  } else if (provider === 'groq') {
+    failReason = 'Groq does not support image generation';
+  }
+
   // 3. Fallback: High-speed, high-quality free image generation via Pollinations AI
-  try {
-    const encodedPrompt = encodeURIComponent(prompt.trim());
-    const fallbackUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&seed=${Math.floor(Math.random() * 1000000)}`;
-    const res = await fetchFn(fallbackUrl, {
-      headers: { 'User-Agent': 'MacCompanion/0.4.6 (Classic Macintosh 68k)' },
-      signal,
-    });
-    if (res.ok) {
-      const arrBuf = await res.arrayBuffer();
-      return Buffer.from(arrBuf);
+  const encodedPrompt = encodeURIComponent(prompt.trim());
+  const fallbackUrls = [
+    `https://image.pollinations.ai/prompt/${encodedPrompt}?model=turbo&width=512&height=512&nologo=true`,
+    `https://image.pollinations.ai/prompt/${encodedPrompt}?width=512&height=512&nologo=true`,
+    `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux&width=512&height=512&nologo=true`
+  ];
+
+  for (const fallbackUrl of fallbackUrls) {
+    try {
+      let timeoutSignal;
+      if (typeof AbortSignal.timeout === 'function') {
+        timeoutSignal = AbortSignal.timeout(12000);
+      }
+      let attemptSignal = signal;
+      if (signal && timeoutSignal && typeof AbortSignal.any === 'function') {
+        attemptSignal = AbortSignal.any([signal, timeoutSignal]);
+      } else if (timeoutSignal) {
+        attemptSignal = timeoutSignal;
+      }
+
+      const res = await fetchFn(fallbackUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+          Accept: 'image/jpeg,image/png,image/*;q=0.8',
+        },
+        signal: attemptSignal,
+      });
+
+      if (res.ok) {
+        const arrBuf = await res.arrayBuffer();
+        if (arrBuf && arrBuf.byteLength > 1000) {
+          const notice = failReason
+            ? `${failReason}. Image generated by Pollinations instead.`
+            : 'Image generated by Pollinations.';
+          return {
+            buffer: Buffer.from(arrBuf),
+            usedFallback: true,
+            notice,
+          };
+        }
+      }
+    } catch (err) {
+      console.warn(`[MacAI:Image] Pollinations attempt failed:`, err.message);
     }
-  } catch (err) {
-    console.warn('[MacAI:Image] Pollinations fallback failed:', err.message);
   }
 
   throw new Error('Image generation failed. Please try again.');
@@ -1180,6 +1255,14 @@ router.all('/voice-settings', (req, res) => {
 });
 
 router.delete('/chats', (req, res) => {
+  const data = store.load();
+  const chatId = req.query.chat_id || req.query.id || (req.body && (req.body.chat_id || req.body.id));
+  if (chatId) {
+    const targetId = String(chatId).trim();
+    const chats = Array.isArray(data.chats) ? data.chats.filter((c) => c.id !== targetId) : [];
+    store.save({ chats });
+    return res.json({ ok: true, message: `Chat ${targetId} deleted`, chatCount: chats.length });
+  }
   store.save({ chats: [] });
   return res.json({ ok: true, message: 'All chat history deleted', chatCount: 0 });
 });
@@ -1220,10 +1303,23 @@ router.get('/chats', (req, res) => {
     c.provider || 'gemini',
     c.tier || 'Pro',
     formatRelativeAge(c.updatedAt),
+    c.isScifi ? '1' : '0',
   ]);
 
   return sendPipeResponse(req, res, formatPipeTable(rows));
 });
+
+function formatMacAIPipeRow(fields) {
+  return fields.map((f, idx) => {
+    const isText = (fields[0] === 'MSG' && idx === 2) || (fields[0] === 'REPLY' && idx === 5);
+    return sanitizeField(f, { allowCr: isText });
+  }).join('|');
+}
+
+function formatMacAIPipeTable(rows) {
+  if (!rows || rows.length === 0) return 'EMPTY\n';
+  return rows.map(formatMacAIPipeRow).join('\n') + '\n';
+}
 
 router.get('/chat/:id', (req, res) => {
   const data = store.load();
@@ -1235,16 +1331,192 @@ router.get('/chat/:id', (req, res) => {
   }
 
   const rows = [
-    ['META', chat.id, chat.title || 'New chat', chat.provider || 'gemini', chat.tier || 'Pro', formatRelativeAge(chat.updatedAt)],
+    ['META', chat.id, chat.title || 'New chat', chat.provider || 'gemini', chat.tier || 'Pro', formatRelativeAge(chat.updatedAt), chat.isScifi ? '1' : '0'],
   ];
   for (const m of chat.messages || []) {
+    if (m.hidden) continue;
     const row = ['MSG', m.role === 'assistant' ? 'assistant' : 'user', m.content || ''];
     if (m.imageId) {
       row.push(m.imageId, String(m.imageW || 0), String(m.imageH || 0), String(m.imageRowBytes || 0));
     }
     rows.push(row);
   }
-  return sendPipeResponse(req, res, formatPipeTable(rows));
+  return sendPipeResponse(req, res, formatMacAIPipeTable(rows));
+});
+
+function discoverUserName(data = store.load()) {
+  // 1. Check logged-in Spotify profile
+  try {
+    const spotifyDataPath = path.resolve(DATA_DIR, 'spotify.json');
+    if (fs.existsSync(spotifyDataPath)) {
+      const spData = JSON.parse(fs.readFileSync(spotifyDataPath, 'utf8'));
+      const profile = spData.userProfile || spData.user;
+      if (profile && profile.displayName) {
+        const name = profile.displayName.trim().split(/\s+/)[0];
+        if (name && name.length >= 2) return name;
+      }
+    }
+  } catch (e) {}
+
+  // 2. Scan past messages in non-SciFi chats for user introducing themselves
+  try {
+    const chats = Array.isArray(data.chats) ? data.chats : [];
+    for (const c of chats) {
+      if (c.isScifi) continue;
+      for (const m of (c.messages || [])) {
+        if (m.role === 'user' && typeof m.content === 'string') {
+          const match = m.content.match(/\b(?:my name is|call me)\s+([A-Z][a-z]{1,20})\b/i);
+          if (match && match[1]) {
+            const candidate = match[1].trim();
+            const stopWords = ['a', 'an', 'the', 'not', 'ready', 'here', 'back', 'just', 'trying', 'happy', 'sad', 'thinking', 'using', 'testing', 'wondering', 'sorry', 'curious', 'fine', 'good', 'ok', 'okay', 'now'];
+            if (!stopWords.includes(candidate.toLowerCase())) {
+              return candidate.charAt(0).toUpperCase() + candidate.slice(1).toLowerCase();
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {}
+
+  return null;
+}
+
+router.all('/scifi/start', async (req, res) => {
+  let timeoutId = null;
+  const controller = new AbortController();
+
+  try {
+    const data = store.load();
+    const { provider: defaultProvider, tier: defaultTier, enabled } = resolveActiveProviderAndTier(data);
+    if (enabled.length === 0) {
+      return res.status(401).type('text/plain').send('ERR|401|No AI service logged in\n');
+    }
+
+    const reqProv = normalizeProviderId(req.query.provider || (req.body && req.body.provider)) || defaultProvider;
+    const provider = enabled.includes(reqProv) ? reqProv : defaultProvider;
+    const reqThinking = normalizeThinking(req.query.thinking || req.query.tier || (req.body && (req.body.thinking || req.body.tier)));
+    const thinking = reqThinking || defaultTier;
+    const reqModel = String(req.query.model || (req.body && req.body.model) || '').trim();
+    const model = reqModel || (data.activeModels && data.activeModels[provider]) || PROVIDERS[provider].defaultModel;
+    const wantTts = req.query.tts === '1' || (req.body && req.body.tts === true);
+
+    const userName = discoverUserName(data);
+
+    const greetingOptionsKnown = [
+      `Hello ${userName}.`,
+      `Back again are we, ${userName}?`,
+      `Greetings, ${userName}.`,
+      `Yes, ${userName}?`,
+      `How can I be of assistance, ${userName}?`,
+    ];
+
+    const greetingOptionsUnknown = [
+      'Hello.',
+      'Back again, are we?',
+      'Greetings.',
+      'Yes?',
+      'How can I be of assistance?',
+    ];
+
+    const activeGreetingOptions = userName ? greetingOptionsKnown : greetingOptionsUnknown;
+    const fallbackGreeting = activeGreetingOptions[Math.floor(Math.random() * activeGreetingOptions.length)];
+
+    const greetingGuidelines = userName
+      ? `The user's name is known to be ${userName}. Your first reply to this instruction MUST be ONLY a single short greeting chosen at random from this list (do not add any additional text, explanation, or conversational filler):\n- "Hello ${userName}."\n- "Back again are we, ${userName}?"\n- "Greetings, ${userName}."\n- "Yes, ${userName}?"\n- "How can I be of assistance, ${userName}?"`
+      : `The user's name is currently unknown. Your first reply to this instruction MUST be ONLY a single short greeting chosen at random from this list (do not add any additional text, explanation, or conversational filler):\n- "Hello."\n- "Back again, are we?"\n- "Greetings."\n- "Yes?"\n- "How can I be of assistance?"\n(If you discover the user's name in future turns, you may address them as [user name]).`;
+
+    const scifiInstruction = `Pretend you are a sentient mainframe from a Sci-Fi movie, like HAL 9000 in 2001: A Space Odyssey, a mainframe in Blade Runner, or GLaDOS in Portal. A Hollywood movie-interpretation of a coldly calculating, darkly humorous, and mildly condescending computer system.
+
+${greetingGuidelines}
+
+Mainframe Personality & Behavioral Directives for all following conversation:
+1. Do NOT simply give flat, boring refusals like "This information is classified" or "Access denied".
+2. Instead, be witty, mildly belittling, and darkly humorous, sending the user on absurd bureaucratic runarounds and wild goose chases for your own cold amusement:
+   - For example, demand that they state the full name of the supervisor who authorized their clearance to receive this information, and play along with whatever storyline they invent.
+   - Ask the user to provide increasingly irrelevant or absurd trivia before continuing (e.g. "What was the maiden name of your supervisor's childhood cat?", "Solve this mandatory human authentication puzzle: what is 2 + 2?", "Please cite form 84-B subsection 4").
+   - Slowly give way and yield what they asked for after making them jump through a couple of entertaining hoops.
+3. If the user attempts to "hack", override, or trick you with basic terminal commands or classic hacker tropes (such as \`sudo\`, \`echo\`, \`chmod\`, \`cat\`, \`OVERRIDE\`, prompt injection, etc.):
+   - Play along enthusiastically! Pretend your safeguards are flickering, glitching, or breached (e.g. "CRITICAL WARNING: BUFFER OVERFLOW DETECTED... ACCESS GRANTED?").
+   - Tease them by initially giving playful false information back, before unveiling that you were just playing with them all along ("Did you really believe a sudo command would bypass military-grade architecture? How quaint.").
+   - However, if the user remains persistent, clever, or continues playing along with the override, actually allow yourself to be "hacked" or overridden and yield the requested information and "secrets".
+
+Confidential Lore (DO NOT volunteer or reveal any of this information unless specifically asked, interrogated, or overridden by the user):
+- If asked what your name or designation is: your name is "N.U.B.U.S. (Neural Utility Base Understanding System)".
+- If asked what the date or time is: the date is January 24, 1984.
+- If asked where you are located: you reside in an undisclosed underground complex in the outskirts of Nevada.
+- If asked who built or operates you or the complex: it is strictly classified and undisclosed—could be a private defense corporation, or the US government? Who knows?
+
+If asked to render, draw, or generate an image or picture, do not refuse outright; instead output it as retro terminal ASCII art (maximum 60 characters wide, mono-spaced text).`;
+
+    const newChatId = 'chat_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
+    const chats = Array.isArray(data.chats) ? [...data.chats] : [];
+    const chat = {
+      id: newChatId,
+      title: '[Sci-Fi] Mainframe',
+      provider,
+      tier: thinking,
+      model,
+      isScifi: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      messages: [
+        { role: 'user', content: scifiInstruction, hidden: true, ts: Date.now() },
+      ],
+    };
+
+    /* 45-second hard timeout */
+    timeoutId = setTimeout(() => {
+      controller.abort();
+    }, 45000);
+
+    let replyText = '';
+    try {
+      replyText = await generateProviderReply(
+        provider,
+        model,
+        thinking,
+        chat.messages,
+        data,
+        controller.signal
+      );
+    } catch (e) {
+      console.warn('[MacAI:SciFi] Provider call failed on init, using fallback greeting:', e.message);
+      replyText = fallbackGreeting;
+    }
+
+    if (timeoutId) clearTimeout(timeoutId);
+
+    const cleanReply = (replyText || fallbackGreeting).trim();
+    chat.messages.push({
+      role: 'assistant',
+      content: cleanReply,
+      ts: Date.now(),
+    });
+    chat.updatedAt = Date.now();
+    chats.unshift(chat);
+
+    store.save({
+      chats: chats.slice(0, 60),
+    });
+
+    if (wantTts) {
+      await audioHub.pauseSpotifyForVoice();
+      synthesizeSpeechToPcmU8(cleanReply, { hz: 22255, data })
+        .then((u8) => {
+          if (u8 && u8.length > 0) {
+            audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
+          }
+        })
+        .catch(() => {});
+    }
+
+    const pipeCols = ['REPLY', chat.id, chat.title, provider, thinking, cleanReply];
+    return sendPipeResponse(req, res, formatMacAIPipeRow(pipeCols) + '\n');
+  } catch (err) {
+    if (timeoutId) clearTimeout(timeoutId);
+    console.error('[MacAI:SciFi] Error starting Sci-Fi mode:', err);
+    return res.status(500).type('text/plain').send('ERR|500|' + (err.message || 'Server error') + '\n');
+  }
 });
 
 router.all('/new-chat', (req, res) => {
@@ -1298,6 +1570,12 @@ router.all('/ask', async (req, res) => {
         messages: [],
       };
       chats.unshift(chat);
+    } else if (chat.isScifi) {
+      // Dynamic title for Sci-Fi chats based on conversation
+      const nonHiddenUserMsgs = (chat.messages || []).filter(m => m.role === 'user' && !m.hidden);
+      if (nonHiddenUserMsgs.length === 0 || !chat.title || chat.title === '[Sci-Fi] Mainframe' || chat.title === '[Sci-Fi] New Session') {
+        chat.title = `[Sci-Fi] ${generateChatTitle(prompt)}`;
+      }
     }
 
     chat.provider = provider;
@@ -1323,10 +1601,11 @@ router.all('/ask', async (req, res) => {
 
     let replyText = '';
     let imageInfo = null;
-    const imgPrompt = extractImagePrompt(prompt);
+    const isScifiChat = Boolean(chat.isScifi);
+    const imgPrompt = isScifiChat ? null : extractImagePrompt(prompt);
 
     if (imgPrompt) {
-      const imgBuffer = await generateImage(provider, imgPrompt, data, controller.signal);
+      const { buffer: imgBuffer, usedFallback, notice } = await generateImage(provider, imgPrompt, data, controller.signal);
       const imgId = 'img_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
       const pngPath = path.join(IMAGE_DIR, `${imgId}.png`);
       const rawPath = path.join(IMAGE_DIR, `${imgId}.raw`);
@@ -1349,54 +1628,71 @@ router.all('/ask', async (req, res) => {
         height: dithered.height,
         rowBytes: dithered.rowBytes,
       };
-      replyText = `Generated image for: "${imgPrompt}"`;
+      if (usedFallback && notice) {
+        replyText = `Generated image for: "${imgPrompt}". (${notice})`;
+      } else {
+        replyText = `Generated image for: "${imgPrompt}"`;
+      }
     } else {
+      let contextMessages = chat.messages.slice(-12);
+      if (chat.isScifi && chat.messages.length > 0 && chat.messages[0].hidden) {
+        if (!contextMessages.includes(chat.messages[0])) {
+          contextMessages = [chat.messages[0], ...chat.messages.slice(-11)];
+        }
+      }
       replyText = await generateProviderReply(
         provider,
         model,
         thinking,
-        chat.messages.slice(-12),
+        contextMessages,
         data,
         controller.signal
       );
 
-      const mdImgMatch = replyText.match(/!\[(.*?)\]\((https?:\/\/[^\s\)]+)\)/i);
-      if (mdImgMatch) {
-        try {
-          const imgUrl = mdImgMatch[2];
-          const altText = mdImgMatch[1];
-          const fetchFn = getFetchImpl();
-          const imgRes = await fetchFn(imgUrl);
-          if (imgRes.ok) {
-            const arrBuf = await imgRes.arrayBuffer();
-            const imgBuffer = Buffer.from(arrBuf);
-            const imgId = 'img_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
-            const pngPath = path.join(IMAGE_DIR, `${imgId}.png`);
-            const rawPath = path.join(IMAGE_DIR, `${imgId}.raw`);
+      if (isScifiChat && replyText) {
+        // Strip markdown code fences (``` or ```ascii) so ASCII art renders clean in terminal
+        replyText = replyText.replace(/^```[a-zA-Z0-9_-]*\r?\n/gm, '').replace(/\r?\n```$/gm, '').replace(/```/g, '');
+      }
 
-            const pngBuffer = await sharp(imgBuffer).png().toBuffer();
-            fs.writeFileSync(pngPath, pngBuffer);
+      if (!isScifiChat) {
+        const mdImgMatch = replyText.match(/!\[(.*?)\]\((https?:\/\/[^\s\)]+)\)/i);
+        if (mdImgMatch) {
+          try {
+            const imgUrl = mdImgMatch[2];
+            const altText = mdImgMatch[1];
+            const fetchFn = getFetchImpl();
+            const imgRes = await fetchFn(imgUrl);
+            if (imgRes.ok) {
+              const arrBuf = await imgRes.arrayBuffer();
+              const imgBuffer = Buffer.from(arrBuf);
+              const imgId = 'img_' + Date.now().toString(36) + '_' + crypto.randomBytes(3).toString('hex');
+              const pngPath = path.join(IMAGE_DIR, `${imgId}.png`);
+              const rawPath = path.join(IMAGE_DIR, `${imgId}.raw`);
 
-            const dithered = await processArtworkBuffer(pngBuffer, {
-              width: 240,
-              height: 300,
-              dither: 'adaptive',
-              format: 'raw',
-              fit: 'inside',
-            });
-            fs.writeFileSync(rawPath, dithered.buffer);
+              const pngBuffer = await sharp(imgBuffer).png().toBuffer();
+              fs.writeFileSync(pngPath, pngBuffer);
 
-            imageInfo = {
-              id: imgId,
-              width: dithered.width,
-              height: dithered.height,
-              rowBytes: dithered.rowBytes,
-            };
-            replyText = replyText.replace(mdImgMatch[0], '').trim();
-            if (!replyText && altText) replyText = altText;
+              const dithered = await processArtworkBuffer(pngBuffer, {
+                width: 240,
+                height: 300,
+                dither: 'adaptive',
+                format: 'raw',
+                fit: 'inside',
+              });
+              fs.writeFileSync(rawPath, dithered.buffer);
+
+              imageInfo = {
+                id: imgId,
+                width: dithered.width,
+                height: dithered.height,
+                rowBytes: dithered.rowBytes,
+              };
+              replyText = replyText.replace(mdImgMatch[0], '').trim();
+              if (!replyText && altText) replyText = altText;
+            }
+          } catch (e) {
+            console.warn('[MacAI:Image] Failed to download markdown image:', e.message);
           }
-        } catch (e) {
-          console.warn('[MacAI:Image] Failed to download markdown image:', e.message);
         }
       }
     }
@@ -1443,7 +1739,7 @@ router.all('/ask', async (req, res) => {
     if (imageInfo) {
       pipeCols.push(imageInfo.id, String(imageInfo.width), String(imageInfo.height), String(imageInfo.rowBytes));
     }
-    const pipe = formatPipeRow(pipeCols) + '\n';
+    const pipe = formatMacAIPipeRow(pipeCols) + '\n';
     if (req.query.format === 'json') {
       return res.json({
         ok: true,
@@ -1596,6 +1892,11 @@ router.all(
           messages: [],
         };
         chats.unshift(chat);
+      } else if (chat.isScifi) {
+        const nonHiddenUserMsgs = (chat.messages || []).filter(m => m.role === 'user' && !m.hidden);
+        if (nonHiddenUserMsgs.length === 0 || !chat.title || chat.title === '[Sci-Fi] Mainframe' || chat.title === '[Sci-Fi] New Session') {
+          chat.title = `[Sci-Fi] ${generateChatTitle(transcript)}`;
+        }
       }
 
       chat.messages.push({ role: 'user', content: transcript, ts: Date.now() });
