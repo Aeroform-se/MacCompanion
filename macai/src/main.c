@@ -277,11 +277,22 @@ static unsigned long  gScifiLaunchTick    = 0;
 static Boolean        gScifiAwaitingReply = false;
 static short          gSavedMBarHeight    = 20;
 
+#define SCIFI_INPUT_BUF_MAX   512
+#define MAX_SCIFI_PROMPT_LINES 16
+
 static char           gScifiLines[SCIFI_MAX_LINES][SCIFI_LINE_MAX_LEN];
 static short          gScifiLineCount     = 0;
 static short          gScifiScroll        = 0;
-static char           gScifiInputBuf[256] = "";
+static char           gScifiInputBuf[SCIFI_INPUT_BUF_MAX] = "";
 static short          gScifiInputLen      = 0;
+static short          gScifiCursorPos     = 0;
+
+typedef struct {
+    char lines[MAX_SCIFI_PROMPT_LINES][SCIFI_LINE_MAX_LEN];
+    short lineCount;
+    short cursorLine;
+    short cursorCol;
+} ScifiPromptLayout;
 
 static char           gScifiTypewriterQueue[SCIFI_QUEUE_MAX];
 static short          gScifiTypewriterLen = 0;
@@ -4767,6 +4778,79 @@ static void ScifiFastForwardTypewriter(void)
     }
 }
 
+static void LayoutScifiPrompt(const char *inputBuf, short cursorPos, short maxCols, ScifiPromptLayout *outLayout)
+{
+    short curLine = 0;
+    short curCol = 0;
+    short i = 0;
+    short inputLen;
+
+    if (!outLayout) return;
+    memset(outLayout, 0, sizeof(ScifiPromptLayout));
+
+    if (!inputBuf) inputBuf = "";
+    inputLen = (short)strlen(inputBuf);
+    if (cursorPos < 0) cursorPos = 0;
+    if (cursorPos > inputLen) cursorPos = inputLen;
+    if (maxCols < 20) maxCols = 20;
+
+    strcpy(outLayout->lines[0], "> ");
+    curCol = 2;
+    outLayout->lineCount = 1;
+    outLayout->cursorLine = 0;
+    outLayout->cursorCol = 2;
+
+    while (i <= inputLen) {
+        if (i == cursorPos) {
+            outLayout->cursorLine = curLine;
+            outLayout->cursorCol = curCol;
+        }
+        if (i == inputLen) {
+            break;
+        }
+
+        char c = inputBuf[i];
+
+        /* If this is the start of a word, check if entire word fits on this line */
+        if (c != ' ') {
+            short wordLen = 0;
+            while (i + wordLen < inputLen && inputBuf[i + wordLen] != ' ') {
+                wordLen++;
+            }
+            if (curCol + wordLen > maxCols && curCol > 2 && curLine < MAX_SCIFI_PROMPT_LINES - 1) {
+                curLine++;
+                strcpy(outLayout->lines[curLine], "  ");
+                curCol = 2;
+                outLayout->lineCount = curLine + 1;
+                if (i == cursorPos) {
+                    outLayout->cursorLine = curLine;
+                    outLayout->cursorCol = curCol;
+                }
+            }
+        }
+
+        if (curCol >= maxCols && curLine < MAX_SCIFI_PROMPT_LINES - 1) {
+            curLine++;
+            strcpy(outLayout->lines[curLine], "  ");
+            curCol = 2;
+            outLayout->lineCount = curLine + 1;
+            if (i == cursorPos) {
+                outLayout->cursorLine = curLine;
+                outLayout->cursorCol = curCol;
+            }
+        }
+
+        short lineLen = (short)strlen(outLayout->lines[curLine]);
+        if (lineLen < SCIFI_LINE_MAX_LEN - 2) {
+            outLayout->lines[curLine][lineLen] = c;
+            outLayout->lines[curLine][lineLen + 1] = '\0';
+            curCol++;
+        }
+
+        i++;
+    }
+}
+
 static void RenderScifiWindow(void)
 {
     GrafPtr savePort;
@@ -4777,7 +4861,13 @@ static void RenderScifiWindow(void)
     short termMarginBot  = 16;
     short lineHeight     = 12;
     short availH, visibleRows;
-    short i, startLine, lineY;
+    short startLine, lineY;
+    short i;
+    short maxCols;
+    short promptLineCount = 1;
+    ScifiPromptLayout promptLayout;
+    short historyLines;
+    short totalDisplayRows;
 
     if (!gScifiWindow) return;
     GetPort(&savePort);
@@ -4805,45 +4895,64 @@ static void RenderScifiWindow(void)
     visibleRows = availH / lineHeight;
     if (visibleRows < 4) visibleRows = 4;
 
-    /* Total active lines: gScifiLineCount lines in buffer (the last line gScifiLineCount - 1
-     * is the current line where typewriter is printing, or where prompt is being typed). */
-    if (gScifiLineCount > visibleRows) {
-        startLine = gScifiLineCount - visibleRows;
+    maxCols = GetScifiMaxCols();
+
+    if (gScifiTypewriterPos >= gScifiTypewriterLen && !gScifiAwaitingReply) {
+        LayoutScifiPrompt(gScifiInputBuf, gScifiCursorPos, maxCols, &promptLayout);
+        promptLineCount = promptLayout.lineCount;
+    } else {
+        promptLineCount = 1;
+    }
+
+    historyLines = (gScifiLineCount > 0) ? (gScifiLineCount - 1) : 0;
+    totalDisplayRows = historyLines + promptLineCount;
+
+    if (totalDisplayRows > visibleRows) {
+        startLine = totalDisplayRows - visibleRows;
     } else {
         startLine = 0;
     }
     gScifiScroll = startLine;
 
     lineY = termMarginTop + 9;
-    for (i = startLine; i < gScifiLineCount - 1; i++) {
+    for (i = startLine; i < historyLines; i++) {
         MoveTo(termMarginLeft, lineY);
         DrawCString(gScifiLines[i]);
         lineY += lineHeight;
     }
 
-    if (gScifiLineCount > 0) {
-        short curX;
+    if (gScifiTypewriterPos < gScifiTypewriterLen) {
         Point penPt;
-
         MoveTo(termMarginLeft, lineY);
-        DrawCString(gScifiLines[gScifiLineCount - 1]);
-
-        if (gScifiTypewriterPos >= gScifiTypewriterLen) {
-            if (!gScifiAwaitingReply) {
-                DrawCString("> ");
-                DrawCString(gScifiInputBuf);
-            }
-            GetPen(&penPt);
-
-            curX = penPt.h;
-            SetRect(&gScifiCursorRect, curX, lineY - 8, curX + 6, lineY + 1);
-            if (gScifiCursorVisible) {
-                InvertRect(&gScifiCursorRect);
-            }
-        } else {
-            GetPen(&penPt);
-            SetRect(&gScifiCursorRect, penPt.h, lineY - 8, penPt.h + 6, lineY + 1);
+        if (gScifiLineCount > 0) {
+            DrawCString(gScifiLines[gScifiLineCount - 1]);
+        }
+        GetPen(&penPt);
+        SetRect(&gScifiCursorRect, penPt.h, lineY - 8, penPt.h + 6, lineY + 1);
+        InvertRect(&gScifiCursorRect);
+    } else if (gScifiAwaitingReply) {
+        if (gScifiLineCount > 0) {
+            MoveTo(termMarginLeft, lineY);
+            DrawCString(gScifiLines[gScifiLineCount - 1]);
+        }
+        SetRect(&gScifiCursorRect, termMarginLeft, lineY - 8, termMarginLeft + 6, lineY + 1);
+        if (gScifiCursorVisible) {
             InvertRect(&gScifiCursorRect);
+        }
+    } else {
+        short p;
+        for (p = 0; p < promptLayout.lineCount; p++) {
+            MoveTo(termMarginLeft, lineY);
+            DrawCString(promptLayout.lines[p]);
+
+            if (p == promptLayout.cursorLine) {
+                short curX = termMarginLeft + promptLayout.cursorCol * 6;
+                SetRect(&gScifiCursorRect, curX, lineY - 8, curX + 6, lineY + 1);
+                if (gScifiCursorVisible) {
+                    InvertRect(&gScifiCursorRect);
+                }
+            }
+            lineY += lineHeight;
         }
     }
 
@@ -4920,8 +5029,8 @@ static void ScifiIdle(void)
 
 static void ScifiSendPrompt(const char *promptText)
 {
-    char encPrompt[512];
-    char url[768];
+    char encPrompt[1024];
+    char url[1280];
 
     if (!promptText || !*promptText || !gNetBuf || !gServerConnected) return;
 
@@ -5004,6 +5113,81 @@ static void HandleScifiKeyPress(char key, short keyCode, short modifiers)
         return;
     }
 
+    /* Arrow Keys Navigation */
+    /* Left Arrow (ASCII 28 / 0x1C, keyCode 0x7B) */
+    if (key == 0x1C || keyCode == 0x7B) {
+        if (modifiers & cmdKey) {
+            gScifiCursorPos = 0; /* Cmd+Left = Home */
+        } else if (gScifiCursorPos > 0) {
+            gScifiCursorPos--;
+        }
+        gScifiCursorVisible = true;
+        gScifiLastBlinkTick = TickCount();
+        RenderScifiWindow();
+        return;
+    }
+
+    /* Right Arrow (ASCII 29 / 0x1D, keyCode 0x7C) */
+    if (key == 0x1D || keyCode == 0x7C) {
+        short curLen = (short)strlen(gScifiInputBuf);
+        if (modifiers & cmdKey) {
+            gScifiCursorPos = curLen; /* Cmd+Right = End */
+        } else if (gScifiCursorPos < curLen) {
+            gScifiCursorPos++;
+        }
+        gScifiCursorVisible = true;
+        gScifiLastBlinkTick = TickCount();
+        RenderScifiWindow();
+        return;
+    }
+
+    /* Up Arrow (ASCII 30 / 0x1E, keyCode 0x7E) */
+    if (key == 0x1E || keyCode == 0x7E) {
+        short maxCols = GetScifiMaxCols();
+        if (gScifiCursorPos >= maxCols) {
+            gScifiCursorPos -= maxCols;
+        } else {
+            gScifiCursorPos = 0;
+        }
+        gScifiCursorVisible = true;
+        gScifiLastBlinkTick = TickCount();
+        RenderScifiWindow();
+        return;
+    }
+
+    /* Down Arrow (ASCII 31 / 0x1F, keyCode 0x7D) */
+    if (key == 0x1F || keyCode == 0x7D) {
+        short maxCols = GetScifiMaxCols();
+        short curLen = (short)strlen(gScifiInputBuf);
+        if (gScifiCursorPos + maxCols <= curLen) {
+            gScifiCursorPos += maxCols;
+        } else {
+            gScifiCursorPos = curLen;
+        }
+        gScifiCursorVisible = true;
+        gScifiLastBlinkTick = TickCount();
+        RenderScifiWindow();
+        return;
+    }
+
+    /* Home Key (ASCII 1, keyCode 0x73) */
+    if (key == 0x01 || keyCode == 0x73) {
+        gScifiCursorPos = 0;
+        gScifiCursorVisible = true;
+        gScifiLastBlinkTick = TickCount();
+        RenderScifiWindow();
+        return;
+    }
+
+    /* End Key (ASCII 4, keyCode 0x77) */
+    if (key == 0x04 || keyCode == 0x77) {
+        gScifiCursorPos = (short)strlen(gScifiInputBuf);
+        gScifiCursorVisible = true;
+        gScifiLastBlinkTick = TickCount();
+        RenderScifiWindow();
+        return;
+    }
+
     /* Return / Enter */
     if (key == '\r' || key == '\n' || key == 0x03) {
         short curLen = (short)strlen(gScifiInputBuf);
@@ -5012,28 +5196,33 @@ static void HandleScifiKeyPress(char key, short keyCode, short modifiers)
             return;
         }
         if (curLen > 0) {
-            char userPrompt[280];
+            char userPrompt[SCIFI_INPUT_BUF_MAX];
             SafeCopyString(userPrompt, gScifiInputBuf, sizeof(userPrompt));
             ScifiAppendText("> ");
             ScifiAppendText(userPrompt);
             ScifiAppendText("\n\n");
             gScifiInputBuf[0] = '\0';
             gScifiInputLen = 0;
+            gScifiCursorPos = 0;
             RenderScifiWindow();
             ScifiSendPrompt(userPrompt);
         } else {
-            ScifiAppendText("> \n");
+            ScifiAppendText("> \n\n");
             RenderScifiWindow();
         }
         return;
     }
 
-    /* Backspace / Delete */
-    if (key == 0x08 || (unsigned char)key == 0x7F || keyCode == 0x33) {
+    /* Backspace (Delete backwards from gScifiCursorPos) */
+    if (key == 0x08 || keyCode == 0x33) {
         short curLen = (short)strlen(gScifiInputBuf);
-        if (curLen > 0) {
-            gScifiInputBuf[curLen - 1] = '\0';
-            gScifiInputLen = curLen - 1;
+        if (gScifiCursorPos > 0 && curLen > 0) {
+            short i;
+            for (i = gScifiCursorPos - 1; i < curLen; i++) {
+                gScifiInputBuf[i] = gScifiInputBuf[i + 1];
+            }
+            gScifiCursorPos--;
+            gScifiInputLen = (short)strlen(gScifiInputBuf);
             gScifiCursorVisible = true;
             gScifiLastBlinkTick = TickCount();
             RenderScifiWindow();
@@ -5041,18 +5230,39 @@ static void HandleScifiKeyPress(char key, short keyCode, short modifiers)
         return;
     }
 
-    /* Printable ASCII character */
-    if ((unsigned char)key >= 32 && (unsigned char)key < 127) {
-        short maxCols = GetScifiMaxCols();
+    /* Forward Delete (0x7F, keyCode 0x75) */
+    if ((unsigned char)key == 0x7F || keyCode == 0x75) {
         short curLen = (short)strlen(gScifiInputBuf);
-        if (curLen < (short)(sizeof(gScifiInputBuf) - 2) && curLen + 4 < maxCols) {
-            gScifiInputBuf[curLen] = key;
-            gScifiInputBuf[curLen + 1] = '\0';
+        if (gScifiCursorPos < curLen && curLen > 0) {
+            short i;
+            for (i = gScifiCursorPos; i < curLen; i++) {
+                gScifiInputBuf[i] = gScifiInputBuf[i + 1];
+            }
+            gScifiInputLen = (short)strlen(gScifiInputBuf);
+            gScifiCursorVisible = true;
+            gScifiLastBlinkTick = TickCount();
+            RenderScifiWindow();
+        }
+        return;
+    }
+
+    /* Printable ASCII character (Insert at gScifiCursorPos) */
+    if ((unsigned char)key >= 32 && (unsigned char)key < 127) {
+        short curLen = (short)strlen(gScifiInputBuf);
+        if (curLen < (short)(sizeof(gScifiInputBuf) - 4)) {
+            short i;
+            if (gScifiCursorPos > curLen) gScifiCursorPos = curLen;
+            for (i = curLen; i >= gScifiCursorPos; i--) {
+                gScifiInputBuf[i + 1] = gScifiInputBuf[i];
+            }
+            gScifiInputBuf[gScifiCursorPos] = key;
+            gScifiCursorPos++;
             gScifiInputLen = curLen + 1;
             gScifiCursorVisible = true;
             gScifiLastBlinkTick = TickCount();
             RenderScifiWindow();
         }
+        return;
     }
 }
 
@@ -5103,6 +5313,7 @@ static void EnterScifiMode(void)
     gScifiCursorVisible = true;
     gScifiInputBuf[0]   = '\0';
     gScifiInputLen      = 0;
+    gScifiCursorPos     = 0;
     gScifiLineCount     = 0;
     gScifiScroll        = 0;
     gScifiTypewriterPos = 0;
@@ -5182,6 +5393,9 @@ static void ExitScifiMode(void)
 {
     if (!gScifiMode) return;
     gScifiMode = false;
+    gScifiInputBuf[0] = '\0';
+    gScifiInputLen = 0;
+    gScifiCursorPos = 0;
     if (gScifiWindow) {
         DisposeWindow(gScifiWindow);
         gScifiWindow = NULL;
