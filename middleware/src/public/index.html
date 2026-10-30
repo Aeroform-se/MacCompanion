@@ -9,11 +9,18 @@
   <link rel="shortcut icon" href="/favicon.ico">
   <link rel="apple-touch-icon" href="/img/MacCompanion-Logo.png">
   <style>
+    @font-face {
+      font-family: 'GeistPixel';
+      src: url('/fonts/GeistPixel-Regular.woff2') format('woff2'),
+           url('/fonts/GeistPixel-Regular.woff') format('woff');
+      font-weight: normal;
+      font-style: normal;
+      font-display: swap;
+    }
+
     * {
       box-sizing: border-box;
       image-rendering: pixelated;
-      -webkit-font-smoothing: none;
-      -moz-osx-font-smoothing: grayscale;
     }
 
     body {
@@ -22,218 +29,450 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      background-color: #888;
-      background-image:
-        linear-gradient(45deg, #000 25%, transparent 25%),
-        linear-gradient(-45deg, #000 25%, transparent 25%),
-        linear-gradient(45deg, transparent 75%, #000 75%),
-        linear-gradient(-45deg, transparent 75%, #000 75%);
-      background-size: 4px 4px;
-      background-position: 0 0, 0 2px, 2px -2px, -2px 0;
-      font-family: "Chicago", "Geneva", "Monaco", "Courier New", monospace;
-      color: #000;
-      padding: 40px 20px;
+      background-color: #ffffff;
+      background-image: url('/img/bg-pattern-sm.png');
+      background-repeat: repeat;
+      font-family: 'GeistPixel', "Chicago", "Geneva", "Monaco", monospace;
+      font-size: 15px;
+      line-height: 1.4;
+      color: #000000;
+      padding: 36px 16px 56px 16px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
     }
 
-    /* Platform Hero Header (Outside the service cards) */
+    a {
+      color: #000;
+    }
+
+    /* Pixelated Stepped Corner Clips */
+    .pixel-card-clip {
+      clip-path: polygon(
+        0 16px, 3px 16px, 3px 10px, 6px 10px, 6px 6px, 10px 6px, 10px 3px, 16px 3px, 16px 0,
+        calc(100% - 16px) 0, calc(100% - 16px) 3px, calc(100% - 10px) 3px, calc(100% - 10px) 6px, calc(100% - 6px) 6px, calc(100% - 6px) 10px, calc(100% - 3px) 10px, calc(100% - 3px) 16px, 100% 16px,
+        100% calc(100% - 16px), calc(100% - 3px) calc(100% - 16px), calc(100% - 3px) calc(100% - 10px), calc(100% - 6px) calc(100% - 10px), calc(100% - 6px) calc(100% - 6px), calc(100% - 10px) calc(100% - 6px), calc(100% - 10px) calc(100% - 3px), calc(100% - 16px) calc(100% - 3px), calc(100% - 16px) 100%,
+        16px 100%, 16px calc(100% - 3px), 10px calc(100% - 3px), 10px calc(100% - 6px), 6px calc(100% - 6px), 6px calc(100% - 10px), 3px calc(100% - 10px), 3px calc(100% - 16px), 0 calc(100% - 16px)
+      );
+    }
+
+    .pixel-btn-clip {
+      clip-path: polygon(
+        0 8px, 2px 8px, 2px 5px, 5px 5px, 5px 2px, 8px 2px, 8px 0,
+        calc(100% - 8px) 0, calc(100% - 8px) 2px, calc(100% - 5px) 2px, calc(100% - 5px) 5px, calc(100% - 2px) 5px, calc(100% - 2px) 8px, 100% 8px,
+        100% calc(100% - 8px), calc(100% - 2px) calc(100% - 8px), calc(100% - 2px) calc(100% - 5px), calc(100% - 5px) calc(100% - 5px), calc(100% - 5px) calc(100% - 2px), calc(100% - 8px) calc(100% - 2px), calc(100% - 8px) 100%,
+        8px 100%, 8px calc(100% - 2px), 5px calc(100% - 2px), 5px calc(100% - 5px), 2px calc(100% - 5px), 2px calc(100% - 8px), 0 calc(100% - 8px)
+      );
+    }
+
+    .pixel-pill-clip {
+      clip-path: polygon(
+        0 6px, 2px 6px, 2px 3px, 3px 3px, 3px 2px, 6px 2px, 6px 0,
+        calc(100% - 6px) 0, calc(100% - 6px) 2px, calc(100% - 3px) 2px, calc(100% - 3px) 3px, calc(100% - 2px) 3px, calc(100% - 2px) 6px, 100% 6px,
+        100% calc(100% - 6px), calc(100% - 2px) calc(100% - 6px), calc(100% - 2px) calc(100% - 3px), calc(100% - 3px) calc(100% - 3px), calc(100% - 3px) calc(100% - 2px), calc(100% - 6px) calc(100% - 2px), calc(100% - 6px) 100%,
+        6px 100%, 6px calc(100% - 2px), 3px calc(100% - 2px), 3px calc(100% - 3px), 2px calc(100% - 3px), 2px calc(100% - 6px), 0 calc(100% - 6px)
+      );
+    }
+
+    /* Top Platform Header */
     .platform-header {
       display: flex;
       flex-direction: column;
       align-items: center;
       text-align: center;
-      margin-bottom: 32px;
-      gap: 10px;
+      margin-bottom: 24px;
+      gap: 14px;
     }
 
-    .mac-icon {
+    .logo-link {
+      display: inline-block;
+      text-decoration: none;
+    }
+
+    .logo-img {
       width: 184px;
-      height: 173px;
+      height: 130px;
       display: block;
       image-rendering: pixelated;
-      filter: drop-shadow(3px 3px 0px #000);
       object-fit: contain;
     }
 
-    .platform-title-pill {
-      background: #fff;
-      border: 2px solid #000;
-      box-shadow: 3px 3px 0px #000;
-      padding: 6px 18px;
-      margin-top: 4px;
+    .server-pill-wrap {
+      filter: drop-shadow(0px 2px 0 #000);
+      display: inline-flex;
     }
 
-    .platform-title {
-      font-size: 22px;
+    .server-pill {
+      background: #ffffff;
+      border: none;
+      padding: 6px 22px;
+      font-size: 14px;
       font-weight: bold;
-      letter-spacing: 0.5px;
-      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
     }
 
-    .platform-meta {
-      background: #fff;
-      border: 1px solid #000;
-      box-shadow: 2px 2px 0px #000;
-      font-size: 11px;
-      padding: 4px 12px;
-      display: flex;
-      gap: 14px;
-      align-items: center;
+    .status-icon {
+      width: 8px;
+      height: 8px;
+      display: inline-block;
+      image-rendering: pixelated;
+      vertical-align: middle;
+      flex-shrink: 0;
     }
 
     .error-code {
-      font-family: "Monaco", "Courier New", monospace;
-      font-size: 12px;
-      font-weight: bold;
-      letter-spacing: 1.5px;
+      font-family: "Monaco", monospace;
+      font-size: 11px;
       background: #000;
       color: #fff;
-      padding: 3px 10px;
+      padding: 2px 8px;
+      border-radius: 4px;
     }
 
-    /* Dashboard Grid for Service Cards */
+    /* Main Dashboard Grid */
     .services-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(380px, 480px));
-      gap: 24px;
+      grid-template-columns: repeat(auto-fit, minmax(360px, 420px));
+      gap: 28px;
       width: 100%;
-      max-width: 1000px;
+      max-width: 900px;
       justify-content: center;
     }
 
-    /* System 7 Window / Card Style for Each Integration */
+    /* Card Wrapper & Container: NO solid border around card, single drop shadow */
+    .service-card-wrap {
+      filter: drop-shadow(0px 2px 0 #000);
+      display: flex;
+    }
+
     .service-card {
-      background: #fff;
-      border: 2px solid #000;
-      box-shadow: 4px 4px 0px #000;
+      background: #ffffff;
+      border: none;
+      padding: 26px 24px 22px 24px;
       display: flex;
       flex-direction: column;
+      align-items: center;
+      width: 100%;
+      min-height: 410px;
     }
 
-    /* Classic Macintosh Pinstripe Title Bar */
-    .card-titlebar {
-      height: 26px;
-      border-bottom: 2px solid #000;
+    .card-icon-wrap {
+      height: 90px;
       display: flex;
       align-items: center;
       justify-content: center;
-      position: relative;
-      padding: 0 10px;
-      background: repeating-linear-gradient(
-        to bottom,
-        #fff 0px,
-        #fff 2px,
-        #000 2px,
-        #000 3px
-      );
+      margin-bottom: 12px;
     }
 
-    .card-titlebar-label {
-      background: #fff;
-      padding: 0 10px;
-      font-size: 13px;
-      font-weight: bold;
-      line-height: 1;
+    .card-icon {
+      display: block;
+      image-rendering: pixelated;
+      object-fit: contain;
     }
 
-    .status-badge {
-      position: absolute;
-      right: 8px;
-      background: #fff;
-      border: 1px solid #000;
-      font-size: 10px;
-      font-weight: bold;
-      padding: 2px 6px;
-      text-transform: uppercase;
-    }
-
-    .status-badge.ok {
-      background: #000;
-      color: #fff;
-    }
-
-    .card-body {
-      padding: 20px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-
-    .service-status-line {
-      font-size: 14px;
-      line-height: 1.5;
-      padding: 10px 12px;
-      border: 1px solid #000;
-      background: #fff;
-      text-align: center;
-      word-break: break-word;
-    }
-
-    .service-status-line.running-ok {
-      border: 2px solid #000;
-      font-weight: bold;
-      font-size: 15px;
-      padding: 16px 12px;
-    }
-
-    .config-panel {
+    .card-rows {
       width: 100%;
-      border: 1px solid #000;
-      padding: 14px;
-      text-align: left;
       display: flex;
       flex-direction: column;
-      gap: 12px;
-      background: #fafafa;
+      margin-bottom: 24px;
     }
 
-    .audio-settings-box {
+    .card-row {
       width: 100%;
-      border: 1px solid #000;
-      padding: 12px 14px;
-      background: #fafafa;
       display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .audio-settings-header {
-      display: flex;
-      justify-content: space-between;
       align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 4px;
+      border-bottom: 2px dotted #000000;
+      font-size: 14px;
+      min-height: 42px;
+    }
+
+    .row-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .row-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    /* Toggle Pill (e.g. 22Khz | 11Khz) */
+    .toggle-pill-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
+      display: inline-flex;
+    }
+
+    .toggle-pill {
+      display: inline-flex;
+      border: none;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    .toggle-pill-btn {
+      border: none;
+      background: #ffffff;
+      color: #000000;
+      font-family: inherit;
       font-size: 12px;
       font-weight: bold;
-    }
-
-    .rate-toggle-group {
-      display: flex;
-      gap: 8px;
-    }
-
-    .rate-btn {
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: bold;
       padding: 4px 10px;
-      border: 2px solid #000;
-      background: #fff;
-      color: #000;
+      cursor: pointer;
+      line-height: 1.2;
+    }
+
+    .toggle-pill-btn.active {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    /* Action Buttons (Small) */
+    .action-btn-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(2px 2px 0 #000);
+      display: inline-flex;
+    }
+
+    .action-btn-wrap:hover .action-btn-sm {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .action-btn-wrap:active {
+      transform: translate(1px, 1px);
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
+    }
+
+    .action-btn-sm {
+      border: none;
+      background: #ffffff;
+      color: #000000;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: bold;
+      padding: 4px 12px;
+      cursor: pointer;
+      text-decoration: none;
+      line-height: 1.3;
+      display: inline-block;
+    }
+
+    /* Bottom Configure Button: custom 3D isometric shadow style */
+    .configure-btn-wrap, .configure-button-wrap {
+      width: 100%;
+      max-width: 300px;
+      margin-top: auto;
+      filter: drop-shadow(0px 6px 0 #000) drop-shadow(-2px 0px 0 #000) drop-shadow(2px -1px 0 #000);
+      display: flex;
+    }
+
+    .configure-btn-wrap:hover .configure-btn,
+    .configure-button-wrap:hover .configure-btn {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .configure-btn-wrap:active,
+    .configure-button-wrap:active {
+      transform: translate(0px, 3px);
+      filter: drop-shadow(0px 3px 0 #000) drop-shadow(-2px 0px 0 #000) drop-shadow(2px -1px 0 #000);
+    }
+
+    .configure-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      width: 100%;
+      padding: 10px 16px;
+      font-family: inherit;
+      font-size: 15px;
+      font-weight: bold;
+      color: #000000;
+      background: #ffffff;
+      border: none;
+      text-decoration: none;
       cursor: pointer;
     }
 
-    .rate-btn.active {
-      background: #000;
-      color: #fff;
+    /* Subpage / Settings Views */
+    .subpage-view {
+      width: 100%;
+      max-width: 820px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
     }
 
-    .audio-helper-text {
-      font-size: 11px;
-      line-height: 1.4;
-      color: #222;
+    .subpage-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      margin-bottom: 4px;
+    }
+
+    .back-btn-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(2px 2px 0 #000);
+      display: inline-flex;
+    }
+
+    .back-btn-wrap:hover .back-btn {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .back-btn-wrap:active {
+      transform: translate(1px, 1px);
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
+    }
+
+    .back-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: none;
+      background: #ffffff;
+      color: #000000;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: bold;
+      padding: 6px 16px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .subpage-title {
+      font-size: 20px;
+      font-weight: bold;
       margin: 0;
     }
 
+    /* Settings Card: single drop shadow */
+    .settings-card-wrap {
+      filter: drop-shadow(0px 2px 0 #000);
+      display: flex;
+    }
+
+    .settings-card {
+      background: #ffffff;
+      border: none;
+      padding: 28px 30px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      width: 100%;
+    }
+
+    .section-box {
+      border: 1px solid #000000;
+      padding: 16px 18px;
+      background: #fafafa;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .section-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    /* Sound Profile Selection Cards */
+    .sound-profiles-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 4px;
+    }
+
+    .sound-profile-card-wrap {
+      filter: drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000) drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000) drop-shadow(2px 2px 0 rgba(0, 0, 0, 0.4));
+      display: flex;
+      cursor: pointer;
+    }
+
+    .sound-profile-card-wrap.active {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(3px 3px 0 #000);
+    }
+
+    .sound-profile-card {
+      border: none;
+      background: #ffffff;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      width: 100%;
+    }
+
+    .sound-profile-card-wrap:hover .sound-profile-card {
+      background: #f7f7f7;
+    }
+
+    .profile-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .profile-card-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .profile-badge-wrap {
+      filter: drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000) drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000);
+      display: inline-flex;
+    }
+
+    .profile-badge {
+      font-size: 11px;
+      font-weight: bold;
+      padding: 3px 10px;
+      border: none;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .profile-badge.badge-active {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .profile-badge.badge-select {
+      background: #ffffff;
+      color: #000000;
+    }
+
+    .profile-card-desc {
+      font-size: 13px;
+      line-height: 1.45;
+      color: #222222;
+      margin: 0;
+      padding-left: 24px;
+    }
+
     .instructions-box {
-      font-size: 12px;
+      font-size: 13px;
       line-height: 1.5;
       border-bottom: 1px dotted #000;
       padding-bottom: 10px;
@@ -245,13 +484,13 @@
     }
 
     .instructions-box li {
-      margin-bottom: 6px;
+      margin-bottom: 4px;
     }
 
     .code-pill {
       display: inline-block;
-      font-family: "Monaco", "Courier New", monospace;
-      font-size: 11px;
+      font-family: "Monaco", monospace;
+      font-size: 12px;
       background: #eee;
       border: 1px solid #000;
       padding: 2px 6px;
@@ -263,17 +502,17 @@
     .field-group {
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 6px;
     }
 
     .field-group label {
-      font-size: 12px;
+      font-size: 13px;
       font-weight: bold;
     }
 
-    .field-group input {
-      font-family: "Monaco", "Courier New", monospace;
-      font-size: 12px;
+    .field-group input, .field-group select {
+      font-family: inherit;
+      font-size: 13px;
       padding: 6px 8px;
       border: 2px solid #000;
       background: #fff;
@@ -282,49 +521,44 @@
       width: 100%;
     }
 
-    .btn-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      justify-content: center;
-      margin-top: 2px;
+    .mac-btn-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(2px 2px 0 #000);
+      display: inline-flex;
+    }
+    .mac-btn-wrap:hover .mac-btn {
+      background: #000000;
+      color: #ffffff;
+    }
+    .mac-btn-wrap:active {
+      transform: translate(1px, 1px);
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
     }
 
     .mac-btn {
       display: inline-block;
       font-family: inherit;
-      font-size: 12px;
+      font-size: 13px;
       font-weight: bold;
       color: #000;
       background: #fff;
-      border: 2px solid #000;
-      border-radius: 6px;
-      padding: 6px 14px;
+      border: none;
+      padding: 6px 16px;
       text-decoration: none;
       cursor: pointer;
     }
 
     .mac-btn.primary {
-      box-shadow: 0 0 0 1px #fff, 0 0 0 4px #000;
+      background: #000000;
+      color: #ffffff;
     }
-
-    .mac-btn:active {
-      background: #000;
-      color: #fff;
-    }
-
-    .card-footer {
-      font-size: 11px;
-      border-top: 1px dotted #000;
-      padding-top: 10px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+    .mac-btn-wrap:hover .mac-btn.primary {
+      background: #ffffff;
+      color: #000000;
     }
 
     .subtle-btn {
       font-family: inherit;
-      font-size: 11px;
+      font-size: 12px;
       background: none;
       border: none;
       text-decoration: underline;
@@ -336,55 +570,66 @@
     .subtle-btn.danger {
       color: #b00;
     }
-
     .subtle-btn.danger:hover {
       background: #b00;
       color: #fff;
       text-decoration: none;
     }
 
-    /* Platform Footer / Support */
+    /* Status Banner: NO borders, transparent bg, flex with status icon */
+    .status-banner {
+      font-size: 14px;
+      line-height: 1.4;
+      padding: 6px 0;
+      border: none !important;
+      background: transparent;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: bold;
+    }
+
+    /* Platform Footer Pill */
     .platform-footer {
       margin-top: 36px;
-      margin-bottom: 24px;
       display: flex;
       justify-content: center;
       width: 100%;
-      max-width: 1000px;
+    }
+
+    .footer-pill-wrap {
+      filter: drop-shadow(0px 2px 0 #000);
+      display: inline-flex;
     }
 
     .footer-pill {
-      background: #fff;
-      border: 2px solid #000;
-      box-shadow: 3px 3px 0px #000;
-      padding: 10px 22px;
-      font-size: 12px;
+      background: #ffffff;
+      border: none;
+      padding: 8px 22px;
+      font-size: 14px;
       font-weight: bold;
-      text-align: center;
       display: inline-flex;
       align-items: center;
-      justify-content: center;
       gap: 10px;
-      line-height: 1.4;
+      text-align: center;
     }
 
     .footer-pill a {
-      color: #000;
+      color: #000000;
       text-decoration: underline;
-      font-weight: bold;
     }
 
     .footer-pill a:hover {
-      background: #000;
-      color: #fff;
+      background: #000000;
+      color: #ffffff;
       text-decoration: none;
     }
 
-    .bitmap-heart {
-      image-rendering: pixelated;
+    .coffee-icon {
+      width: 22px;
+      height: 17px;
       display: inline-block;
-      vertical-align: middle;
-      filter: drop-shadow(1px 1px 0px rgba(0, 0, 0, 0.35));
+      image-rendering: pixelated;
     }
 
     .hidden {
@@ -393,44 +638,179 @@
   </style>
 </head>
 <body>
-  <!-- MacCompanion Platform Header (Outside Service Cards) -->
+  <!-- Platform Header -->
   <header class="platform-header">
-    <img
-      id="mac-icon"
-      class="mac-icon"
-      src="/img/MacCompanion-Logo-server.png"
-      width="184"
-      height="173"
-      alt="MacCompanion"
-    />
-    <div id="error-code-badge" class="error-code hidden">NET_OFFLINE</div>
-    <div class="platform-meta">
-      <span id="server-status-text">Server Online</span>
-      <span>•</span>
-      <span id="lan-ip">IP: ...</span>
-      <span>•</span>
-      <span id="udp-port">UDP: 6801</span>
-      <span>•</span>
-      <span id="server-version">v0.4.8</span>
+    <a href="#" class="logo-link">
+      <img
+        id="mac-icon"
+        class="logo-img"
+        src="/img/maccompanionLogo.png"
+        width="184"
+        height="130"
+        alt="MacCompanion"
+      />
+    </a>
+    <div class="server-pill-wrap">
+      <div class="server-pill pixel-pill-clip" id="server-status-pill">
+        <img src="/img/status-ok.png" id="server-status-icon" class="status-icon" width="8" height="8" alt="Server Online" />
+        <span id="server-status-text">Server Online</span>
+        <span>IP: <span id="lan-ip">...</span></span>
+        <span id="server-version">v0.4.13</span>
+        <span id="error-code-badge" class="error-code hidden">NET_OFFLINE</span>
+      </div>
     </div>
   </header>
 
-  <!-- Modular Service Integrations Dashboard Grid -->
-  <main class="services-grid">
-    <!-- Service Card 1: Spotify -->
-    <section class="service-card" id="spotify-card">
-      <div class="card-titlebar">
-        <span class="card-titlebar-label">Spotify Connect</span>
-        <span class="status-badge" id="spotify-badge">Checking</span>
-      </div>
+  <!-- VIEW 1: Main Status Dashboard -->
+  <main id="view-dashboard" class="services-grid">
+    <!-- Card 1: SpotiMac -->
+    <div class="service-card-wrap">
+      <section class="service-card pixel-card-clip" id="spotify-card">
+        <div class="card-icon-wrap">
+          <img
+            src="/img/SpotiMac-serviceIcon.png"
+            class="card-icon"
+            width="98"
+            height="88"
+            alt="SpotiMac"
+          />
+        </div>
 
-      <div class="card-body">
-        <div class="service-status-line" id="spotify-status-box">
-          Checking Spotify integration status...
+        <div class="card-rows">
+          <!-- Row 1: Service running -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-spotimac-icon" class="status-icon" width="8" height="8" alt="Service Status" />
+              <span id="dash-spotimac-status">Service running</span>
+            </div>
+          </div>
+
+          <!-- Row 2: Audio quality toggle -->
+          <div class="card-row">
+            <div class="row-left">
+              <span>Audio quality</span>
+            </div>
+            <div class="row-right">
+              <div class="toggle-pill-wrap">
+                <div class="toggle-pill pixel-pill-clip">
+                  <button type="button" id="dash-rate-22k-btn" class="toggle-pill-btn active" onclick="setAudioSampleRate('22k')">22Khz</button>
+                  <button type="button" id="dash-rate-11k-btn" class="toggle-pill-btn" onclick="setAudioSampleRate('11k')">11Khz</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Row 3: Account -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-spotimac-acc-icon" class="status-icon" width="8" height="8" alt="Account Status" />
+              <span id="dash-spotimac-acc">Account: Checking...</span>
+            </div>
+            <div class="row-right">
+              <div class="action-btn-wrap">
+                <button type="button" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-acc-btn" onclick="handleDashAccountAction()">Disconnect</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Row 4: Speaker pairing -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-spotimac-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
+              <span id="dash-spotimac-speaker">Speaker pairing: Mac 68k</span>
+            </div>
+            <div class="row-right">
+              <div class="action-btn-wrap">
+                <a href="/api/spotify/audio-login" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-speaker-btn">Re-Pair</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="configure-btn-wrap">
+          <a href="#spotimac" class="configure-btn pixel-btn-clip">
+            <span>Configure SpotiMac</span>
+            <span>&gt;</span>
+          </a>
+        </div>
+      </section>
+    </div>
+
+    <!-- Card 2: MacAI -->
+    <div class="service-card-wrap">
+      <section class="service-card pixel-card-clip" id="macai-card">
+        <div class="card-icon-wrap">
+          <img
+            src="/img/MacAi-serviceIcon.png"
+            class="card-icon"
+            width="62"
+            height="90"
+            alt="MacAI"
+          />
+        </div>
+
+        <div class="card-rows">
+          <!-- Row 1: Service running -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-macai-icon" class="status-icon" width="8" height="8" alt="MacAI Status" />
+              <span id="dash-macai-status">Service running</span>
+            </div>
+          </div>
+
+          <!-- Row 2: Gemini -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-gemini-icon" class="status-icon" width="8" height="8" alt="Gemini Status" />
+              <span id="dash-gemini-status">Gemini: Configured</span>
+            </div>
+          </div>
+
+          <!-- Row 3: ChatGPT -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-off.png" id="dash-chatgpt-icon" class="status-icon" width="8" height="8" alt="ChatGPT Status" />
+              <span id="dash-chatgpt-status">ChatGPT: No Api key saved</span>
+            </div>
+          </div>
+
+          <!-- Row 4: Claude -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-off.png" id="dash-claude-icon" class="status-icon" width="8" height="8" alt="Claude Status" />
+              <span id="dash-claude-status">Claude: No Api key saved</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="configure-btn-wrap">
+          <a href="#macai" class="configure-btn pixel-btn-clip">
+            <span>Configure MacAI</span>
+            <span>&gt;</span>
+          </a>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- VIEW 2: SpotiMac Subpage -->
+  <main id="view-spotimac" class="subpage-view hidden">
+    <div class="subpage-header">
+      <div class="back-btn-wrap">
+        <a href="#" class="back-btn pixel-pill-clip">&larr; Back to Overview</a>
+      </div>
+      <h2 class="subpage-title">SpotiMac Settings</h2>
+    </div>
+
+    <div class="settings-card-wrap">
+      <section class="settings-card pixel-card-clip">
+        <div class="status-banner" id="spotify-status-box">
+          <img src="/img/status-ok.png" id="spotify-status-icon" class="status-icon" width="8" height="8" alt="Status" />
+          <span id="spotify-status-text">Checking Spotify integration status...</span>
         </div>
 
         <!-- Client ID Setup Form -->
-        <form id="config-form" class="config-panel hidden" onsubmit="saveConfig(event)">
+        <form id="config-form" class="section-box hidden" onsubmit="saveConfig(event)">
           <div class="instructions-box">
             <strong>Spotify App Setup Instructions:</strong>
             <ol>
@@ -453,187 +833,281 @@
             />
           </div>
 
-          <div class="btn-row">
-            <button type="submit" class="mac-btn primary">Save Client ID</button>
-            <button type="button" id="cancel-config-btn" class="mac-btn hidden" onclick="toggleConfigEditor(false)">Cancel</button>
+          <div style="display:flex; gap:12px; justify-content:center; margin-top:4px;">
+            <div class="mac-btn-wrap">
+              <button type="submit" class="mac-btn primary pixel-pill-clip">Save Client ID</button>
+            </div>
+            <div class="mac-btn-wrap">
+              <button type="button" id="cancel-config-btn" class="mac-btn hidden pixel-pill-clip" onclick="toggleConfigEditor(false)">Cancel</button>
+            </div>
           </div>
         </form>
 
         <!-- Action Buttons for Login / Reconfigure / Retry -->
-        <div id="action-area" class="btn-row hidden">
-          <a href="/api/spotify/login" class="mac-btn primary" id="login-btn">Connect Spotify</a>
-          <button type="button" class="mac-btn" id="edit-config-btn" onclick="toggleConfigEditor(true)">Change Client ID</button>
-          <button type="button" class="mac-btn hidden" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
-        </div>
-
-        <!-- 68k Native Audio Streaming Sample Rate & Sound Profile Toggle (shown when READY) -->
-        <div id="audio-settings-panel" class="audio-settings-box hidden">
-          <div class="audio-settings-header">
-            <span>68k Local Audio Stream:</span>
-            <div class="rate-toggle-group">
-              <button type="button" id="rate-22k-btn" class="rate-btn active" onclick="setAudioSampleRate('22k')">22 kHz</button>
-              <button type="button" id="rate-11k-btn" class="rate-btn" onclick="setAudioSampleRate('11k')">11 kHz</button>
+        <div id="action-area" class="section-box hidden" style="align-items:center;">
+          <div style="display:flex; flex-wrap:wrap; gap:12px; justify-content:center;">
+            <div class="mac-btn-wrap">
+              <a href="/api/spotify/login" class="mac-btn primary pixel-pill-clip" id="login-btn">Connect Spotify</a>
+            </div>
+            <div class="mac-btn-wrap">
+              <button type="button" class="mac-btn pixel-pill-clip" id="edit-config-btn" onclick="toggleConfigEditor(true)">Change Client ID</button>
+            </div>
+            <div class="mac-btn-wrap">
+              <button type="button" class="mac-btn hidden pixel-pill-clip" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
             </div>
           </div>
-          <p class="audio-helper-text">
+        </div>
+
+        <!-- 68k Native Audio Streaming Settings -->
+        <div id="audio-settings-panel" class="section-box hidden">
+          <div class="section-title-row">
+            <span>68k Local Audio Stream Rate:</span>
+            <div class="toggle-pill-wrap">
+              <div class="toggle-pill pixel-pill-clip">
+                <button type="button" id="rate-22k-btn" class="toggle-pill-btn active" onclick="setAudioSampleRate('22k')">22 kHz</button>
+                <button type="button" id="rate-11k-btn" class="toggle-pill-btn" onclick="setAudioSampleRate('11k')">11 kHz</button>
+              </div>
+            </div>
+          </div>
+          <p style="margin:0; font-size:13px; line-height:1.45;">
             <strong>11 kHz</strong> suits Macintosh Plus / SE (68000) systems and slower network bridges better. <strong>22 kHz</strong> is recommended for SE/30 and 68030+ Macs.
           </p>
 
-          <!-- 3 Curated Sound Profiles -->
-          <div style="margin-top:6px; padding-top:8px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:6px;">
-            <div class="audio-settings-header">
+          <!-- Curated Sound Profiles: 3 Separate Option Cards with individual descriptions -->
+          <div style="margin-top:10px; padding-top:12px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:8px;">
+            <div class="section-title-row">
               <span>Sound Profile (Live Hot-Swap):</span>
-              <a href="/test.html#dsp-lab" class="subtle-btn" style="font-weight:normal;">Granular Lab →</a>
+              <a href="/test.html#dsp-lab" class="subtle-btn">Granular Lab &rarr;</a>
             </div>
-            <div class="rate-toggle-group" style="flex-wrap:wrap;">
-              <button type="button" id="prof-warm-btn" class="rate-btn active" style="flex:1;" onclick="setAudioProfile('warm')">Low Noise (Warm)</button>
-              <button type="button" id="prof-hifi-btn" class="rate-btn" style="flex:1;" onclick="setAudioProfile('hifi')">HiFi (Shibata)</button>
-              <button type="button" id="prof-compact-btn" class="rate-btn" style="flex:1;" onclick="setAudioProfile('compact')">Compact Mac Speaker</button>
+
+            <div class="sound-profiles-grid">
+              <!-- Profile 1: Low Noise (Warm) -->
+              <div class="sound-profile-card-wrap active" id="prof-wrap-warm" onclick="setAudioProfile('warm')">
+                <div class="sound-profile-card pixel-pill-clip" id="prof-card-warm">
+                  <div class="profile-card-header">
+                    <div class="profile-card-title">
+                      <img src="/img/status-ok.png" id="prof-icon-warm" class="status-icon" width="8" height="8" alt="Active" />
+                      <span>Low Noise (Warm)</span>
+                    </div>
+                    <div class="profile-badge-wrap">
+                      <span class="profile-badge badge-active pixel-pill-clip" id="prof-badge-warm">Active</span>
+                    </div>
+                  </div>
+                  <p class="profile-card-desc">
+                    Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.
+                  </p>
+                </div>
+              </div>
+
+              <!-- Profile 2: HiFi (Shibata) -->
+              <div class="sound-profile-card-wrap" id="prof-wrap-hifi" onclick="setAudioProfile('hifi')">
+                <div class="sound-profile-card pixel-pill-clip" id="prof-card-hifi">
+                  <div class="profile-card-header">
+                    <div class="profile-card-title">
+                      <img src="/img/status-off.png" id="prof-icon-hifi" class="status-icon" width="8" height="8" alt="Inactive" />
+                      <span>HiFi (Shibata)</span>
+                    </div>
+                    <div class="profile-badge-wrap">
+                      <span class="profile-badge badge-select pixel-pill-clip" id="prof-badge-hifi">Select</span>
+                    </div>
+                  </div>
+                  <p class="profile-card-desc">
+                    Maximum dynamic range and natural transients with Shibata noise-shaped dither. Best at 100% client volume.
+                  </p>
+                </div>
+              </div>
+
+              <!-- Profile 3: Compact Mac Speaker -->
+              <div class="sound-profile-card-wrap" id="prof-wrap-compact" onclick="setAudioProfile('compact')">
+                <div class="sound-profile-card pixel-pill-clip" id="prof-card-compact">
+                  <div class="profile-card-header">
+                    <div class="profile-card-title">
+                      <img src="/img/status-off.png" id="prof-icon-compact" class="status-icon" width="8" height="8" alt="Inactive" />
+                      <span>Compact Mac Speaker</span>
+                    </div>
+                    <div class="profile-badge-wrap">
+                      <span class="profile-badge badge-select pixel-pill-clip" id="prof-badge-compact">Select</span>
+                    </div>
+                  </div>
+                  <p class="profile-card-desc">
+                    Tailored for the internal speaker in a Plus/SE/Classic: rolls off sub-140 Hz cone rumble, boosts 2.2 kHz midrange presence, and levels dynamics.
+                  </p>
+                </div>
+              </div>
             </div>
-            <p id="profile-desc-text" class="audio-helper-text">
-              Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.
-            </p>
           </div>
 
-          <div id="speaker-pair-row" style="margin-top:4px; padding-top:6px; border-top:1px dotted #000; display:flex; align-items:center; justify-content:space-between; gap:8px;">
-            <span id="speaker-status-label" style="font-size:11px;">Speaker: Checking...</span>
-            <a href="/api/spotify/audio-login" id="speaker-pair-btn" class="mac-btn primary" style="font-size:11px; padding:4px 10px;">Activate "Macintosh 68k" Speaker</a>
+          <!-- Speaker Pairing -->
+          <div style="margin-top:10px; padding-top:12px; border-top:1px dotted #000; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <img src="/img/status-off.png" id="sub-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
+              <span id="speaker-status-label" style="font-size:13px; font-weight:bold;">Speaker: Checking...</span>
+            </div>
+            <div class="action-btn-wrap">
+              <a href="/api/spotify/audio-login" id="speaker-pair-btn" class="action-btn-sm pixel-pill-clip">Activate "Macintosh 68k" Speaker</a>
+            </div>
           </div>
         </div>
 
-        <!-- Connected Account Footer (only shown when READY) -->
-        <div id="connected-footer" class="card-footer hidden">
-          <span id="spotify-user-label">Connected</span>
-          <div>
-            <button type="button" class="subtle-btn" onclick="disconnectSpotify()">Disconnect</button>
-          </div>
+        <!-- Account Footer -->
+        <div id="connected-footer" class="section-box hidden" style="flex-direction:row; justify-content:space-between; align-items:center;">
+          <span id="spotify-user-label" style="font-weight:bold;">Connected</span>
+          <button type="button" class="subtle-btn danger" onclick="disconnectSpotify()">Disconnect Account</button>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
+  </main>
 
-    <!-- Service Card 2: MacAI (Gemini, ChatGPT, Claude) -->
-    <section class="service-card" id="macai-card">
-      <div class="card-titlebar">
-        <span class="card-titlebar-label">MacAI Chat</span>
-        <span class="status-badge" id="macai-badge">Checking</span>
+  <!-- VIEW 3: MacAI Subpage -->
+  <main id="view-macai" class="subpage-view hidden">
+    <div class="subpage-header">
+      <div class="back-btn-wrap">
+        <a href="#" class="back-btn pixel-pill-clip">&larr; Back to Overview</a>
       </div>
+      <h2 class="subpage-title">MacAI Settings</h2>
+    </div>
 
-      <div class="card-body">
-        <div class="service-status-line" id="macai-status-box">
-          Checking MacAI providers...
+    <div class="settings-card-wrap">
+      <section class="settings-card pixel-card-clip">
+        <div class="status-banner" id="macai-status-box">
+          <img src="/img/status-ok.png" id="macai-status-icon" class="status-icon" width="8" height="8" alt="Status" />
+          <span id="macai-status-text">Checking MacAI providers...</span>
         </div>
 
         <!-- Provider 1: Google Gemini -->
-        <div class="config-panel" style="gap:8px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <strong>1. Google Gemini</strong>
-            <span id="gemini-pill" style="font-size:11px; font-weight:bold;">Not connected</span>
+        <div class="section-box">
+          <div class="section-title-row">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <img src="/img/status-off.png" id="gemini-sub-icon" class="status-icon" width="8" height="8" alt="Gemini" />
+              <span>1. Google Gemini</span>
+            </div>
+            <span id="gemini-pill" style="font-size:12px;">Not connected</span>
           </div>
-          <div style="font-size:11px; line-height:1.4;">
-            Generate a free API key in 2 clicks at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>:
+          <div style="font-size:13px; line-height:1.4;">
+            Generate a free API key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>:
           </div>
-          <div id="gemini-form-row" style="display:flex; gap:6px;">
-            <input type="password" id="gemini-key-input" placeholder="AIzaSy... (Google AI Studio API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
-            <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('gemini')">Save</button>
+          <div style="display:flex; gap:8px;">
+            <input type="password" id="gemini-key-input" placeholder="AIzaSy... (Google AI Studio API Key)" style="flex:1; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <div class="action-btn-wrap">
+              <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveMacAIProviderKey('gemini')">Save</button>
+            </div>
           </div>
-          <div id="gemini-custom-box" style="margin-top:4px; padding-top:6px; border-top:1px dashed #bbb; font-size:11px; display:flex; flex-direction:column; gap:4px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-              <span><strong>Custom Model:</strong> (optional advanced override for MacAI)</span>
+          <div id="gemini-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
+            <div class="section-title-row">
+              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
               <button type="button" class="subtle-btn" id="gemini-fetch-btn" onclick="fetchModelsForProvider('gemini')">Fetch Available Models</button>
             </div>
-            <div style="display:flex; gap:6px; align-items:center;">
-              <select id="gemini-model-select" style="flex:1; font-size:11px; padding:3px;" onchange="onCustomModelSelect('gemini')">
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="gemini-model-select" style="flex:1; font-size:12px; padding:5px;" onchange="onCustomModelSelect('gemini')">
                 <option value="">-- Discovered models (click Fetch) --</option>
               </select>
-              <input type="text" id="gemini-custom-model-input" placeholder="e.g. gemini-3-flash-preview" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:3px 6px; border:1px solid #000;" />
-              <button type="button" class="mac-btn" style="padding:3px 8px; font-size:11px;" onclick="saveCustomModel('gemini')">Save</button>
+              <input type="text" id="gemini-custom-model-input" placeholder="e.g. gemini-2.5-flash" style="flex:1; font-family:monospace; font-size:12px; padding:5px 6px; border:2px solid #000;" />
+              <div class="action-btn-wrap">
+                <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveCustomModel('gemini')">Save</button>
+              </div>
             </div>
           </div>
           <div id="gemini-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
-            <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('gemini')">Disconnect Gemini</button>
+            <button type="button" class="subtle-btn danger" onclick="disconnectMacAIProvider('gemini')">Disconnect Gemini</button>
           </div>
         </div>
 
         <!-- Provider 2: OpenAI ChatGPT -->
-        <div class="config-panel" style="gap:8px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <strong>2. OpenAI (ChatGPT)</strong>
-            <span id="chatgpt-pill" style="font-size:11px; font-weight:bold;">Not connected</span>
+        <div class="section-box">
+          <div class="section-title-row">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <img src="/img/status-off.png" id="chatgpt-sub-icon" class="status-icon" width="8" height="8" alt="ChatGPT" />
+              <span>2. OpenAI (ChatGPT)</span>
+            </div>
+            <span id="chatgpt-pill" style="font-size:12px;">Not connected</span>
           </div>
-          <div style="font-size:11px; line-height:1.4;">
+          <div style="font-size:13px; line-height:1.4;">
             Create an API key at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI Platform</a> (also enables Whisper STT &amp; natural alloy TTS):
           </div>
-          <div style="display:flex; gap:6px;">
-            <input type="password" id="chatgpt-key-input" placeholder="sk-... (OpenAI API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
-            <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('chatgpt')">Save</button>
+          <div style="display:flex; gap:8px;">
+            <input type="password" id="chatgpt-key-input" placeholder="sk-... (OpenAI API Key)" style="flex:1; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <div class="action-btn-wrap">
+              <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveMacAIProviderKey('chatgpt')">Save</button>
+            </div>
           </div>
-          <div id="chatgpt-custom-box" style="margin-top:4px; padding-top:6px; border-top:1px dashed #bbb; font-size:11px; display:flex; flex-direction:column; gap:4px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-              <span><strong>Custom Model:</strong> (optional advanced override for MacAI)</span>
+          <div id="chatgpt-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
+            <div class="section-title-row">
+              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
               <button type="button" class="subtle-btn" id="chatgpt-fetch-btn" onclick="fetchModelsForProvider('chatgpt')">Fetch Available Models</button>
             </div>
-            <div style="display:flex; gap:6px; align-items:center;">
-              <select id="chatgpt-model-select" style="flex:1; font-size:11px; padding:3px;" onchange="onCustomModelSelect('chatgpt')">
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="chatgpt-model-select" style="flex:1; font-size:12px; padding:5px;" onchange="onCustomModelSelect('chatgpt')">
                 <option value="">-- Discovered models (click Fetch) --</option>
               </select>
-              <input type="text" id="chatgpt-custom-model-input" placeholder="e.g. o1-preview" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:3px 6px; border:1px solid #000;" />
-              <button type="button" class="mac-btn" style="padding:3px 8px; font-size:11px;" onclick="saveCustomModel('chatgpt')">Save</button>
+              <input type="text" id="chatgpt-custom-model-input" placeholder="e.g. gpt-4o-mini" style="flex:1; font-family:monospace; font-size:12px; padding:5px 6px; border:2px solid #000;" />
+              <div class="action-btn-wrap">
+                <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveCustomModel('chatgpt')">Save</button>
+              </div>
             </div>
           </div>
           <div id="chatgpt-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
-            <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('chatgpt')">Disconnect ChatGPT</button>
+            <button type="button" class="subtle-btn danger" onclick="disconnectMacAIProvider('chatgpt')">Disconnect ChatGPT</button>
           </div>
         </div>
 
         <!-- Provider 3: Anthropic Claude -->
-        <div class="config-panel" style="gap:8px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <strong>3. Anthropic (Claude)</strong>
-            <span id="claude-pill" style="font-size:11px; font-weight:bold;">Not connected</span>
+        <div class="section-box">
+          <div class="section-title-row">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <img src="/img/status-off.png" id="claude-sub-icon" class="status-icon" width="8" height="8" alt="Claude" />
+              <span>3. Anthropic (Claude)</span>
+            </div>
+            <span id="claude-pill" style="font-size:12px;">Not connected</span>
           </div>
-          <div style="font-size:11px; line-height:1.4;">
+          <div style="font-size:13px; line-height:1.4;">
             Create an API key at <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Anthropic Console</a>:
           </div>
-          <div style="display:flex; gap:6px;">
-            <input type="password" id="claude-key-input" placeholder="sk-ant-... (Anthropic API Key)" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:5px 7px; border:2px solid #000;" />
-            <button type="button" class="mac-btn" style="padding:4px 10px; font-size:11px;" onclick="saveMacAIProviderKey('claude')">Save</button>
+          <div style="display:flex; gap:8px;">
+            <input type="password" id="claude-key-input" placeholder="sk-ant-... (Anthropic API Key)" style="flex:1; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <div class="action-btn-wrap">
+              <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveMacAIProviderKey('claude')">Save</button>
+            </div>
           </div>
-          <div id="claude-custom-box" style="margin-top:4px; padding-top:6px; border-top:1px dashed #bbb; font-size:11px; display:flex; flex-direction:column; gap:4px;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-              <span><strong>Custom Model:</strong> (optional advanced override for MacAI)</span>
+          <div id="claude-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
+            <div class="section-title-row">
+              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
               <button type="button" class="subtle-btn" id="claude-fetch-btn" onclick="fetchModelsForProvider('claude')">Fetch Available Models</button>
             </div>
-            <div style="display:flex; gap:6px; align-items:center;">
-              <select id="claude-model-select" style="flex:1; font-size:11px; padding:3px;" onchange="onCustomModelSelect('claude')">
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="claude-model-select" style="flex:1; font-size:12px; padding:5px;" onchange="onCustomModelSelect('claude')">
                 <option value="">-- Discovered models (click Fetch) --</option>
               </select>
-              <input type="text" id="claude-custom-model-input" placeholder="e.g. claude-3-opus-20240229" style="flex:1; font-family:Monaco,monospace; font-size:11px; padding:3px 6px; border:1px solid #000;" />
-              <button type="button" class="mac-btn" style="padding:3px 8px; font-size:11px;" onclick="saveCustomModel('claude')">Save</button>
+              <input type="text" id="claude-custom-model-input" placeholder="e.g. claude-3-5-sonnet-latest" style="flex:1; font-family:monospace; font-size:12px; padding:5px 6px; border:2px solid #000;" />
+              <div class="action-btn-wrap">
+                <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveCustomModel('claude')">Save</button>
+              </div>
             </div>
           </div>
           <div id="claude-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
-            <button type="button" class="subtle-btn" onclick="disconnectMacAIProvider('claude')">Disconnect Claude</button>
+            <button type="button" class="subtle-btn danger" onclick="disconnectMacAIProvider('claude')">Disconnect Claude</button>
           </div>
         </div>
 
-        <div class="card-footer" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-          <div style="display:flex; gap:8px; align-items:center;">
-            <span id="macai-footer-label">Active: Gemini (Pro)</span>
+        <!-- MacAI Footer & Chat History -->
+        <div class="section-box" style="flex-direction:row; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <div style="display:flex; gap:8px; align-items:center; font-size:13px;">
+            <span id="macai-footer-label">Active: Gemini (Balanced)</span>
             <span>•</span>
             <span id="macai-chats-count">0 saved chats</span>
           </div>
           <button type="button" id="macai-delete-chats-btn" class="subtle-btn danger" onclick="deleteAllAiChats()">Delete all chats</button>
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
   </main>
 
-  <!-- MacCompanion Platform Footer / Support -->
+  <!-- Platform Footer / Support -->
   <footer class="platform-footer">
-    <div class="footer-pill">
-      <img src="/img/heart.png" class="bitmap-heart" width="13" height="12" alt="♥" />
-      <span>Do you love MacCompanion? Support this project by <a href="https://buymeacoffee.com/MacCompanion" target="_blank" rel="noopener">Buying me a coffee</a></span>
-      <img src="/img/heart.png" class="bitmap-heart" width="13" height="12" alt="♥" />
+    <div class="footer-pill-wrap">
+      <div class="footer-pill pixel-pill-clip">
+        <img src="/img/coffee.png" class="coffee-icon" alt="coffee" />
+        <span>Do you love MacCompanion? Support this project by <a href="https://buymeacoffee.com/MacCompanion" target="_blank" rel="noopener">Buying me a coffee</a></span>
+      </div>
     </div>
   </footer>
 
@@ -644,19 +1118,72 @@
       redirectUri: 'https://aeroform-se.github.io/MacCompanion/callback.html',
       source: 'none',
     };
+    let lastSpotifyData = null;
 
-    function setPlatformMacIcon(isSad, errorCodeText) {
-      const icon = document.getElementById('mac-icon');
-      const badge = document.getElementById('error-code-badge');
-      const targetSrc = isSad ? '/img/sadmac.png' : '/img/MacCompanion-Logo-server.png';
-      if (!icon.src.endsWith(targetSrc)) {
-        icon.src = targetSrc;
-      }
-      if (isSad && errorCodeText) {
-        badge.textContent = errorCodeText;
-        badge.classList.remove('hidden');
+    // View Routing (#spotimac, #macai, or default #overview)
+    function updateRoute() {
+      const hash = window.location.hash.toLowerCase();
+      const viewDash = document.getElementById('view-dashboard');
+      const viewSpoti = document.getElementById('view-spotimac');
+      const viewMacAI = document.getElementById('view-macai');
+
+      if (hash === '#spotimac') {
+        viewDash.classList.add('hidden');
+        viewSpoti.classList.remove('hidden');
+        viewMacAI.classList.add('hidden');
+        window.scrollTo(0, 0);
+      } else if (hash === '#macai') {
+        viewDash.classList.add('hidden');
+        viewSpoti.classList.add('hidden');
+        viewMacAI.classList.remove('hidden');
+        window.scrollTo(0, 0);
       } else {
+        viewDash.classList.remove('hidden');
+        viewSpoti.classList.add('hidden');
+        viewMacAI.classList.add('hidden');
+      }
+    }
+
+    window.addEventListener('hashchange', updateRoute);
+    window.addEventListener('DOMContentLoaded', updateRoute);
+
+    function setIconStatus(imgEl, status) {
+      if (!imgEl) return;
+      if (status === 'ok') {
+        imgEl.src = '/img/status-ok.png';
+      } else if (status === 'error') {
+        imgEl.src = '/img/status-error.png';
+      } else {
+        imgEl.src = '/img/status-off.png';
+      }
+    }
+
+    function setPlatformStatus(isOnline, errorCodeText) {
+      const icon = document.getElementById('server-status-icon');
+      const text = document.getElementById('server-status-text');
+      const badge = document.getElementById('error-code-badge');
+
+      if (isOnline) {
+        setIconStatus(icon, 'ok');
+        text.textContent = 'Server Online';
         badge.classList.add('hidden');
+      } else {
+        setIconStatus(icon, 'error');
+        text.textContent = 'Server Offline';
+        if (errorCodeText) {
+          badge.textContent = errorCodeText;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      }
+    }
+
+    function handleDashAccountAction() {
+      if (lastSpotifyData && lastSpotifyData.ok && lastSpotifyData.state === 'READY') {
+        disconnectSpotify();
+      } else {
+        window.location.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
       }
     }
 
@@ -695,8 +1222,11 @@
         editingConfig = false;
         await pollStatus();
       } catch (err) {
-        setPlatformMacIcon(true, 'CFG_ERR');
-        document.getElementById('spotify-status-box').textContent = err.message;
+        setPlatformStatus(false, 'CFG_ERR');
+        const bannerIcon = document.getElementById('spotify-status-icon');
+        const bannerText = document.getElementById('spotify-status-text');
+        if (bannerIcon) setIconStatus(bannerIcon, 'error');
+        if (bannerText) bannerText.textContent = err.message;
       }
     }
 
@@ -874,18 +1404,22 @@
 
     function renderMacAI(macai) {
       if (!macai) return;
-      const badge = document.getElementById('macai-badge');
-      const statusBox = document.getElementById('macai-status-box');
+
+      const dashIcon = document.getElementById('dash-macai-icon');
+      const dashStatus = document.getElementById('dash-macai-status');
+      const subBannerIcon = document.getElementById('macai-status-icon');
+      const subBannerText = document.getElementById('macai-status-text');
+
       if (macai.ok) {
-        badge.textContent = 'Running OK';
-        badge.classList.add('ok');
-        statusBox.classList.add('running-ok');
-        statusBox.textContent = macai.message || 'MacAI service is running OK';
+        setIconStatus(dashIcon, 'ok');
+        dashStatus.textContent = 'Service running';
+        setIconStatus(subBannerIcon, 'ok');
+        subBannerText.textContent = macai.message || 'MacAI service is running OK';
       } else {
-        badge.textContent = 'Login Required';
-        badge.classList.remove('ok');
-        statusBox.classList.remove('running-ok');
-        statusBox.textContent = macai.message || 'Log in to at least one AI provider below';
+        setIconStatus(dashIcon, 'off');
+        dashStatus.textContent = 'Login Required';
+        setIconStatus(subBannerIcon, 'off');
+        subBannerText.textContent = macai.message || 'Log in to at least one AI provider below';
       }
 
       const provs = macai.providers || {};
@@ -893,11 +1427,27 @@
         const p = provs[id] || {};
         const pill = document.getElementById(`${id}-pill`);
         const disc = document.getElementById(`${id}-disconnect-row`);
+        const dashProvIcon = document.getElementById(`dash-${id}-icon`);
+        const dashProvStatus = document.getElementById(`dash-${id}-status`);
+        const subProvIcon = document.getElementById(`${id}-sub-icon`);
+
+        const isConfigured = !!p.enabled;
+        const displayName = id === 'gemini' ? 'Gemini' : (id === 'chatgpt' ? 'ChatGPT' : 'Claude');
+
+        if (dashProvIcon) {
+          setIconStatus(dashProvIcon, isConfigured ? 'ok' : 'off');
+        }
+        if (dashProvStatus) {
+          dashProvStatus.textContent = isConfigured ? `${displayName}: Configured` : `${displayName}: No Api key saved`;
+        }
+        if (subProvIcon) {
+          setIconStatus(subProvIcon, isConfigured ? 'ok' : 'off');
+        }
         if (pill) {
-          pill.textContent = p.enabled ? `● Connected (${p.authMode === 'oauth' ? 'OAuth' : 'API Key'})` : '○ Not connected';
+          pill.textContent = isConfigured ? `Connected (${p.authMode === 'oauth' ? 'OAuth' : 'API Key'})` : 'Not connected';
         }
         if (disc) {
-          disc.classList.toggle('hidden', !p.enabled);
+          disc.classList.toggle('hidden', !isConfigured);
         }
       }
 
@@ -927,10 +1477,36 @@
       }
     }
 
+    function updateSoundProfileUI(currentProfile) {
+      const prof = currentProfile || 'warm';
+      const profiles = ['warm', 'hifi', 'compact'];
+
+      profiles.forEach(p => {
+        const wrap = document.getElementById(`prof-wrap-${p}`);
+        const icon = document.getElementById(`prof-icon-${p}`);
+        const badge = document.getElementById(`prof-badge-${p}`);
+        const isActive = (p === prof);
+
+        if (wrap) {
+          wrap.classList.toggle('active', isActive);
+        }
+        if (icon) {
+          setIconStatus(icon, isActive ? 'ok' : 'off');
+          icon.alt = isActive ? 'Active' : 'Inactive';
+        }
+        if (badge) {
+          badge.className = isActive ? 'profile-badge badge-active pixel-pill-clip' : 'profile-badge badge-select pixel-pill-clip';
+          badge.textContent = isActive ? 'Active' : 'Select';
+        }
+      });
+    }
+
     function renderUI(data) {
       const spotify = data.modules && data.modules.spotify;
-      const statusBox = document.getElementById('spotify-status-box');
-      const badge = document.getElementById('spotify-badge');
+      lastSpotifyData = spotify;
+
+      const subStatusIcon = document.getElementById('spotify-status-icon');
+      const subStatusText = document.getElementById('spotify-status-text');
       const configForm = document.getElementById('config-form');
       const actionArea = document.getElementById('action-area');
       const loginBtn = document.getElementById('login-btn');
@@ -939,9 +1515,18 @@
       const connectedFooter = document.getElementById('connected-footer');
       const userLabel = document.getElementById('spotify-user-label');
 
-      document.getElementById('server-status-text').textContent = 'Server Online';
-      document.getElementById('lan-ip').textContent = `IP: ${data.server.ip}:${data.server.httpPort}`;
-      document.getElementById('udp-port').textContent = `UDP: ${data.server.udpPort}`;
+      // Dashboard Card Elements
+      const dashSpotimacIcon = document.getElementById('dash-spotimac-icon');
+      const dashSpotimacStatus = document.getElementById('dash-spotimac-status');
+      const dashSpotimacAccIcon = document.getElementById('dash-spotimac-acc-icon');
+      const dashSpotimacAcc = document.getElementById('dash-spotimac-acc');
+      const dashSpotimacAccBtn = document.getElementById('dash-spotimac-acc-btn');
+      const dashSpotimacSpeakerIcon = document.getElementById('dash-spotimac-speaker-icon');
+      const dashSpotimacSpeaker = document.getElementById('dash-spotimac-speaker');
+      const dashSpotimacSpeakerBtn = document.getElementById('dash-spotimac-speaker-btn');
+
+      setPlatformStatus(true);
+      document.getElementById('lan-ip').textContent = `${data.server.ip}:${data.server.httpPort}`;
       if (data.server.version) {
         document.getElementById('server-version').textContent = data.server.version;
       }
@@ -959,103 +1544,114 @@
         }
       }
 
+      // Audio Sample Rate & Profile
       if (spotify.audio) {
         const is11k = spotify.audio.sampleRateMode === '11k';
         document.getElementById('rate-22k-btn').classList.toggle('active', !is11k);
         document.getElementById('rate-11k-btn').classList.toggle('active', is11k);
+        document.getElementById('dash-rate-22k-btn').classList.toggle('active', !is11k);
+        document.getElementById('dash-rate-11k-btn').classList.toggle('active', is11k);
 
-        const prof = spotify.audio.profile || 'warm';
-        document.getElementById('prof-hifi-btn').classList.toggle('active', prof === 'hifi');
-        document.getElementById('prof-warm-btn').classList.toggle('active', prof === 'warm');
-        document.getElementById('prof-compact-btn').classList.toggle('active', prof === 'compact');
+        // Update the 3 separate Sound Profile Option Cards
+        updateSoundProfileUI(spotify.audio.profile);
 
-        const descEl = document.getElementById('profile-desc-text');
-        if (prof === 'warm') {
-          descEl.textContent = 'Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.';
-        } else if (prof === 'compact') {
-          descEl.textContent = 'Tailored for the internal speaker in a Plus/SE/Classic: rolls off sub-140 Hz cone rumble, boosts 2.2 kHz midrange presence, and levels dynamics.';
-        } else if (prof === 'custom') {
-          descEl.textContent = `Custom Granular DSP active (${spotify.audio.filterChain || 'custom'}).`;
-        } else {
-          descEl.textContent = 'Maximum dynamic range and natural transients with Shibata noise-shaped dither. Best at 100% client volume.';
-        }
-
+        const speakerIcon = document.getElementById('sub-speaker-icon');
         const speakerLabel = document.getElementById('speaker-status-label');
         const speakerBtn = document.getElementById('speaker-pair-btn');
         if (spotify.audio.paired && spotify.audio.running) {
           const macCount = Array.isArray(spotify.audio.macClients) ? spotify.audio.macClients.length : 0;
           const suffix = macCount > 1 ? ` (${macCount} Macs online)` : '';
-          speakerLabel.textContent = `● Active Speaker: "${spotify.audio.deviceName}"${suffix}`;
+          const spkText = `Speaker pairing: ${spotify.audio.deviceName}${suffix}`;
+          speakerLabel.textContent = `Active Speaker: "${spotify.audio.deviceName}"${suffix}`;
           speakerBtn.textContent = 'Re-Pair Speaker';
-          speakerBtn.classList.remove('primary');
+          setIconStatus(speakerIcon, 'ok');
+          setIconStatus(dashSpotimacSpeakerIcon, 'ok');
+          dashSpotimacSpeaker.textContent = spkText;
+          dashSpotimacSpeakerBtn.textContent = 'Re-Pair';
         } else {
-          speakerLabel.textContent = '○ Speaker not paired with Spotify Connect yet';
+          speakerLabel.textContent = 'Speaker not paired with Spotify Connect yet';
           speakerBtn.textContent = 'Activate "Macintosh 68k" Speaker';
-          speakerBtn.classList.add('primary');
+          setIconStatus(speakerIcon, 'off');
+          setIconStatus(dashSpotimacSpeakerIcon, 'off');
+          dashSpotimacSpeaker.textContent = 'Speaker pairing: Not paired';
+          dashSpotimacSpeakerBtn.textContent = 'Activate';
         }
       }
 
       loginBtn.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
 
-      // 1. Service Error State -> Show Sad Mac on platform header + Error details in Spotify Card
+      // 1. Service Error State
       if (spotify.error || spotify.state === 'ERROR') {
-        setPlatformMacIcon(true, spotify.errorCode || 'SPOTIFY_ERR');
-        badge.textContent = 'Error';
-        badge.classList.remove('ok');
-        statusBox.classList.remove('running-ok');
-        statusBox.textContent = spotify.message || 'An unexpected Spotify error occurred.';
+        setPlatformStatus(false, spotify.errorCode || 'SPOTIFY_ERR');
+        setIconStatus(dashSpotimacIcon, 'error');
+        dashSpotimacStatus.textContent = 'Service Error';
+        setIconStatus(subStatusIcon, 'error');
+        subStatusText.textContent = spotify.message || 'An unexpected Spotify error occurred.';
         actionArea.classList.remove('hidden');
         loginBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
         retryBtn.classList.remove('hidden');
         audioPanel.classList.add('hidden');
         connectedFooter.classList.add('hidden');
         if (!editingConfig) configForm.classList.add('hidden');
+
+        setIconStatus(dashSpotimacAccIcon, 'off');
+        dashSpotimacAcc.textContent = 'Account: Error';
+        dashSpotimacAccBtn.textContent = 'Connect';
         return;
       }
 
-      // Server is healthy -> Show Happy Mac!
-      setPlatformMacIcon(false);
-
-      // 2. Spotify Operational & Logged In -> "Spotify service is running OK"
+      // 2. Spotify Operational & Logged In
       if (spotify.ok && spotify.state === 'READY') {
-        badge.textContent = 'Running OK';
-        badge.classList.add('ok');
-        statusBox.classList.add('running-ok');
-        statusBox.textContent = 'Spotify service is running OK';
+        setIconStatus(dashSpotimacIcon, 'ok');
+        dashSpotimacStatus.textContent = 'Service running';
+        setIconStatus(subStatusIcon, 'ok');
+        subStatusText.textContent = 'Spotify service is running OK';
         configForm.classList.add('hidden');
         actionArea.classList.add('hidden');
         audioPanel.classList.remove('hidden');
         connectedFooter.classList.remove('hidden');
         userLabel.textContent = spotify.user ? `Account: ${spotify.user}` : 'Account connected';
+
+        setIconStatus(dashSpotimacAccIcon, 'ok');
+        dashSpotimacAcc.textContent = spotify.user ? `Account: ${spotify.user}` : 'Account: Connected';
+        dashSpotimacAccBtn.textContent = 'Disconnect';
         return;
       }
 
-      statusBox.classList.remove('running-ok');
       audioPanel.classList.add('hidden');
       connectedFooter.classList.add('hidden');
 
       // 3. Awaiting Client ID Setup
       if (spotify.state === 'AWAITING_CONFIG') {
-        badge.textContent = 'Setup Required';
-        badge.classList.remove('ok');
-        statusBox.textContent = 'Spotify Client ID not configured.';
+        setIconStatus(dashSpotimacIcon, 'off');
+        dashSpotimacStatus.textContent = 'Setup Required';
+        setIconStatus(subStatusIcon, 'off');
+        subStatusText.textContent = 'Spotify Client ID not configured.';
         actionArea.classList.add('hidden');
         if (!editingConfig) {
           toggleConfigEditor(true);
         }
+        setIconStatus(dashSpotimacAccIcon, 'off');
+        dashSpotimacAcc.textContent = 'Account: No Client ID';
+        dashSpotimacAccBtn.textContent = 'Setup';
         return;
       }
 
       // 4. Awaiting OAuth Login
-      badge.textContent = 'Login Required';
-      badge.classList.remove('ok');
-      statusBox.textContent = spotify.message;
+      setIconStatus(dashSpotimacIcon, 'off');
+      dashSpotimacStatus.textContent = 'Login Required';
+      setIconStatus(subStatusIcon, 'off');
+      subStatusText.textContent = spotify.message || 'Log in to Spotify to enable audio streaming.';
       retryBtn.classList.add('hidden');
       loginBtn.classList.remove('hidden');
       if (!editingConfig) {
         configForm.classList.add('hidden');
         actionArea.classList.remove('hidden');
       }
+
+      setIconStatus(dashSpotimacAccIcon, 'off');
+      dashSpotimacAcc.textContent = 'Account: Not logged in';
+      dashSpotimacAccBtn.textContent = 'Connect';
     }
 
     async function pollStatus() {
@@ -1065,12 +1661,15 @@
         const data = await res.json();
         renderUI(data);
       } catch (err) {
-        setPlatformMacIcon(true, 'NET_OFFLINE');
-        document.getElementById('server-status-text').textContent = 'Server Offline';
-        document.getElementById('spotify-badge').textContent = 'Offline';
-        document.getElementById('spotify-badge').classList.remove('ok');
-        document.getElementById('spotify-status-box').textContent =
-          'Cannot reach MacCompanion server or network connection lost.';
+        setPlatformStatus(false, 'NET_OFFLINE');
+        const dashSpotimacIcon = document.getElementById('dash-spotimac-icon');
+        const dashSpotimacStatus = document.getElementById('dash-spotimac-status');
+        if (dashSpotimacIcon) setIconStatus(dashSpotimacIcon, 'error');
+        if (dashSpotimacStatus) dashSpotimacStatus.textContent = 'Offline';
+        const subStatusIcon = document.getElementById('spotify-status-icon');
+        const subStatusText = document.getElementById('spotify-status-text');
+        if (subStatusIcon) setIconStatus(subStatusIcon, 'error');
+        if (subStatusText) subStatusText.textContent = 'Cannot reach MacCompanion server or network connection lost.';
       }
     }
 
