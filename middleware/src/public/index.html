@@ -655,7 +655,7 @@
         <img src="/img/status-ok.png" id="server-status-icon" class="status-icon" width="8" height="8" alt="Server Online" />
         <span id="server-status-text">Server Online</span>
         <span>IP: <span id="lan-ip">...</span></span>
-        <span id="server-version">v0.4.13</span>
+        <span id="server-version">v0.4.14</span>
         <span id="error-code-badge" class="error-code hidden">NET_OFFLINE</span>
       </div>
     </div>
@@ -779,6 +779,14 @@
             <div class="row-left">
               <img src="/img/status-off.png" id="dash-claude-icon" class="status-icon" width="8" height="8" alt="Claude Status" />
               <span id="dash-claude-status">Claude: No Api key saved</span>
+            </div>
+          </div>
+
+          <!-- Row 5: Groq -->
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-off.png" id="dash-groq-icon" class="status-icon" width="8" height="8" alt="Groq Status" />
+              <span id="dash-groq-status">Groq: No Api key saved</span>
             </div>
           </div>
         </div>
@@ -1088,6 +1096,70 @@
           </div>
         </div>
 
+        <!-- Provider 4: Groq -->
+        <div class="section-box">
+          <div class="section-title-row">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <img src="/img/status-off.png" id="groq-sub-icon" class="status-icon" width="8" height="8" alt="Groq" />
+              <span>4. Groq (High-Speed LPU)</span>
+            </div>
+            <span id="groq-pill" style="font-size:12px;">Not connected</span>
+          </div>
+          <div style="font-size:13px; line-height:1.4;">
+            Create a fast API key at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">Groq Console</a> (also enables Whisper STT):
+          </div>
+          <div style="display:flex; gap:8px;">
+            <input type="password" id="groq-key-input" placeholder="gsk_... (Groq API Key)" style="flex:1; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <div class="action-btn-wrap">
+              <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveMacAIProviderKey('groq')">Save</button>
+            </div>
+          </div>
+          <div id="groq-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
+            <div class="section-title-row">
+              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
+              <button type="button" class="subtle-btn" id="groq-fetch-btn" onclick="fetchModelsForProvider('groq')">Fetch Available Models</button>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="groq-model-select" style="flex:1; font-size:12px; padding:5px;" onchange="onCustomModelSelect('groq')">
+                <option value="">-- Discovered models (click Fetch) --</option>
+              </select>
+              <input type="text" id="groq-custom-model-input" placeholder="e.g. llama-3.3-70b-versatile" style="flex:1; font-family:monospace; font-size:12px; padding:5px 6px; border:2px solid #000;" />
+              <div class="action-btn-wrap">
+                <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveCustomModel('groq')">Save</button>
+              </div>
+            </div>
+          </div>
+          <div id="groq-disconnect-row" class="hidden" style="display:flex; justify-content:flex-end;">
+            <button type="button" class="subtle-btn danger" onclick="disconnectMacAIProvider('groq')">Disconnect Groq</button>
+          </div>
+        </div>
+
+        <!-- Speech & Voice Settings -->
+        <div class="section-box">
+          <div class="section-title-row">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span>Speech &amp; Voice Settings</span>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+              <label for="macai-tts-voice-select" style="font-size:13px; font-weight:bold;">Spoken Replies (TTS) Voice:</label>
+              <select id="macai-tts-voice-select" style="font-size:13px; padding:5px 8px; border:2px solid #000;" onchange="saveTtsVoice(this.value)">
+                <option value="alloy">Alloy (Neutral &amp; Balanced)</option>
+                <option value="nova">Nova (Bright &amp; Natural)</option>
+                <option value="echo">Echo (Warm &amp; Smooth)</option>
+                <option value="onyx">Onyx (Deep &amp; Authoritative)</option>
+                <option value="fable">Fable (Expressive &amp; British)</option>
+                <option value="shimmer">Shimmer (Soft &amp; Clear)</option>
+                <option value="retro">Retro Synth (Robotic 1984 MacinTalk / espeak)</option>
+              </select>
+            </div>
+            <div style="font-size:12px; color:#555; line-height:1.4;">
+              Natural voices use OpenAI when configured; otherwise, the server automatically uses local retro speech synthesis. Voice input (STT) uses Groq Whisper, OpenAI Whisper, or Gemini Multimodal Audio based on your active model with automatic fallback.
+            </div>
+          </div>
+        </div>
+
         <!-- MacAI Footer & Chat History -->
         <div class="section-box" style="flex-direction:row; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
           <div style="display:flex; gap:8px; align-items:center; font-size:13px;">
@@ -1291,6 +1363,11 @@
         if (!val) return;
         payload.anthropicApiKey = val;
         document.getElementById('claude-key-input').value = '';
+      } else if (provider === 'groq') {
+        const val = document.getElementById('groq-key-input').value.trim();
+        if (!val) return;
+        payload.groqApiKey = val;
+        document.getElementById('groq-key-input').value = '';
       }
       await fetch('/api/macai/config', {
         method: 'POST',
@@ -1298,6 +1375,19 @@
         body: JSON.stringify(payload),
       });
       await pollStatus();
+    }
+
+    async function saveTtsVoice(voice) {
+      try {
+        await fetch('/api/macai/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ttsVoice: voice }),
+        });
+        await pollStatus();
+      } catch (err) {
+        console.warn('Failed to save TTS voice:', err);
+      }
     }
 
     async function disconnectMacAIProvider(provider) {
@@ -1423,7 +1513,7 @@
       }
 
       const provs = macai.providers || {};
-      for (const id of ['gemini', 'chatgpt', 'claude']) {
+      for (const id of ['gemini', 'chatgpt', 'claude', 'groq']) {
         const p = provs[id] || {};
         const pill = document.getElementById(`${id}-pill`);
         const disc = document.getElementById(`${id}-disconnect-row`);
@@ -1432,7 +1522,7 @@
         const subProvIcon = document.getElementById(`${id}-sub-icon`);
 
         const isConfigured = !!p.enabled;
-        const displayName = id === 'gemini' ? 'Gemini' : (id === 'chatgpt' ? 'ChatGPT' : 'Claude');
+        const displayName = id === 'gemini' ? 'Gemini' : (id === 'chatgpt' ? 'ChatGPT' : (id === 'claude' ? 'Claude' : 'Groq'));
 
         if (dashProvIcon) {
           setIconStatus(dashProvIcon, isConfigured ? 'ok' : 'off');
@@ -1453,7 +1543,7 @@
 
       const customModels = macai.customModels || {};
       const discovered = macai.discoveredModels || {};
-      for (const prov of ['gemini', 'chatgpt', 'claude']) {
+      for (const prov of ['gemini', 'chatgpt', 'claude', 'groq']) {
         const input = document.getElementById(`${prov}-custom-model-input`);
         if (input && !input.matches(':focus')) {
           input.value = customModels[prov] || '';
@@ -1461,6 +1551,11 @@
         if (discovered[prov] && discovered[prov].length > 0) {
           populateDiscoveredModels(prov, discovered[prov]);
         }
+      }
+
+      const ttsSel = document.getElementById('macai-tts-voice-select');
+      if (ttsSel && !ttsSel.matches(':focus')) {
+        ttsSel.value = macai.ttsVoice || 'alloy';
       }
 
       document.getElementById('macai-footer-label').textContent =

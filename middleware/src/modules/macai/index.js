@@ -67,10 +67,27 @@ const PROVIDERS = {
       Thinking: 'claude-3-7-sonnet-latest',
     },
   },
+  groq: {
+    id: 'groq',
+    name: 'Groq',
+    defaultModel: 'llama-3.3-70b-versatile',
+    models: [
+      { label: 'Llama 3.1 8B',  id: 'llama-3.1-8b-instant' },
+      { label: 'Llama 3.3 70B', id: 'llama-3.3-70b-versatile', isDefault: true },
+      { label: 'GPT-OSS 120B',  id: 'openai/gpt-oss-120b' },
+      { label: 'Qwen 3.8 27B',  id: 'qwen/qwen3.8-27b' },
+    ],
+    tiers: {
+      Fast: 'llama-3.1-8b-instant',
+      Pro: 'llama-3.3-70b-versatile',
+      Thinking: 'openai/gpt-oss-120b',
+    },
+  },
 };
 
 function normalizeProviderId(raw) {
   const s = String(raw || '').toLowerCase().trim();
+  if (s === 'groq') return 'groq';
   if (s === 'openai' || s === 'chatgpt') return 'chatgpt';
   if (s === 'claude' || s === 'anthropic') return 'claude';
   if (s === 'gemini' || s === 'google') return 'gemini';
@@ -105,16 +122,19 @@ const store = createModuleStore('macai', {
     gemini: 'gemini-3.8-flash',
     chatgpt: 'gpt-4o',
     claude: 'claude-3-7-sonnet-latest',
+    groq: 'llama-3.3-70b-versatile',
   },
   customModels: {
     gemini: '',
     chatgpt: '',
     claude: '',
+    groq: '',
   },
   discoveredModels: {
     gemini: [],
     chatgpt: [],
     claude: [],
+    groq: [],
   },
   geminiApiKey: null,
   googleClientId: null,
@@ -125,7 +145,9 @@ const store = createModuleStore('macai', {
   googleOauthState: null,
   openaiApiKey: null,
   anthropicApiKey: null,
+  groqApiKey: null,
   ttsEnabled: true,
+  ttsVoice: 'alloy',
   chats: [],
   lastError: null,
 });
@@ -143,6 +165,7 @@ function getProviderAuth(data = store.load()) {
   const geminiOauth = Boolean(data.googleAccessToken || data.googleRefreshToken);
   const openaiKey = (process.env.OPENAI_API_KEY || data.openaiApiKey || '').trim();
   const anthropicKey = (process.env.ANTHROPIC_API_KEY || data.anthropicApiKey || '').trim();
+  const groqKey = (process.env.GROQ_API_KEY || data.groqApiKey || '').trim();
 
   return {
     gemini: {
@@ -159,6 +182,11 @@ function getProviderAuth(data = store.load()) {
       enabled: Boolean(anthropicKey),
       mode: anthropicKey ? 'apikey' : 'none',
       apiKey: anthropicKey,
+    },
+    groq: {
+      enabled: Boolean(groqKey),
+      mode: groqKey ? 'apikey' : 'none',
+      apiKey: groqKey,
     },
   };
 }
@@ -449,7 +477,72 @@ async function callClaudeChat(messages, model = 'claude-3-7-sonnet-latest', thin
   return text;
 }
 
+/**
+ * Calls Groq Cloud Chat Completions API (`https://api.groq.com/openai/v1/chat/completions`).
+ */
+async function callGroqChat(messages, model = 'llama-3.3-70b-versatile', thinking = 'Balanced', data = store.load(), signal = undefined) {
+  const auth = getProviderAuth(data).groq;
+  if (!auth.apiKey) throw new Error('Groq API key is not configured');
+  const fetchFn = getFetchImpl();
+  const targetModel = model || PROVIDERS.groq.defaultModel;
+
+  const isReasoning = targetModel.includes('gpt-oss') || targetModel.includes('qwen3') || targetModel.includes('qwen-3');
+  const cleanThinking = normalizeThinking(thinking);
+
+  const apiMessages = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...messages.map((m) => ({
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      content: m.content,
+    })),
+  ];
+  const body = {
+    model: targetModel,
+    messages: apiMessages,
+  };
+
+  if (isReasoning) {
+    body.reasoning_effort = cleanThinking === 'Fast' ? 'low' : (cleanThinking === 'Thinking' ? 'high' : 'medium');
+    body.reasoning_format = 'parsed';
+  } else {
+    body.max_tokens = 1024;
+    body.temperature = cleanThinking === 'Fast' ? 0.7 : (cleanThinking === 'Thinking' ? 0.3 : 0.5);
+  }
+
+  const res = await fetchFn('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${auth.apiKey}`,
+    },
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Groq error (${res.status}): ${extractApiErrorMessage(errText)}`);
+  }
+
+  const json = await res.json();
+  let text =
+    json &&
+    json.choices &&
+    json.choices[0] &&
+    json.choices[0].message &&
+    json.choices[0].message.content
+      ? String(json.choices[0].message.content).trim()
+      : '';
+  // Strip any accidental inline think tags if raw reasoning came through
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  if (!text) throw new Error('Groq returned an empty response');
+  return text;
+}
+
 async function generateProviderReply(provider, model, thinking, messages, data = store.load(), signal = undefined) {
+  if (provider === 'groq') {
+    return callGroqChat(messages, model, thinking, data, signal);
+  }
   if (provider === 'chatgpt') {
     return callOpenAIChat(messages, model, thinking, data, signal);
   }
@@ -562,87 +655,154 @@ async function generateImage(provider, prompt, data = store.load(), signal = und
 }
 
 /**
- * Transcribes a 16-bit WAV audio buffer using Gemini Multimodal Audio or OpenAI Whisper.
+ * Transcribes a 16-bit WAV audio buffer using Groq Whisper, OpenAI Whisper, or Gemini Multimodal Audio.
+ * Option A: Provider-matching with automatic fallback.
  */
-async function transcribeWavBuffer(wavBuffer, data = store.load()) {
+async function transcribeWavBuffer(wavBuffer, data = store.load(), activeProvider = 'groq') {
   const auth = getProviderAuth(data);
   const fetchFn = getFetchImpl();
 
-  if (auth.gemini.enabled) {
-    const headers = { 'Content-Type': 'application/json' };
-    let querySuffix = '';
-    if (auth.gemini.mode === 'oauth') {
-      const token = await getValidGoogleAccessToken(data);
-      headers.Authorization = `Bearer ${token}`;
-    } else {
-      querySuffix = `?key=${encodeURIComponent(auth.gemini.apiKey)}`;
-    }
-    for (const sttModel of ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-2.5-flash']) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${sttModel}:generateContent${querySuffix}`;
-      const res = await fetchFn(url, {
+  const transcribeGroq = async () => {
+    if (!auth.groq || !auth.groq.enabled) return null;
+    try {
+      const boundary = '----MacAIVoiceBoundary' + Date.now();
+      const parts = [
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-large-v3-turbo\r\n`),
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\nContent-Type: audio/wav\r\n\r\n`),
+        wavBuffer,
+        Buffer.from(`\r\n--${boundary}--\r\n`),
+      ];
+      const res = await fetchFn('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST',
-        headers,
-        body: JSON.stringify({
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { text: 'Transcribe the spoken question or statement in this audio accurately. Return ONLY the transcription text and nothing else.' },
-                {
-                  inlineData: {
-                    mimeType: 'audio/wav',
-                    data: wavBuffer.toString('base64'),
-                  },
-                },
-              ],
-            },
-          ],
-        }),
+        headers: {
+          Authorization: `Bearer ${auth.groq.apiKey}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        body: Buffer.concat(parts),
       });
       if (res.ok) {
         const json = await res.json();
-        const parts =
-          json &&
-          json.candidates &&
-          json.candidates[0] &&
-          json.candidates[0].content &&
-          Array.isArray(json.candidates[0].content.parts)
-            ? json.candidates[0].content.parts
-            : [];
-        const text = parts.filter((p) => !p.thought).map((p) => p.text || '').join('').trim();
-        if (text) return text;
+        if (json && json.text) return String(json.text).trim();
       }
+    } catch (e) {
+      console.warn('[MacAI:STT] Groq transcription error:', e.message);
     }
+    return null;
+  };
+
+  const transcribeOpenAI = async () => {
+    if (!auth.chatgpt || !auth.chatgpt.enabled) return null;
+    try {
+      const boundary = '----MacAIVoiceBoundary' + Date.now();
+      const parts = [
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n`),
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\nContent-Type: audio/wav\r\n\r\n`),
+        wavBuffer,
+        Buffer.from(`\r\n--${boundary}--\r\n`),
+      ];
+      const res = await fetchFn('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${auth.chatgpt.apiKey}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        },
+        body: Buffer.concat(parts),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json && json.text) return String(json.text).trim();
+      }
+    } catch (e) {
+      console.warn('[MacAI:STT] OpenAI transcription error:', e.message);
+    }
+    return null;
+  };
+
+  const transcribeGemini = async () => {
+    if (!auth.gemini || !auth.gemini.enabled) return null;
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      let querySuffix = '';
+      if (auth.gemini.mode === 'oauth') {
+        const token = await getValidGoogleAccessToken(data);
+        headers.Authorization = `Bearer ${token}`;
+      } else {
+        querySuffix = `?key=${encodeURIComponent(auth.gemini.apiKey)}`;
+      }
+      for (const sttModel of ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-2.5-flash']) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${sttModel}:generateContent${querySuffix}`;
+        const res = await fetchFn(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { text: 'Transcribe the spoken question or statement in this audio accurately. Return ONLY the transcription text and nothing else.' },
+                  {
+                    inlineData: {
+                      mimeType: 'audio/wav',
+                      data: wavBuffer.toString('base64'),
+                    },
+                  },
+                ],
+              },
+            ],
+          }),
+        });
+        if (res.ok) {
+          const json = await res.json();
+          const parts =
+            json &&
+            json.candidates &&
+            json.candidates[0] &&
+            json.candidates[0].content &&
+            Array.isArray(json.candidates[0].content.parts)
+              ? json.candidates[0].content.parts
+              : [];
+          const text = parts.filter((p) => !p.thought).map((p) => p.text || '').join('').trim();
+          if (text) return text;
+        }
+      }
+    } catch (e) {
+      console.warn('[MacAI:STT] Gemini transcription error:', e.message);
+    }
+    return null;
+  };
+
+  // 1. Try active provider first if it supports STT
+  if (activeProvider === 'groq' && auth.groq.enabled) {
+    const text = await transcribeGroq();
+    if (text) return text;
+  } else if (activeProvider === 'chatgpt' && auth.chatgpt.enabled) {
+    const text = await transcribeOpenAI();
+    if (text) return text;
+  } else if (activeProvider === 'gemini' && auth.gemini.enabled) {
+    const text = await transcribeGemini();
+    if (text) return text;
   }
 
-  if (auth.chatgpt.enabled) {
-    const boundary = '----MacAIVoiceBoundary' + Date.now();
-    const parts = [
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n`),
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\nContent-Type: audio/wav\r\n\r\n`),
-      wavBuffer,
-      Buffer.from(`\r\n--${boundary}--\r\n`),
-    ];
-    const res = await fetchFn('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${auth.chatgpt.apiKey}`,
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-      },
-      body: Buffer.concat(parts),
-    });
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.text) return String(json.text).trim();
-    }
+  // 2. Automatic fallback across available providers (Groq > OpenAI > Gemini)
+  if (auth.groq && auth.groq.enabled) {
+    const text = await transcribeGroq();
+    if (text) return text;
+  }
+  if (auth.chatgpt && auth.chatgpt.enabled) {
+    const text = await transcribeOpenAI();
+    if (text) return text;
+  }
+  if (auth.gemini && auth.gemini.enabled) {
+    const text = await transcribeGemini();
+    if (text) return text;
   }
 
-  throw new Error('Voice transcription requires Gemini or OpenAI to be configured');
+  throw new Error('Voice transcription requires Groq, OpenAI, or Gemini to be configured');
 }
 
 /**
  * Synthesizes spoken TTS audio into unsigned 8-bit 22,255 Hz mono PCM (`pcm_u8`)
- * using OpenAI TTS (if configured) or local OS speech synthesis (`say` / `espeak-ng`) + FFmpeg.
+ * using OpenAI TTS (with selectable voice) or local OS speech synthesis (`say` / `espeak-ng`) + FFmpeg.
  */
 async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() } = {}) {
   const cleanText = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 600);
@@ -650,9 +810,10 @@ async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() }
 
   const auth = getProviderAuth(data);
   const fetchFn = getFetchImpl();
+  const selectedVoice = (data.ttsVoice || 'alloy').toLowerCase();
 
-  // 1. If OpenAI key is configured, use OpenAI's natural alloy/nova TTS
-  if (auth.chatgpt.enabled && !customFetch) {
+  // 1. If OpenAI key is configured and user hasn't forced 'retro', use OpenAI's natural TTS
+  if (auth.chatgpt.enabled && !customFetch && selectedVoice !== 'retro') {
     try {
       const res = await fetchFn('https://api.openai.com/v1/audio/speech', {
         method: 'POST',
@@ -662,7 +823,7 @@ async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() }
         },
         body: JSON.stringify({
           model: 'tts-1',
-          voice: 'alloy',
+          voice: selectedVoice,
           input: cleanText,
           response_format: 'mp3',
         }),
@@ -671,7 +832,9 @@ async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() }
         const mp3Buf = Buffer.from(await res.arrayBuffer());
         return await audioHub.transcodeToPcmU8(mp3Buf, { hz });
       }
-    } catch {}
+    } catch (err) {
+      console.warn('[MacAI:TTS] OpenAI speech synthesis failed, falling back to local:', err.message);
+    }
   }
 
   // 2. Fallback: local `espeak-ng` / `espeak` (Linux/Alpine Docker) or `say` (macOS) -> stdout WAV -> FFmpeg
@@ -742,8 +905,13 @@ router.post('/config', (req, res) => {
   if (body.googleClientSecret !== undefined) updates.googleClientSecret = String(body.googleClientSecret || '').trim() || null;
   if (body.openaiApiKey !== undefined) updates.openaiApiKey = String(body.openaiApiKey || '').trim() || null;
   if (body.anthropicApiKey !== undefined) updates.anthropicApiKey = String(body.anthropicApiKey || '').trim() || null;
+  if (body.groqApiKey !== undefined) updates.groqApiKey = String(body.groqApiKey || '').trim() || null;
+  if (body.ttsVoice !== undefined) updates.ttsVoice = String(body.ttsVoice || '').trim().toLowerCase() || 'alloy';
   if (body.activeProvider && PROVIDERS[body.activeProvider]) updates.activeProvider = body.activeProvider;
-  if (body.activeTier && ['Fast', 'Pro', 'Thinking'].includes(body.activeTier)) updates.activeTier = body.activeTier;
+  if (body.activeTier && ['Fast', 'Pro', 'Thinking', 'Balanced'].includes(body.activeTier)) {
+    updates.activeTier = normalizeTier(body.activeTier);
+    updates.activeThinking = updates.activeTier;
+  }
   if (body.ttsEnabled !== undefined) updates.ttsEnabled = Boolean(body.ttsEnabled);
 
   if (body.disconnectProvider === 'gemini') {
@@ -755,6 +923,8 @@ router.post('/config', (req, res) => {
     updates.openaiApiKey = null;
   } else if (body.disconnectProvider === 'claude') {
     updates.anthropicApiKey = null;
+  } else if (body.disconnectProvider === 'groq') {
+    updates.groqApiKey = null;
   }
 
   if (body.clearChats || body.deleteChats) {
@@ -762,11 +932,12 @@ router.post('/config', (req, res) => {
   }
 
   if (body.customModels && typeof body.customModels === 'object') {
-    const prev = data.customModels || { gemini: '', chatgpt: '', claude: '' };
+    const prev = data.customModels || { gemini: '', chatgpt: '', claude: '', groq: '' };
     updates.customModels = {
       gemini: body.customModels.gemini !== undefined ? String(body.customModels.gemini || '').trim() : prev.gemini,
       chatgpt: body.customModels.chatgpt !== undefined ? String(body.customModels.chatgpt || '').trim() : prev.chatgpt,
       claude: body.customModels.claude !== undefined ? String(body.customModels.claude || '').trim() : prev.claude,
+      groq: body.customModels.groq !== undefined ? String(body.customModels.groq || '').trim() : prev.groq,
     };
   }
   if (body.customModelGemini !== undefined) {
@@ -781,6 +952,10 @@ router.post('/config', (req, res) => {
     updates.customModels = updates.customModels || { ...(data.customModels || {}) };
     updates.customModels.claude = String(body.customModelClaude || '').trim();
   }
+  if (body.customModelGroq !== undefined) {
+    updates.customModels = updates.customModels || { ...(data.customModels || {}) };
+    updates.customModels.groq = String(body.customModelGroq || '').trim();
+  }
 
   store.save(updates);
   res.json({ ok: true, status: getStatus() });
@@ -791,7 +966,7 @@ router.post('/fetch-models', async (req, res) => {
     const data = store.load();
     const auth = getProviderAuth(data);
     const targetProvider = normalizeProviderId(req.body && req.body.provider);
-    const providersToFetch = targetProvider ? [targetProvider] : ['gemini', 'chatgpt', 'claude'];
+    const providersToFetch = targetProvider ? [targetProvider] : ['gemini', 'chatgpt', 'claude', 'groq'];
     const results = {};
 
     for (const p of providersToFetch) {
@@ -843,13 +1018,25 @@ router.post('/fetch-models', async (req, res) => {
             const models = (json.data || []).map((m) => m.id);
             results[p] = { ok: true, models };
           }
+        } else if (p === 'groq') {
+          const fetchFn = getFetchImpl();
+          const resp = await fetchFn('https://api.groq.com/openai/v1/models', {
+            headers: { Authorization: `Bearer ${auth.groq.apiKey}` },
+          });
+          if (!resp.ok) {
+            results[p] = { ok: false, error: `Groq API HTTP ${resp.status}` };
+          } else {
+            const json = await resp.json();
+            const models = (json.data || []).map((m) => m.id);
+            results[p] = { ok: true, models };
+          }
         }
       } catch (err) {
         results[p] = { ok: false, error: err.message };
       }
     }
 
-    const discovered = data.discoveredModels || { gemini: [], chatgpt: [], claude: [] };
+    const discovered = data.discoveredModels || { gemini: [], chatgpt: [], claude: [], groq: [] };
     for (const [p, r] of Object.entries(results)) {
       if (r.ok && Array.isArray(r.models)) {
         discovered[p] = r.models;
@@ -945,6 +1132,12 @@ router.get('/providers', (req, res) => {
       customModels[p.id] || '',
     ]);
   }
+  rows.push([
+    'VOICE',
+    data.ttsEnabled ? '1' : '0',
+    data.ttsVoice || 'alloy',
+    auth.chatgpt && auth.chatgpt.enabled ? '1' : '0',
+  ]);
   return sendPipeResponse(req, res, formatPipeTable(rows));
 });
 
@@ -960,10 +1153,30 @@ router.all('/select', (req, res) => {
   }
   if (reqTier) {
     updates.activeTier = reqTier;
+    updates.activeThinking = reqTier;
   }
   const saved = store.save(updates);
   const { provider, tier } = resolveActiveProviderAndTier(saved);
   return sendPipeResponse(req, res, formatPipeRow(['OK', 'SELECT', provider, PROVIDERS[provider].name, tier]) + '\n');
+});
+
+router.all('/voice-settings', (req, res) => {
+  const data = store.load();
+  const voice = req.query.voice || (req.body && req.body.voice);
+  const tts = req.query.tts !== undefined ? req.query.tts : (req.body && req.body.tts);
+  const updates = {};
+  if (voice) {
+    updates.ttsVoice = String(voice).trim().toLowerCase();
+  }
+  if (tts !== undefined) {
+    updates.ttsEnabled = (tts === '1' || tts === true || tts === 'true');
+  }
+  const saved = store.save(updates);
+  return sendPipeResponse(
+    req,
+    res,
+    formatPipeRow(['OK', 'VOICE_SETTINGS', saved.ttsVoice || 'alloy', saved.ttsEnabled ? '1' : '0']) + '\n'
+  );
 });
 
 router.delete('/chats', (req, res) => {
@@ -1362,7 +1575,7 @@ router.all(
       let transcript = String(req.query.q || '').trim();
       if (!transcript && pcmU8.length > 100) {
         const wavBuf = audioHub.pcmU8ToWav16k(pcmU8, inputRate);
-        transcript = await transcribeWavBuffer(wavBuf, data);
+        transcript = await transcribeWavBuffer(wavBuf, data, provider);
       }
       if (!transcript) {
         return res.status(400).type('text/plain').send('ERR|400|Could not hear speech\n');
@@ -1444,19 +1657,21 @@ function getStatus() {
 
   return {
     id: 'macai',
-    name: 'MacAI Chat (Gemini, ChatGPT, Claude)',
+    name: 'MacAI Chat (Gemini, ChatGPT, Claude, Groq)',
     ok: enabled.length > 0,
     state: enabled.length > 0 ? 'READY' : 'AWAITING_LOGIN',
     message:
       enabled.length > 0
         ? `Ready (${enabled.map((id) => PROVIDERS[id].name).join(', ')})`
-        : 'Log in or add an API key for Gemini, ChatGPT, or Claude below',
+        : 'Log in or add an API key for Gemini, ChatGPT, Claude, or Groq below',
     activeProvider: provider,
     activeTier: tier,
     activeThinking: tier,
     activeModels: data.activeModels || {},
-    customModels: data.customModels || { gemini: '', chatgpt: '', claude: '' },
-    discoveredModels: data.discoveredModels || { gemini: [], chatgpt: [], claude: [] },
+    customModels: data.customModels || { gemini: '', chatgpt: '', claude: '', groq: '' },
+    discoveredModels: data.discoveredModels || { gemini: [], chatgpt: [], claude: [], groq: [] },
+    ttsEnabled: data.ttsEnabled !== undefined ? data.ttsEnabled : true,
+    ttsVoice: data.ttsVoice || 'alloy',
     enabledProviders: enabled,
     providers: {
       gemini: {
@@ -1486,6 +1701,15 @@ function getStatus() {
         models: PROVIDERS.claude.models,
         defaultModel: PROVIDERS.claude.defaultModel,
         customModel: (data.customModels && data.customModels.claude) || '',
+      },
+      groq: {
+        id: 'groq',
+        name: 'Groq',
+        enabled: auth.groq.enabled,
+        authMode: auth.groq.mode,
+        models: PROVIDERS.groq.models,
+        defaultModel: PROVIDERS.groq.defaultModel,
+        customModel: (data.customModels && data.customModels.groq) || '',
       },
     },
     chatCount: Array.isArray(data.chats) ? data.chats.length : 0,

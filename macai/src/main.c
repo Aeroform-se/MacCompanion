@@ -50,15 +50,25 @@
 #define iUseGemini          3
 #define iUseOpenAI          4
 #define iUseClaude          5
-#define iModel1             7
-#define iModel2             8
-#define iModel3             9
-#define iModel4             10
-#define iModelCustom        11
-#define iThinkingFast       13
-#define iThinkingBalanced   14
-#define iThinkingThinking   15
-#define iToggleTTS          17
+#define iUseGroq            6
+#define iModel1             8
+#define iModel2             9
+#define iModel3             10
+#define iModel4             11
+#define iModelCustom        12
+#define iThinkingFast       14
+#define iThinkingBalanced   15
+#define iThinkingThinking   16
+
+#define mSpeech             131
+#define iSpeechReadAloud    1
+#define iSpeechVoiceAlloy   3
+#define iSpeechVoiceEcho    4
+#define iSpeechVoiceFable   5
+#define iSpeechVoiceOnyx    6
+#define iSpeechVoiceNova    7
+#define iSpeechVoiceShimmer 8
+#define iSpeechVoiceRetro   9
 
 #define MAX_CHATS           30
 #define MAX_MESSAGES        40
@@ -124,7 +134,7 @@ static char           gManualIPBuf[32]  = "10.0.2.2";
 static char           gServerIPStr[32]  = "";
 
 /* AI Provider, Models & Thinking State */
-static ProviderInfo   gProviders[3] = {
+static ProviderInfo   gProviders[4] = {
     {
         "gemini", "Gemini", false, 1, /* Default: 3.8 Flash (idx 1) */
         {
@@ -154,12 +164,24 @@ static ProviderInfo   gProviders[3] = {
             { "Claude 3 Opus",     "claude-3-opus-latest" }
         },
         "", false
+    },
+    {
+        "groq", "Groq", false, 1, /* Default: Llama 3.3 70B (idx 1) */
+        {
+            { "Llama 3.1 8B",  "llama-3.1-8b-instant" },
+            { "Llama 3.3 70B", "llama-3.3-70b-versatile" },
+            { "GPT-OSS 120B",  "openai/gpt-oss-120b" },
+            { "Qwen 3.8 27B",  "qwen/qwen3.8-27b" }
+        },
+        "", false
     }
 };
 static char           gActiveProvider[12] = "gemini";
 static char           gActiveTier[12]     = "Balanced";
 static const char    *gThinkingLevels[3]  = { "Fast", "Balanced", "Thinking" };
 static short          gActiveThinkingIdx  = 1; /* Default: Balanced */
+static const char    *gTtsVoiceNames[7]   = { "alloy", "echo", "fable", "onyx", "nova", "shimmer", "retro" };
+static short          gActiveVoiceIdx     = 0; /* Default: alloy (idx 0) */
 static char           gWaitStatusText[96] = "Thinking...";
 static unsigned long  gWaitStartTick      = 0;
 static Boolean        gUserCancelledWait  = false;
@@ -232,6 +254,9 @@ static void RenderWindow(void);
 static void RenderChatAreaOnly(void);
 static void RenderPromptBarOnly(void);
 static void SyncAIMenuState(void);
+static void SyncSpeechMenuState(void);
+static Boolean ActiveModelSupportsThinking(void);
+static void SelectVoice(short vIdx);
 static Boolean IsProviderEnabled(const char *id);
 static void FetchProvidersAndChats(void);
 static void LoadChatById(const char *chatId);
@@ -251,8 +276,10 @@ typedef struct {
     ip_addr       serverIp;
     char          activeProvider[12];
     short         activeThinkingIdx;
-    short         activeModelIdx[3];
-    char          reserved[36];
+    short         activeModelIdx[4];
+    short         activeVoiceIdx;
+    short         readRepliesTTS;
+    char          reserved[30];
 } MacAIPrefs;
 
 static Boolean gUserHasSavedPrefs = false;
@@ -302,9 +329,11 @@ static void SaveMacAIPrefs(void)
     prefs.serverIp = ip;
     SafeCopyString(prefs.activeProvider, gActiveProvider, sizeof(prefs.activeProvider));
     prefs.activeThinkingIdx = gActiveThinkingIdx;
-    for (k = 0; k < 3; k++) {
+    for (k = 0; k < 4; k++) {
         prefs.activeModelIdx[k] = gProviders[k].activeModelIdx;
     }
+    prefs.activeVoiceIdx = gActiveVoiceIdx;
+    prefs.readRepliesTTS = gReadRepliesTTS ? 1 : 0;
 
     if (GetPrefsFileSpec(&spec, false)) {
         FSpCreate(&spec, 'MCAI', 'pref', smSystemScript);
@@ -357,17 +386,24 @@ static Boolean LoadMacAIPrefs(ip_addr *outIP)
                     if (count >= 28 && prefs.activeProvider[0] != '\0') {
                         if (strcmp(prefs.activeProvider, "gemini") == 0 ||
                             strcmp(prefs.activeProvider, "chatgpt") == 0 ||
-                            strcmp(prefs.activeProvider, "claude") == 0) {
+                            strcmp(prefs.activeProvider, "claude") == 0 ||
+                            strcmp(prefs.activeProvider, "groq") == 0) {
                             SafeCopyString(gActiveProvider, prefs.activeProvider, sizeof(gActiveProvider));
                         }
                         if (prefs.activeThinkingIdx >= 0 && prefs.activeThinkingIdx < 3) {
                             gActiveThinkingIdx = prefs.activeThinkingIdx;
                             SafeCopyString(gActiveTier, gThinkingLevels[gActiveThinkingIdx], sizeof(gActiveTier));
                         }
-                        for (k = 0; k < 3; k++) {
+                        for (k = 0; k < 4; k++) {
                             if (prefs.activeModelIdx[k] >= 0 && prefs.activeModelIdx[k] <= 4) {
                                 gProviders[k].activeModelIdx = prefs.activeModelIdx[k];
                             }
+                        }
+                        if (prefs.activeVoiceIdx >= 0 && prefs.activeVoiceIdx < 7) {
+                            gActiveVoiceIdx = prefs.activeVoiceIdx;
+                        }
+                        if (prefs.readRepliesTTS >= 0 && prefs.readRepliesTTS <= 1) {
+                            gReadRepliesTTS = (prefs.readRepliesTTS == 1);
                         }
                         gUserHasSavedPrefs = true;
                     }
@@ -552,6 +588,7 @@ static const char *GetProviderDisplayName(const char *id)
     if (!id) return "Gemini";
     if (strcmp(id, "openai") == 0 || strcmp(id, "chatgpt") == 0) return "ChatGPT";
     if (strcmp(id, "claude") == 0) return "Claude";
+    if (strcmp(id, "groq") == 0) return "Groq";
     return "Gemini";
 }
 
@@ -1154,11 +1191,20 @@ static void DrawPromptBar(const Rect *pillR, const Rect *tierR, const Rect *micR
 
     /* Model Tier selector ("Pro v") anchored at bottom-right of prompt pill */
     {
-        const char *tierName = GetTierDisplayName(gActiveTier);
-        short tw = MeasureCString(tierName);
-        MoveTo(tierR->left + 4, pillR->bottom - 8);
-        DrawCString(tierName);
-        DrawChevronDown(tierR->left + 4 + tw + 5, pillR->bottom - 12);
+        if (ActiveModelSupportsThinking()) {
+            const char *tierName = GetTierDisplayName(gActiveTier);
+            short tw = MeasureCString(tierName);
+            MoveTo(tierR->left + 4, pillR->bottom - 8);
+            DrawCString(tierName);
+            DrawChevronDown(tierR->left + 4 + tw + 5, pillR->bottom - 12);
+        } else {
+            /* Dimmed / greyed out indicator when thinking levels are not supported */
+            MoveTo(tierR->left + 4, pillR->bottom - 8);
+            PenPat(&qd.gray);
+            PenMode(patBic);
+            DrawCString("—");
+            PenNormal();
+        }
     }
 
     /* Conditional Microphone Button (hidden on Macs without Sound Input hardware!) */
@@ -1650,12 +1696,12 @@ static void DrawProviderPopup(void)
 {
     Rect popR;
     short i;
-    SetRect(&popR, 8, 20, 102, 20 + 3 * 16 + 4);
+    SetRect(&popR, 8, 20, 102, 20 + 4 * 16 + 4);
     DrawShadowRoundRect(&popR, 8, 8, 2);
 
     TextFont(kFontIDMonaco);
     TextSize(9);
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < 4; i++) {
         short ry = popR.top + 2 + i * 16;
         Rect rowR;
         SetRect(&rowR, popR.left + 3, ry, popR.right - 3, ry + 15);
@@ -1967,7 +2013,7 @@ static Boolean IsProviderEnabled(const char *id)
     if (!normId || !*normId) return false;
     if (strcmp(normId, "openai") == 0) normId = "chatgpt";
 
-    for (k = 0; k < 3; k++) {
+    for (k = 0; k < 4; k++) {
         if (strcmp(gProviders[k].id, normId) == 0) {
             return gProviders[k].enabled;
         }
@@ -1990,7 +2036,51 @@ static short GetActiveProviderIdx(void)
 {
     if (strcmp(gActiveProvider, "chatgpt") == 0 || strcmp(gActiveProvider, "openai") == 0) return 1;
     if (strcmp(gActiveProvider, "claude") == 0) return 2;
+    if (strcmp(gActiveProvider, "groq") == 0) return 3;
     return 0; /* gemini */
+}
+
+static Boolean ActiveModelSupportsThinking(void)
+{
+    short pIdx = GetActiveProviderIdx();
+    short mIdx = gProviders[pIdx].activeModelIdx;
+    const char *mId = (mIdx == 4 && gProviders[pIdx].hasCustomModel && gProviders[pIdx].customModelName[0])
+                        ? gProviders[pIdx].customModelName
+                        : gProviders[pIdx].models[mIdx].id;
+    if (!mId || !*mId) return false;
+    if (strcmp(gActiveProvider, "gemini") == 0) return true;
+    if (strcmp(gActiveProvider, "chatgpt") == 0 || strcmp(gActiveProvider, "openai") == 0) {
+        return (strncmp(mId, "o1", 2) == 0 || strncmp(mId, "o3", 2) == 0 || strncmp(mId, "o4", 2) == 0);
+    }
+    if (strcmp(gActiveProvider, "claude") == 0) {
+        return (strstr(mId, "3-7-sonnet") != NULL || strstr(mId, "3.7-sonnet") != NULL);
+    }
+    if (strcmp(gActiveProvider, "groq") == 0) {
+        return (strstr(mId, "gpt-oss") != NULL || strstr(mId, "qwen3") != NULL || strstr(mId, "qwen-3") != NULL);
+    }
+    return false;
+}
+
+static void SyncSpeechMenuState(void)
+{
+    MenuHandle speechMenu = GetMenuHandle(mSpeech);
+    short v;
+    if (!speechMenu) return;
+    CheckItem(speechMenu, iSpeechReadAloud, gReadRepliesTTS);
+    for (v = 0; v < 7; v++) {
+        CheckItem(speechMenu, iSpeechVoiceAlloy + v, (gActiveVoiceIdx == v));
+    }
+}
+
+static void SelectVoice(short vIdx)
+{
+    char url[64];
+    if (vIdx < 0 || vIdx >= 7) return;
+    gActiveVoiceIdx = vIdx;
+    SyncSpeechMenuState();
+    SaveMacAIPrefs();
+    sprintf(url, "/api/macai/voice-settings?voice=%s", gTtsVoiceNames[gActiveVoiceIdx]);
+    NetHttpGet(url, gNetBuf, NET_BUF_SIZE);
 }
 
 static void SyncAIMenuState(void)
@@ -2009,9 +2099,13 @@ static void SyncAIMenuState(void)
     if (IsProviderEnabled("claude")) EnableItem(setMenu, iUseClaude);
     else DisableItem(setMenu, iUseClaude);
 
+    if (IsProviderEnabled("groq")) EnableItem(setMenu, iUseGroq);
+    else DisableItem(setMenu, iUseGroq);
+
     CheckItem(setMenu, iUseGemini, (pIdx == 0));
     CheckItem(setMenu, iUseOpenAI, (pIdx == 1));
     CheckItem(setMenu, iUseClaude, (pIdx == 2));
+    CheckItem(setMenu, iUseGroq,   (pIdx == 3));
 
     /* Update Model 1..4 title and checkmark */
     for (i = 0; i < 4; i++) {
@@ -2041,12 +2135,24 @@ static void SyncAIMenuState(void)
         }
     }
 
-    /* Thinking levels */
-    CheckItem(setMenu, iThinkingFast,     (gActiveThinkingIdx == 0));
-    CheckItem(setMenu, iThinkingBalanced, (gActiveThinkingIdx == 1));
-    CheckItem(setMenu, iThinkingThinking, (gActiveThinkingIdx == 2));
+    /* Thinking levels: enabled only if active model supports thinking */
+    if (ActiveModelSupportsThinking()) {
+        EnableItem(setMenu, iThinkingFast);
+        EnableItem(setMenu, iThinkingBalanced);
+        EnableItem(setMenu, iThinkingThinking);
+        CheckItem(setMenu, iThinkingFast,     (gActiveThinkingIdx == 0));
+        CheckItem(setMenu, iThinkingBalanced, (gActiveThinkingIdx == 1));
+        CheckItem(setMenu, iThinkingThinking, (gActiveThinkingIdx == 2));
+    } else {
+        DisableItem(setMenu, iThinkingFast);
+        DisableItem(setMenu, iThinkingBalanced);
+        DisableItem(setMenu, iThinkingThinking);
+        CheckItem(setMenu, iThinkingFast,     false);
+        CheckItem(setMenu, iThinkingBalanced, false);
+        CheckItem(setMenu, iThinkingThinking, false);
+    }
 
-    CheckItem(setMenu, iToggleTTS, gReadRepliesTTS);
+    SyncSpeechMenuState();
 }
 
 static void CopyMessageToClipboard(short msgIdx)
@@ -2365,7 +2471,7 @@ static void FetchProvidersAndChats(void)
                             p5 = strchr(p4, '|');
                             if (p5) {
                                 *p5++ = '\0';
-                                for (k = 0; k < 3; k++) {
+                                for (k = 0; k < 4; k++) {
                                     if (strcmp(gProviders[k].id, p1) == 0) {
                                         gProviders[k].enabled = (p3[0] == '1');
                                         if (p5 && *p5) {
@@ -2381,17 +2487,36 @@ static void FetchProvidersAndChats(void)
                                     }
                                 }
                             } else {
-                                for (k = 0; k < 3; k++) {
+                                for (k = 0; k < 4; k++) {
                                     if (strcmp(gProviders[k].id, p1) == 0) {
                                         gProviders[k].enabled = (p3[0] == '1');
                                     }
                                 }
                             }
                         } else {
-                            for (k = 0; k < 3; k++) {
+                            for (k = 0; k < 4; k++) {
                                 if (strcmp(gProviders[k].id, p1) == 0) {
                                     gProviders[k].enabled = (p3[0] == '1');
                                 }
+                            }
+                        }
+                    }
+                }
+            } else if (strncmp(row, "VOICE|", 6) == 0) {
+                char *p1 = row + 6;
+                char *p2 = strchr(p1, '|');
+                if (p2) {
+                    short v;
+                    char *p3;
+                    *p2++ = '\0';
+                    p3 = strchr(p2, '|');
+                    if (p3) *p3 = '\0';
+                    if (!gUserHasSavedPrefs) {
+                        gReadRepliesTTS = (p1[0] == '1');
+                        for (v = 0; v < 7; v++) {
+                            if (strcmp(gTtsVoiceNames[v], p2) == 0) {
+                                gActiveVoiceIdx = v;
+                                break;
                             }
                         }
                     }
@@ -2404,7 +2529,7 @@ static void FetchProvidersAndChats(void)
     /* Ensure active provider is actually enabled */
     if (!IsProviderEnabled(gActiveProvider)) {
         short k;
-        for (k = 0; k < 3; k++) {
+        for (k = 0; k < 4; k++) {
             if (gProviders[k].enabled) {
                 strcpy(gActiveProvider, gProviders[k].id);
                 break;
@@ -2519,6 +2644,10 @@ static void SelectModel(short mIdx)
 
 static void SelectThinkingLevel(short tIdx)
 {
+    if (!ActiveModelSupportsThinking()) {
+        SysBeep(1);
+        return;
+    }
     if (tIdx >= 0 && tIdx < 3) {
         gActiveThinkingIdx = tIdx;
         strncpy(gActiveTier, gThinkingLevels[tIdx], sizeof(gActiveTier) - 1);
@@ -2992,11 +3121,11 @@ static void HandleContentClick(Point localPt)
     /* 3. Open Provider Popup Menu */
     if (gProviderMenuOpen) {
         Rect popR;
-        SetRect(&popR, 8, 20, 98, 20 + 3 * 16 + 4);
+        SetRect(&popR, 8, 20, 102, 20 + 4 * 16 + 4);
         gProviderMenuOpen = false;
         if (PtInRect(localPt, &popR)) {
             short idx = (localPt.v - (popR.top + 2)) / 16;
-            if (idx >= 0 && idx < 3) {
+            if (idx >= 0 && idx < 4) {
                 if (gProviders[idx].enabled) {
                     SelectProviderOrTier(gProviders[idx].id, NULL);
                     return;
@@ -3146,6 +3275,10 @@ static void HandleContentClick(Point localPt)
         if (maxScrollLine < 0) maxScrollLine = 0;
 
         if (PtInRect(localPt, &tierR)) {
+            if (!ActiveModelSupportsThinking()) {
+                SysBeep(1);
+                return;
+            }
             gTierMenuOpen = !gTierMenuOpen;
             RenderWindow();
             return;
@@ -3624,9 +3757,14 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
         if (key == '1') { SelectProviderOrTier("gemini", NULL); return; }
         if (key == '2') { SelectProviderOrTier("chatgpt", NULL); return; }
         if (key == '3') { SelectProviderOrTier("claude", NULL); return; }
+        if (key == '4') { SelectProviderOrTier("groq", NULL); return; }
         if (key == 't' || key == 'T') {
+            char url[64];
             gReadRepliesTTS = !gReadRepliesTTS;
-            SyncAIMenuState();
+            SyncSpeechMenuState();
+            SaveMacAIPrefs();
+            sprintf(url, "/api/macai/voice-settings?enabled=%d", gReadRepliesTTS ? 1 : 0);
+            NetHttpGet(url, gNetBuf, NET_BUF_SIZE);
             return;
         }
     }
@@ -4022,6 +4160,7 @@ static void HandleMenuChoice(long menuChoice)
             case iUseGemini:        SelectProvider("gemini"); break;
             case iUseOpenAI:        SelectProvider("chatgpt"); break;
             case iUseClaude:        SelectProvider("claude"); break;
+            case iUseGroq:          SelectProvider("groq"); break;
             case iModel1:           SelectModel(0); break;
             case iModel2:           SelectModel(1); break;
             case iModel3:           SelectModel(2); break;
@@ -4030,9 +4169,26 @@ static void HandleMenuChoice(long menuChoice)
             case iThinkingFast:     SelectThinkingLevel(0); break;
             case iThinkingBalanced: SelectThinkingLevel(1); break;
             case iThinkingThinking: SelectThinkingLevel(2); break;
-            case iToggleTTS:
+        }
+    } else if (menuID == mSpeech) {
+        switch (itemID) {
+            case iSpeechReadAloud: {
+                char url[64];
                 gReadRepliesTTS = !gReadRepliesTTS;
-                SyncAIMenuState();
+                SyncSpeechMenuState();
+                SaveMacAIPrefs();
+                sprintf(url, "/api/macai/voice-settings?enabled=%d", gReadRepliesTTS ? 1 : 0);
+                NetHttpGet(url, gNetBuf, NET_BUF_SIZE);
+                break;
+            }
+            case iSpeechVoiceAlloy:
+            case iSpeechVoiceEcho:
+            case iSpeechVoiceFable:
+            case iSpeechVoiceOnyx:
+            case iSpeechVoiceNova:
+            case iSpeechVoiceShimmer:
+            case iSpeechVoiceRetro:
+                SelectVoice(itemID - iSpeechVoiceAlloy);
                 break;
         }
     }

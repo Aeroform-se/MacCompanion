@@ -49,12 +49,14 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
     assert(ping1.body.startsWith('MACAI|0|AWAITING_LOGIN|'), `Unexpected initial ping: ${ping1.body}`);
     console.log('[PASS] Initial /api/macai/ping ->', ping1.body);
 
-    // 2. Configure Gemini & OpenAI keys via /api/macai/config
+    // 2. Configure Gemini, OpenAI & Groq keys via /api/macai/config
     const cfgRes = await httpRequest(16810, 'POST', '/api/macai/config', {
       geminiApiKey: 'test-gemini-key',
       openaiApiKey: 'test-openai-key',
+      groqApiKey: 'test-groq-key',
       activeProvider: 'gemini',
-      activeTier: 'pro'
+      activeTier: 'Balanced',
+      ttsVoice: 'nova',
     });
     const cfgJson = JSON.parse(cfgRes.body);
     assert.strictEqual(cfgJson.ok, true);
@@ -62,21 +64,28 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
 
     // 3. Verify /api/macai/ping is now READY
     const ping2 = await httpRequest(16810, 'GET', '/api/macai/ping');
-    assert.strictEqual(ping2.body, 'MACAI|1|READY|gemini|pro|gemini,openai');
-    console.log('[PASS] Configured /api/macai/ping ->', ping2.body);
+    assert.strictEqual(ping2.body.trim(), 'MACAI|1|READY|gemini|Balanced|gemini,chatgpt,groq');
+    console.log('[PASS] Configured /api/macai/ping ->', ping2.body.trim());
 
     // 4. Verify /api/macai/providers pipe-delimited output
     const provRes = await httpRequest(16810, 'GET', '/api/macai/providers');
-    assert(provRes.body.includes('ACTIVE|gemini|Gemini|pro'));
+    assert(provRes.body.includes('ACTIVE|gemini|Gemini|Balanced'));
     assert(provRes.body.includes('PROVIDER|gemini|Gemini|1|fast,pro,thinking'));
-    assert(provRes.body.includes('PROVIDER|openai|ChatGPT|1|fast,pro,thinking'));
+    assert(provRes.body.includes('PROVIDER|chatgpt|ChatGPT|1|fast,pro,thinking'));
     assert(provRes.body.includes('PROVIDER|claude|Claude|0|fast,pro,thinking'));
+    assert(provRes.body.includes('PROVIDER|groq|Groq|1|fast,pro,thinking'));
+    assert(provRes.body.includes('VOICE|1|nova|1'));
     console.log('[PASS] /api/macai/providers pipe-delimited listing verified');
 
     // 5. Verify /api/macai/select updates active provider & tier
-    const selRes = await httpRequest(16810, 'GET', '/api/macai/select?provider=openai&tier=thinking');
-    assert.strictEqual(selRes.body, 'OK|openai|ChatGPT|thinking');
-    console.log('[PASS] /api/macai/select ->', selRes.body);
+    const selRes = await httpRequest(16810, 'GET', '/api/macai/select?provider=groq&tier=Thinking');
+    assert.strictEqual(selRes.body.trim(), 'OK|SELECT|groq|Groq|Thinking');
+    console.log('[PASS] /api/macai/select ->', selRes.body.trim());
+
+    // 6. Verify /api/macai/voice-settings updates voice
+    const vsRes = await httpRequest(16810, 'GET', '/api/macai/voice-settings?voice=echo&tts=1');
+    assert.strictEqual(vsRes.body.trim(), 'OK|VOICE_SETTINGS|echo|1');
+    console.log('[PASS] /api/macai/voice-settings ->', vsRes.body.trim());
 
     // 6. Verify deleting all AI chats via DELETE /api/macai/chats
     const delRes = await httpRequest(16810, 'DELETE', '/api/macai/chats');
@@ -131,8 +140,10 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
     console.log(`[PASS] /api/macai/image/img_sample/pict -> 24-bit PICT v2 file (${pictRes.buf.length} bytes, packType: ${packType}, cmpCount: ${cmpCount})`);
 
     console.log('--- ALL MACAI TESTS PASSED ---');
+  } catch (err) {
+    console.error('[FAIL] Test threw error:', err);
+    process.exit(1);
   } finally {
     server.close();
-    process.exit(0);
   }
 })();

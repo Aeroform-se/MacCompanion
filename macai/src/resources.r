@@ -184,7 +184,7 @@ resource 'SIZE' (-1) {
 };
 
 resource 'MBAR' (128) {
-    { 128, 129, 130 }
+    { 128, 129, 130, 131 }
 };
 
 resource 'MENU' (128, "Apple") {
@@ -220,6 +220,7 @@ resource 'MENU' (130, "Settings") {
         "Use Google Gemini", noIcon, "1", noMark, plain,
         "Use ChatGPT (OpenAI)", noIcon, "2", noMark, plain,
         "Use Claude (Anthropic)", noIcon, "3", noMark, plain,
+        "Use Groq", noIcon, "4", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Model: 3.5 Flash-Lite", noIcon, noKey, noMark, plain,
         "Model: 3.8 Flash", noIcon, noKey, noMark, plain,
@@ -229,8 +230,23 @@ resource 'MENU' (130, "Settings") {
         "-", noIcon, noKey, noMark, plain,
         "Thinking: Fast", noIcon, noKey, noMark, plain,
         "Thinking: Balanced", noIcon, noKey, noMark, plain,
-        "Thinking: Thinking", noIcon, noKey, noMark, plain,
+        "Thinking: Thinking", noIcon, noKey, noMark, plain
+    }
+};
+
+resource 'MENU' (131, "Speech") {
+    131, textMenuProc,
+    allEnabled,
+    enabled, "Speech",
+    {
+        "Read Replies Aloud", noIcon, "T", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
-        "Read Replies Aloud (TTS)", noIcon, "T", noMark, plain
+        "Voice: Alloy (Neutral)", noIcon, noKey, noMark, plain,
+        "Voice: Echo (Warm)", noIcon, noKey, noMark, plain,
+        "Voice: Fable (Expressive)", noIcon, noKey, noMark, plain,
+        "Voice: Onyx (Deep)", noIcon, noKey, noMark, plain,
+        "Voice: Nova (Bright)", noIcon, noKey, noMark, plain,
+        "Voice: Shimmer (Soft)", noIcon, noKey, noMark, plain,
+        "Voice: Retro Synth (Robotic)", noIcon, noKey, noMark, plain
     }
 };
