@@ -166,12 +166,12 @@ static ProviderInfo   gProviders[4] = {
         "", false
     },
     {
-        "groq", "Groq", false, 1, /* Default: Llama 3.3 70B (idx 1) */
+        "groq", "Groq", false, 1, /* Default: GPT-OSS 120B (idx 1) */
         {
-            { "Llama 3.1 8B",  "llama-3.1-8b-instant" },
-            { "Llama 3.3 70B", "llama-3.3-70b-versatile" },
+            { "GPT-OSS 20B",   "openai/gpt-oss-20b" },
             { "GPT-OSS 120B",  "openai/gpt-oss-120b" },
-            { "Qwen 3.8 27B",  "qwen/qwen3.8-27b" }
+            { "Qwen 3.8 27B",  "qwen/qwen3.8-27b" },
+            { "Allam 2 7B",    "allam-2-7b" }
         },
         "", false
     }
@@ -828,13 +828,13 @@ static short GetPromptTextMaxWidthPx(void)
     short chatWidth = gWinW - chatLeft;
     short pillW     = 220 + (gWinW - DEFAULT_WIN_W);
     const char *tierLabel = GetTierDisplayName(gActiveTier);
-    short tierW     = MeasureCString(tierLabel) + 18;
+    short tierW     = ActiveModelSupportsThinking() ? (MeasureCString(tierLabel) + 18) : 0;
     short maxPx;
 
     if (pillW < 190) pillW = 190;
     if (pillW > chatWidth - 60) pillW = chatWidth - 60;
 
-    maxPx = pillW - tierW - 30;
+    maxPx = pillW - tierW - (ActiveModelSupportsThinking() ? 30 : 16);
     if (maxPx < 60) maxPx = 60;
     return maxPx;
 }
@@ -1069,8 +1069,12 @@ static void GetPromptBarGeometry(Rect *outPillR, Rect *outTierR, Rect *outMicR)
 
     SetRect(outPillR, startX, topY, startX + pillW, botY);
 
-    tierW = MeasureCString(tierLabel) + 18;
-    SetRect(outTierR, outPillR->right - tierW - 6, botY - 20, outPillR->right - 4, botY - 2);
+    if (ActiveModelSupportsThinking()) {
+        tierW = MeasureCString(tierLabel) + 18;
+        SetRect(outTierR, outPillR->right - tierW - 6, botY - 20, outPillR->right - 4, botY - 2);
+    } else {
+        SetRect(outTierR, 0, 0, 0, 0);
+    }
 
     if (gHasMicHardware) {
         SetRect(outMicR, outPillR->right + 4, botY - 22, outPillR->right + 27, botY);
@@ -1175,7 +1179,7 @@ static void DrawPromptBar(const Rect *pillR, const Rect *tierR, const Rect *micR
 
     /* Prompt input scrollbar when > 5 lines high */
     if (totalLines > MAX_PROMPT_VIS_LINES) {
-        short sbX = tierR->left - 6;
+        short sbX = ActiveModelSupportsThinking() ? (tierR->left - 6) : (pillR->right - 12);
         short sbTop = pillR->top + 6;
         short sbBot = pillR->bottom - 6;
         short trackH = sbBot - sbTop;
@@ -1190,21 +1194,12 @@ static void DrawPromptBar(const Rect *pillR, const Rect *tierR, const Rect *micR
     }
 
     /* Model Tier selector ("Pro v") anchored at bottom-right of prompt pill */
-    {
-        if (ActiveModelSupportsThinking()) {
-            const char *tierName = GetTierDisplayName(gActiveTier);
-            short tw = MeasureCString(tierName);
-            MoveTo(tierR->left + 4, pillR->bottom - 8);
-            DrawCString(tierName);
-            DrawChevronDown(tierR->left + 4 + tw + 5, pillR->bottom - 12);
-        } else {
-            /* Dimmed / greyed out indicator when thinking levels are not supported */
-            MoveTo(tierR->left + 4, pillR->bottom - 8);
-            PenPat(&qd.gray);
-            PenMode(patBic);
-            DrawCString("—");
-            PenNormal();
-        }
+    if (ActiveModelSupportsThinking()) {
+        const char *tierName = GetTierDisplayName(gActiveTier);
+        short tw = MeasureCString(tierName);
+        MoveTo(tierR->left + 4, pillR->bottom - 8);
+        DrawCString(tierName);
+        DrawChevronDown(tierR->left + 4 + tw + 5, pillR->bottom - 12);
     }
 
     /* Conditional Microphone Button (hidden on Macs without Sound Input hardware!) */
@@ -3274,11 +3269,7 @@ static void HandleContentClick(Point localPt)
         maxScrollLine = totalLines - MAX_PROMPT_VIS_LINES;
         if (maxScrollLine < 0) maxScrollLine = 0;
 
-        if (PtInRect(localPt, &tierR)) {
-            if (!ActiveModelSupportsThinking()) {
-                SysBeep(1);
-                return;
-            }
+        if (ActiveModelSupportsThinking() && PtInRect(localPt, &tierR)) {
             gTierMenuOpen = !gTierMenuOpen;
             RenderWindow();
             return;
@@ -3290,7 +3281,9 @@ static void HandleContentClick(Point localPt)
 
         /* Prompt Input Field & Internal Scrollbar (when > 5 lines) */
         if (PtInRect(localPt, &pillR)) {
-            if (maxScrollLine > 0 && localPt.h >= tierR.left - 12 && localPt.h <= tierR.left - 2) {
+            short sbRight = ActiveModelSupportsThinking() ? (tierR.left - 2) : (pillR.right - 8);
+            short sbLeft  = sbRight - 10;
+            if (maxScrollLine > 0 && localPt.h >= sbLeft && localPt.h <= sbRight) {
                 short sbTop  = pillR.top + 4;
                 short sbBot  = pillR.bottom - 4;
                 short sbH    = sbBot - sbTop;

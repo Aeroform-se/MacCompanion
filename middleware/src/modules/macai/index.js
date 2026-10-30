@@ -70,17 +70,17 @@ const PROVIDERS = {
   groq: {
     id: 'groq',
     name: 'Groq',
-    defaultModel: 'llama-3.3-70b-versatile',
+    defaultModel: 'openai/gpt-oss-120b',
     models: [
-      { label: 'Llama 3.1 8B',  id: 'llama-3.1-8b-instant' },
-      { label: 'Llama 3.3 70B', id: 'llama-3.3-70b-versatile', isDefault: true },
-      { label: 'GPT-OSS 120B',  id: 'openai/gpt-oss-120b' },
+      { label: 'GPT-OSS 20B',   id: 'openai/gpt-oss-20b' },
+      { label: 'GPT-OSS 120B',  id: 'openai/gpt-oss-120b', isDefault: true },
       { label: 'Qwen 3.8 27B',  id: 'qwen/qwen3.8-27b' },
+      { label: 'Allam 2 7B',    id: 'allam-2-7b' },
     ],
     tiers: {
-      Fast: 'llama-3.1-8b-instant',
-      Pro: 'llama-3.3-70b-versatile',
-      Thinking: 'openai/gpt-oss-120b',
+      Fast: 'openai/gpt-oss-20b',
+      Pro: 'openai/gpt-oss-120b',
+      Thinking: 'qwen/qwen3.8-27b',
     },
   },
 };
@@ -122,7 +122,7 @@ const store = createModuleStore('macai', {
     gemini: 'gemini-3.8-flash',
     chatgpt: 'gpt-4o',
     claude: 'claude-3-7-sonnet-latest',
-    groq: 'llama-3.3-70b-versatile',
+    groq: 'openai/gpt-oss-120b',
   },
   customModels: {
     gemini: '',
@@ -480,7 +480,7 @@ async function callClaudeChat(messages, model = 'claude-3-7-sonnet-latest', thin
 /**
  * Calls Groq Cloud Chat Completions API (`https://api.groq.com/openai/v1/chat/completions`).
  */
-async function callGroqChat(messages, model = 'llama-3.3-70b-versatile', thinking = 'Balanced', data = store.load(), signal = undefined) {
+async function callGroqChat(messages, model = 'openai/gpt-oss-120b', thinking = 'Balanced', data = store.load(), signal = undefined) {
   const auth = getProviderAuth(data).groq;
   if (!auth.apiKey) throw new Error('Groq API key is not configured');
   const fetchFn = getFetchImpl();
