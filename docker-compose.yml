@@ -3,6 +3,7 @@ services:
     build:
       context: ./middleware
       dockerfile: Dockerfile
+    image: maccompanion:latest
     container_name: maccompanion
     restart: unless-stopped
     ports:

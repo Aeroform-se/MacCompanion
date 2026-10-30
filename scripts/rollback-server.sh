@@ -2,13 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+IMAGE_NAME="maccompanion"
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 <version_slug>"
-    echo "Example: $0 v0.4.4"
+    echo "Example: $0 v0.4.8"
     echo ""
     echo "Available tagged server images:"
-    docker images "spotify68k-maccompanion" --format "table {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}"
+    docker images "$IMAGE_NAME" --format "table {{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.CreatedAt}}"
     echo ""
     echo "Available archived server releases:"
     ls -1 "$ROOT_DIR/releases/server" 2>/dev/null || echo "None found yet."
@@ -16,7 +17,16 @@ if [ $# -lt 1 ]; then
 fi
 
 TARGET_SLUG="$1"
-TARGET_IMAGE="spotify68k-maccompanion:$TARGET_SLUG"
+TARGET_IMAGE="${IMAGE_NAME}:$TARGET_SLUG"
+
+# Also check for legacy tag if target not found
+if ! docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
+    LEGACY_IMAGE="spotify68k-maccompanion:$TARGET_SLUG"
+    if docker image inspect "$LEGACY_IMAGE" >/dev/null 2>&1; then
+        echo "Found legacy image $LEGACY_IMAGE, retagging as $TARGET_IMAGE..."
+        docker tag "$LEGACY_IMAGE" "$TARGET_IMAGE"
+    fi
+fi
 
 if ! docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
     echo "Error: Docker image $TARGET_IMAGE not found locally."
@@ -33,8 +43,8 @@ fi
 
 echo "==> Rolling back MacCompanion Server to: $TARGET_IMAGE..."
 
-# Retag the target version as latest
-docker tag "$TARGET_IMAGE" "spotify68k-maccompanion:latest"
+# Retag target version as latest
+docker tag "$TARGET_IMAGE" "${IMAGE_NAME}:latest"
 
 echo "==> Restarting container with rolled back image..."
 docker compose -f "$ROOT_DIR/docker-compose.yml" up -d --no-build
