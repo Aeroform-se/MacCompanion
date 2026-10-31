@@ -28,9 +28,9 @@ unsigned long   gActiveTransferBytes = 0;
 unsigned long   gActiveTransferTotal = 0;
 char            gCurrentTransferId[64] = "";
 
-#define LISTEN_RCV_BUF_SIZE 32768
-#define CHAN_RCV_BUF_SIZE   32768
-#define CHUNK_BUF_SIZE      8192
+#define LISTEN_RCV_BUF_SIZE 65536
+#define CHAN_RCV_BUF_SIZE   65536
+#define CHUNK_BUF_SIZE      32768
 
 /* Passive listener on port 6803 */
 static Ptr          gListenRcvBuf    = NULL;
@@ -696,15 +696,20 @@ void NetIdle(void)
             }
         }
     } else if (gChannelState == CHAN_CONNECTED || gChannelState == CHAN_STREAMING) {
-        if (gChanRcvPending && gChanRcvPB.ioResult <= 0) {
+        short chunkBatch = 0;
+        while (chunkBatch < 3 && (gChannelState == CHAN_CONNECTED || gChannelState == CHAN_STREAMING)) {
+            if (!gChanRcvPending || gChanRcvPB.ioResult > 0) {
+                break;
+            }
             gChanRcvPending = false;
+            chunkBatch++;
 
             if (gChanRcvPB.ioResult == noErr && gChanRcvPB.csParam.receive.rcvBuffLen > 0) {
-                short nBytes = gChanRcvPB.csParam.receive.rcvBuffLen;
+                long nBytes = (unsigned short)gChanRcvPB.csParam.receive.rcvBuffLen;
                 unsigned char *pData = gChanChunkBuf;
 
                 if (!gHeaderParsed) {
-                    short copyLen = nBytes;
+                    short copyLen = (short)nBytes;
                     if (gHttpHeaderLen + copyLen > (short)(sizeof(gHttpHeaderBuf) - 1)) {
                         copyLen = (short)(sizeof(gHttpHeaderBuf) - 1 - gHttpHeaderLen);
                     }
@@ -799,6 +804,7 @@ void NetIdle(void)
                 }
                 NetStopChannel();
                 gLastChannelAttemptTick = 0; /* reconnect immediately */
+                break;
             }
         }
     }

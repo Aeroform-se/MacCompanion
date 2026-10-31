@@ -145,7 +145,7 @@ static void DrawWindow(void)
     char ipStr[32];
     short y = 20;
 
-    if (!gWindow) return;
+    if (!gWindow || !IsWindowVisible(gWindow)) return;
 
     SetPort(gWindow);
     r = gWindow->portRect;
@@ -616,6 +616,7 @@ int main(void)
     Handle mbar;
     Rect r;
     unsigned long lastTransferBytes = 0;
+    unsigned long lastDrawTick = 0;
     Boolean lastActive = false;
     Boolean lastChannel = false;
 
@@ -695,9 +696,18 @@ int main(void)
             NetIdle();
         }
 
-        if (gTransferActive != lastActive ||
-            gChannelConnected != lastChannel ||
-            (gTransferActive && (gActiveTransferBytes != lastTransferBytes))) {
+        Boolean needDraw = false;
+        if (gTransferActive != lastActive || gChannelConnected != lastChannel) {
+            needDraw = true;
+        } else if (gTransferActive && (gActiveTransferBytes != lastTransferBytes)) {
+            unsigned long nowTick = TickCount();
+            if (nowTick - lastDrawTick >= 15) {
+                needDraw = true;
+                lastDrawTick = nowTick;
+            }
+        }
+
+        if (needDraw) {
             DrawWindow();
             lastActive = gTransferActive;
             lastChannel = gChannelConnected;

@@ -36,6 +36,12 @@ class MacDropModule {
     // Pending transfer callbacks: transferId -> { resolve, reject, timer }
     this.pendingTransfers = new Map();
 
+    // Channel reconnection listeners for upload in-flight
+    this.channelWaiters = new Map();
+
+    // Active transfer progress info for real-time Web UI polling
+    this.activeTransfer = null;
+
     // Cache of manual target ping statuses: `${ip}:${port}` -> { online: boolean, checkedAt: timestamp }
     this.pingCache = new Map();
 
@@ -58,11 +64,43 @@ class MacDropModule {
   }
 
   /**
+   * Waits up to timeoutMs for a client reverse channel to reconnect.
+   */
+  waitForClientChannel(clientId, timeoutMs = 2500) {
+    return new Promise((resolve) => {
+      const client = this.activeClients.get(clientId);
+      if (client && client.res && !client.res.writableEnded && !client.res.destroyed) {
+        return resolve(true);
+      }
+      const timer = setTimeout(() => {
+        this.channelWaiters.delete(clientId);
+        resolve(false);
+      }, timeoutMs);
+
+      this.channelWaiters.set(clientId, () => {
+        clearTimeout(timer);
+        this.channelWaiters.delete(clientId);
+        resolve(true);
+      });
+    });
+  }
+
+  /**
    * Sweeps active clients to purge dead or closed sockets immediately.
+   * Clients in active probing/scanning are protected until probe timeout.
    */
   sweepDeadClients() {
     const now = Date.now();
     for (const [id, c] of this.activeClients.entries()) {
+      // If client is currently in a probe/scan cycle, protect it until probe expires
+      if (c.probing) {
+        if (now - c.probeSentAt > 2500) {
+          this.activeClients.delete(id);
+          console.log(`[MacDrop] Cleaned up timed out probing client: ${c.name} (${id})`);
+        }
+        continue;
+      }
+
       const isSocketDead = !c.res ||
                            c.res.destroyed ||
                            !c.res.socket ||
@@ -77,15 +115,15 @@ class MacDropModule {
         continue;
       }
 
-      // If client has not been seen in > 16 seconds (two missed poll cycles), delete
-      if (!c.writingDisk && (now - c.lastSeen > 16000)) {
+      // If client has not been seen in > 20 seconds, delete
+      if (!c.writingDisk && (now - c.lastSeen > 20000)) {
         this.activeClients.delete(id);
         console.log(`[MacDrop] Cleaned up timed out client: ${c.name} (${id})`);
         continue;
       }
 
-      // If client was writing disk but timed out after 45s without ACK, delete
-      if (c.writingDisk && (now - c.lastSeen > 45000)) {
+      // If client was writing disk but timed out after 120s without ACK, delete
+      if (c.writingDisk && (now - c.lastSeen > 120000)) {
         this.activeClients.delete(id);
         console.log(`[MacDrop] Cleaned up client timed out on disk write: ${c.name} (${id})`);
         continue;
@@ -96,11 +134,11 @@ class MacDropModule {
   /**
    * Waits for transfer completion ACK from the 68k Mac client.
    */
-  waitForTransferAck(transferId, timeoutMs = 35000, clientId = null) {
+  waitForTransferAck(transferId, timeoutMs = 60000, clientId = null) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingTransfers.delete(transferId);
-        reject(new Error(`Timed out waiting for Macintosh client confirmation (${timeoutMs / 1000}s)`));
+        reject(new Error(`Timed out waiting for Macintosh client confirmation (${Math.round(timeoutMs / 1000)}s)`));
       }, timeoutMs);
 
       this.pendingTransfers.set(transferId, {
@@ -256,17 +294,26 @@ class MacDropModule {
         req,
         transferInProgress: false,
         writingDisk: false,
+        probing: false,
         awaitingReconnect: false,
       };
 
       this.activeClients.set(clientId, clientObj);
       console.log(`[MacDrop] Reverse Channel connected: ${name} (${machine}) from ${remoteIp} [ID: ${clientId}]`);
 
+      // Notify any in-flight transfer waiting for channel reconnection
+      const waiter = this.channelWaiters.get(clientId);
+      if (waiter) {
+        waiter();
+      }
+
       // Idle poll timer: cleanly end response after 8s with 204 No Content so client reconnects and proves liveness
       const pollTimer = setTimeout(() => {
         const curr = this.activeClients.get(clientId);
         if (curr && curr.res === res && !curr.transferInProgress && !curr.writingDisk && !res.writableEnded) {
           try {
+            curr.probing = true;
+            curr.probeSentAt = Date.now();
             res.writeHead(204, { 'X-MacDrop-Status': 'POLL' });
             res.end();
           } catch (_) {}
@@ -288,17 +335,17 @@ class MacDropModule {
             this.activeClients.delete(clientId);
           } else if (curr.writingDisk) {
             console.log(`[MacDrop] Reverse channel stream completed; awaiting disk write ACK from ${name}`);
+          } else if (curr.probing) {
+            // Intentionally closed for probe/poll: probe logic handles reconnection
           } else {
-            // Reverse channel closed: client may be reconnecting (poll) or quit
-            // A live 68k client reconnects in ~150-250ms.
-            // If after 1200ms no new connection has taken over, client is offline!
+            // Socket closed unexpectedly; give 1500ms grace period for client reconnect
             setTimeout(() => {
               const check = this.activeClients.get(clientId);
-              if (check && (!check.res || check.res === res || check.res.writableEnded || check.res.destroyed)) {
+              if (check && !check.probing && (!check.res || check.res === res || check.res.writableEnded || check.res.destroyed)) {
                 this.activeClients.delete(clientId);
                 console.log(`[MacDrop] Cleaned up offline client (no reconnect after socket close): ${name} (${clientId})`);
               }
-            }, 1200);
+            }, 1500);
           }
         }
       };
@@ -336,6 +383,14 @@ class MacDropModule {
     this.router.post('/refresh', async (req, res) => {
       await this.refreshAllClients();
       res.json(this.getStatus());
+    });
+
+    // 2c. Real-Time Active File Transfer Progress Endpoint
+    this.router.get('/progress', (req, res) => {
+      res.json({
+        ok: true,
+        transfer: this.activeTransfer || null,
+      });
     });
 
     // 3. Service Status (Multi-client aware)
@@ -507,6 +562,22 @@ class MacDropModule {
         }
 
         const transferId = 'xfer_' + Date.now().toString(36);
+        const primaryTarget = targetsToPush[0];
+
+        this.activeTransfer = {
+          transferId,
+          fileName: macInfo.fileName,
+          targetName: targetsToPush.length > 1 ? `All Macs (${targetsToPush.length})` : (primaryTarget.name || primaryTarget.ip),
+          totalBytes: macBinaryBuffer.length,
+          bytesSent: 0,
+          percent: 0,
+          speedBps: 0,
+          speedFormatted: '0 kB/s',
+          status: 'STREAMING',
+          startedAt: Date.now(),
+          lastProgressAt: Date.now(),
+        };
+
         const pushResults = [];
 
         for (const target of targetsToPush) {
@@ -520,7 +591,24 @@ class MacDropModule {
         }
 
         const anySuccess = pushResults.some(r => r.status === 'OK');
-        const primaryTarget = targetsToPush[0];
+        if (anySuccess) {
+          if (this.activeTransfer) {
+            this.activeTransfer.percent = 100;
+            this.activeTransfer.status = 'DELIVERED';
+            this.activeTransfer.speedFormatted = 'Complete';
+          }
+        } else {
+          if (this.activeTransfer) {
+            this.activeTransfer.status = 'FAILED';
+            this.activeTransfer.error = pushResults[0] ? pushResults[0].error : 'Transfer failed';
+          }
+        }
+
+        setTimeout(() => {
+          if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
+            this.activeTransfer = null;
+          }
+        }, 3500);
 
         // Record in transfer history
         const data = this.store.load();
@@ -627,12 +715,24 @@ class MacDropModule {
   deliverToTarget(target, buffer, macInfo, transferId) {
     return new Promise(async (resolve, reject) => {
       // 1. If target is connected via Reverse HTTP Channel
-      if (target.mode === 'CHANNEL' && target.res && !target.res.writableEnded && !target.res.destroyed) {
+      if (target.mode === 'CHANNEL') {
+        // If client is currently reconnecting from a poll/scan, wait up to 2.5s for its new socket
+        if (!target.res || target.res.writableEnded || target.res.destroyed) {
+          const reconnected = await this.waitForClientChannel(target.id, 2500);
+          if (!reconnected) {
+            return reject(new Error('Target client is offline'));
+          }
+          target = this.activeClients.get(target.id);
+        }
+
+        if (!target || !target.res || target.res.writableEnded || target.res.destroyed) {
+          return reject(new Error('Target client reverse channel is unavailable'));
+        }
+
         try {
           const clientRes = target.res;
-          const ackPromise = this.waitForTransferAck(transferId, 35000, target.id);
-
           target.transferInProgress = true;
+          target.lastSeen = Date.now();
 
           clientRes.writeHead(200, {
             'Content-Type': 'application/x-macbinary',
@@ -641,22 +741,118 @@ class MacDropModule {
             'X-Filename': macInfo.fileName,
             'X-Transfer-Id': transferId,
           });
-          clientRes.write(buffer);
-          clientRes.end();
+
+          const CHUNK_SIZE = 32768; // 32 KB chunk streaming
+          let offset = 0;
+          let lastSpeedSampleTime = Date.now();
+          let lastSpeedSampleBytes = 0;
+
+          while (offset < buffer.length) {
+            if (clientRes.destroyed || (clientRes.socket && clientRes.socket.destroyed)) {
+              throw new Error('Connection aborted by Macintosh client during file transfer');
+            }
+
+            const chunkEnd = Math.min(offset + CHUNK_SIZE, buffer.length);
+            const chunk = buffer.subarray(offset, chunkEnd);
+            const ok = clientRes.write(chunk);
+            offset = chunkEnd;
+
+            target.lastSeen = Date.now();
+            const now = Date.now();
+
+            if (this.activeTransfer) {
+              this.activeTransfer.bytesSent = offset;
+              this.activeTransfer.percent = Math.min(99, Math.round((offset / buffer.length) * 100));
+              this.activeTransfer.lastProgressAt = now;
+
+              const speedElapsed = (now - lastSpeedSampleTime) / 1000;
+              if (speedElapsed >= 0.4) {
+                const bytesDelta = offset - lastSpeedSampleBytes;
+                const currentBps = Math.round(bytesDelta / speedElapsed);
+                this.activeTransfer.speedBps = currentBps;
+                if (currentBps >= 1048576) {
+                  this.activeTransfer.speedFormatted = `${(currentBps / 1048576).toFixed(2)} MB/s`;
+                } else {
+                  this.activeTransfer.speedFormatted = `${(currentBps / 1024).toFixed(1)} kB/s`;
+                }
+                lastSpeedSampleTime = now;
+                lastSpeedSampleBytes = offset;
+              }
+            }
+
+            if (!ok) {
+              await new Promise((resolveDrain, rejectDrain) => {
+                let drainTimer = setTimeout(() => {
+                  cleanup();
+                  rejectDrain(new Error('Transfer stalled: Macintosh client stopped accepting data for 30s'));
+                }, 30000);
+
+                const onDrain = () => {
+                  cleanup();
+                  resolveDrain();
+                };
+                const onError = (e) => {
+                  cleanup();
+                  rejectDrain(new Error(`Network error during transfer: ${e.message || e}`));
+                };
+                const onClose = () => {
+                  cleanup();
+                  rejectDrain(new Error('Macintosh client closed connection during file streaming'));
+                };
+                const cleanup = () => {
+                  clearTimeout(drainTimer);
+                  clientRes.removeListener('drain', onDrain);
+                  clientRes.removeListener('error', onError);
+                  clientRes.removeListener('close', onClose);
+                };
+
+                clientRes.once('drain', onDrain);
+                clientRes.once('error', onError);
+                clientRes.once('close', onClose);
+              });
+            }
+          }
+
+          // Complete HTTP stream
+          await new Promise((resolveEnd) => {
+            clientRes.end(resolveEnd);
+          });
 
           target.transferInProgress = false;
           target.writingDisk = true;
           target.lastSeen = Date.now();
 
-          // Await confirmation from 68k client
-          const ack = await ackPromise;
+          if (this.activeTransfer) {
+            this.activeTransfer.bytesSent = buffer.length;
+            this.activeTransfer.percent = 99;
+            this.activeTransfer.status = 'WRITING_DISK';
+            this.activeTransfer.speedFormatted = 'Saving to disk...';
+            this.activeTransfer.lastProgressAt = Date.now();
+          }
+
+          // Dynamic timeout for disk write based on file size:
+          // Base 45s + 1s per 3MB (e.g. 200MB gets 45 + 66 = 111s)
+          const diskWriteTimeoutMs = Math.max(45000, 45000 + Math.ceil(buffer.length / (3 * 1024 * 1024)) * 1000);
+          const ack = await this.waitForTransferAck(transferId, diskWriteTimeoutMs, target.id);
+
           target.writingDisk = false;
           target.lastSeen = Date.now();
+
+          if (this.activeTransfer) {
+            this.activeTransfer.percent = 100;
+            this.activeTransfer.status = 'DELIVERED';
+            this.activeTransfer.speedFormatted = 'Complete';
+          }
+
           return resolve({ ok: true, bytesSent: buffer.length, confirmedBytes: ack.bytes });
         } catch (err) {
           if (target) {
             target.transferInProgress = false;
             target.writingDisk = false;
+          }
+          if (this.activeTransfer) {
+            this.activeTransfer.status = 'FAILED';
+            this.activeTransfer.error = err.message;
           }
           return reject(err);
         }
@@ -715,7 +911,7 @@ class MacDropModule {
     // 1. Probe reverse channel clients: if idle, end response to prompt immediate reconnect
     for (const [id, c] of this.activeClients.entries()) {
       if (c.mode === 'CHANNEL' && !c.transferInProgress && !c.writingDisk) {
-        c.awaitingReconnect = true;
+        c.probing = true;
         c.probeSentAt = now;
         if (c.res && !c.res.writableEnded && !c.res.destroyed) {
           try {
@@ -739,11 +935,11 @@ class MacDropModule {
     // 3. Wait briefly for active reverse channel clients to reconnect (living clients reconnect in ~150-250ms)
     await new Promise(r => setTimeout(r, 800));
 
-    // 4. Any client that was probed and did NOT reconnect is offline! Purge immediately!
+    // 4. Any client that was probed and did NOT reconnect is offline! Purge only AFTER scan finishes!
     for (const [id, c] of this.activeClients.entries()) {
-      if (c.awaitingReconnect) {
+      if (c.probing) {
         this.activeClients.delete(id);
-        console.log(`[MacDrop] Client did not reconnect after refresh probe, purged immediately: ${c.name} (${id})`);
+        console.log(`[MacDrop] Client did not reconnect after scan finished, purged: ${c.name} (${id})`);
       }
     }
 
