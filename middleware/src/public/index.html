@@ -2527,8 +2527,24 @@
       }
     }
 
+    let pollTimerId = null;
+    function schedulePoll() {
+      if (pollTimerId) clearInterval(pollTimerId);
+      // Poll every 1.5s when active tab is visible for fast, seamless client status updates
+      // Poll every 5s when tab is backgrounded to preserve system resources
+      const interval = (document.visibilityState === 'visible') ? 1500 : 5000;
+      pollTimerId = setInterval(pollStatus, interval);
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        pollStatus();
+      }
+      schedulePoll();
+    });
+
     pollStatus();
-    setInterval(pollStatus, 4000);
+    schedulePoll();
     setupMacDropEvents();
   </script>
 </body>

@@ -27,7 +27,8 @@
 #define ITEM_RECONNECT  1
 #define ITEM_DOWNLOAD   2
 #define ITEM_SET_NAME   3
-#define ITEM_QUIT       5
+#define ITEM_CLOSE      5
+#define ITEM_QUIT       6
 
 #define ITEM_SOUND      1
 #define ITEM_NOTIFY     2
@@ -362,15 +363,19 @@ static void HandleMenuChoice(long choice)
 {
     short menuID = HiWord(choice);
     short itemID = LoWord(choice);
-    Str255 name;
 
     if (menuID == 0) return;
 
     switch (menuID) {
         case MENU_APPLE:
             if (itemID == ITEM_ABOUT) {
-                Alert(128, NULL);
+                if (gWindow) {
+                    ShowWindow(gWindow);
+                    SelectWindow(gWindow);
+                    DrawWindow();
+                }
             } else {
+                Str255 name;
                 GetMenuItemText(gMenuApple, itemID, name);
                 OpenDeskAcc(name);
             }
@@ -401,6 +406,11 @@ static void HandleMenuChoice(long choice)
                     strncpy(gClientNameInput, gClientName, sizeof(gClientNameInput) - 1);
                     gClientNameInput[sizeof(gClientNameInput) - 1] = '\0';
                     DrawWindow();
+                    break;
+                case ITEM_CLOSE:
+                    if (gWindow) {
+                        HideWindow(gWindow);
+                    }
                     break;
                 case ITEM_QUIT:
                     gDone = true;
@@ -448,7 +458,7 @@ static void HandleMouseDown(EventRecord *evt)
 
         case inGoAway:
             if (win == gWindow && TrackGoAway(win, evt->where)) {
-                gDone = true;
+                HideWindow(gWindow);
             }
             break;
 
@@ -620,7 +630,6 @@ int main(void)
     mbar = GetNewMBar(128);
     if (mbar) {
         SetMenuBar(mbar);
-        DisposeHandle(mbar);
         AppendResMenu(GetMenuHandle(MENU_APPLE), 'DRVR');
         DrawMenuBar();
     }
@@ -703,6 +712,16 @@ int main(void)
                 case keyDown:
                 case autoKey:
                     HandleKeyDown(&event);
+                    break;
+                case osEvt:
+                    if (((event.message >> 24) & 0xFF) == suspendResumeMessage) {
+                        Boolean resuming = (event.message & resumeFlag) != 0;
+                        if (resuming && gWindow) {
+                            ShowWindow(gWindow);
+                            SelectWindow(gWindow);
+                            DrawWindow();
+                        }
+                    }
                     break;
                 case updateEvt:
                     if ((WindowPtr)event.message == gWindow) {

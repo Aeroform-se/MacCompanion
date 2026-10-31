@@ -45,7 +45,6 @@ resource 'BNDL' (128) {
     0,
     {
         'ICN#', { 0, 128 },
-        'ics#', { 0, 128 },
         'FREF', { 0, 128 }
     }
 };
@@ -162,6 +161,139 @@ resource 'ics#' (128, "MacDrop Small", purgeable) {
     }
 };
 
+/* 16x16 Small Icon List ('SICN' 128) for Menu Bar & MultiFinder Switcher */
+resource 'SICN' (128, "MacDrop", purgeable) {
+    {
+        $"3FF8"
+        $"4004"
+        $"1FF0"
+        $"2008"
+        $"27C8"
+        $"2828"
+        $"2AA8"
+        $"2008"
+        $"2828"
+        $"27C8"
+        $"2008"
+        $"29E8"
+        $"2008"
+        $"3FF8"
+        $"1010"
+        $"1FF0"
+    }
+};
+
+/* Custom Finder Icon resources (-16455) for immediate icon display on all volumes */
+resource 'ICN#' (-16455, "Custom Icon", purgeable) {
+    {
+        /* Icon Bits */
+        $"000FF000"
+        $"00700E00"
+        $"01800180"
+        $"02000040"
+        $"0407E020"
+        $"08381C10"
+        $"10C00308"
+        $"21000084"
+        $"2207E044"
+        $"42181842"
+        $"44000022"
+        $"447FFE22"
+        $"84800121"
+        $"889FF911"
+        $"88A00511"
+        $"88A42511"
+        $"88A4A511"
+        $"84A08521"
+        $"44A18522"
+        $"44A42522"
+        $"40A3C502"
+        $"20A00504"
+        $"209FF904"
+        $"00800100"
+        $"00800100"
+        $"0093F900"
+        $"00800100"
+        $"00800100"
+        $"00800100"
+        $"00FFFF00"
+        $"00400200"
+        $"007FFE00",
+        /* Mask Bits */
+        $"000FF000"
+        $"007FFE00"
+        $"01FFFF80"
+        $"03FFFFC0"
+        $"07FFFFE0"
+        $"0FFFFFF0"
+        $"1FFFFFF8"
+        $"3FFFFFFC"
+        $"3FFFFFFC"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"3FFFFFFC"
+        $"3FFFFFFC"
+        $"0FFFFFF0"
+        $"07FFFFE0"
+        $"03FFFFC0"
+        $"01FFFF80"
+        $"00FFFF00"
+        $"00FFFF00"
+        $"00FFFF00"
+        $"007FFE00"
+        $"007FFE00"
+    }
+};
+
+resource 'ics#' (-16455, "Custom Small Icon", purgeable) {
+    {
+        /* Small Icon Bits */
+        $"3FF8"
+        $"4004"
+        $"1FF0"
+        $"2008"
+        $"27C8"
+        $"2828"
+        $"2AA8"
+        $"2008"
+        $"2828"
+        $"27C8"
+        $"2008"
+        $"29E8"
+        $"2008"
+        $"3FF8"
+        $"1010"
+        $"1FF0",
+        /* Small Mask Bits */
+        $"3FF8"
+        $"4004"
+        $"1FF0"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"1FF0"
+        $"1FF0"
+    }
+};
+
 /*
  * MultiFinder & System 7 SIZE Resource:
  * - canBackground: Receives CPU cycles when running in background
@@ -185,8 +317,29 @@ resource 'SIZE' (-1) {
     reserved,
     reserved,
     reserved,
-    384 * 1024,    /* Preferred size: 384 KB */
-    256 * 1024     /* Minimum size: 256 KB */
+    1024 * 1024,   /* Preferred size: 1024 KB (1 MB) */
+    512 * 1024     /* Minimum size: 512 KB */
+};
+
+resource 'SIZE' (0) {
+    reserved,
+    acceptSuspendResumeEvents,
+    reserved,
+    canBackground,
+    multiFinderAware,
+    backgroundAndForeground,
+    dontGetFrontClicks,
+    ignoreChildDiedEvents,
+    is32BitCompatible,
+    notHighLevelEventAware,
+    onlyLocalHLEvents,
+    notStationeryAware,
+    dontUseTextEditServices,
+    reserved,
+    reserved,
+    reserved,
+    1024 * 1024,
+    512 * 1024
 };
 
 /* Menu Bar Specification */
@@ -196,10 +349,11 @@ resource 'MBAR' (128) {
 
 resource 'MENU' (128, "Apple") {
     128, textMenuProc,
-    allEnabled,
-    enabled, " ",
+    0x7FFFFFFD,
+    enabled, apple,
     {
-        "About MacDrop...", noIcon, noKey, noMark, plain
+        "About MacDrop...", noIcon, noKey, noMark, plain,
+        "-", noIcon, noKey, noMark, plain
     }
 };
 
@@ -208,10 +362,11 @@ resource 'MENU' (129, "File") {
     allEnabled,
     enabled, "File",
     {
-        "Reconnect Server", noIcon, "R", noMark, plain,
+        "Server Connection...", noIcon, "R", noMark, plain,
         "Download Folder...", noIcon, "F", noMark, plain,
         "Set Client Name...", noIcon, "M", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
+        "Close Window", noIcon, "W", noMark, plain,
         "Quit", noIcon, "Q", noMark, plain
     }
 };

@@ -69,7 +69,7 @@ deploy_appl_to_folder() {
     python3 - "$target_appl" "$dst_dir/.finf/$dst_name" "$creator" <<'PYEOF'
 import subprocess, sys
 target_appl, finf_file, creator = sys.argv[1], sys.argv[2], sys.argv[3]
-finfo = ("APPL" + creator[:4]).encode("ascii") + b"\x20\x00" + (b"\x00" * 22)
+finfo = ("APPL" + creator[:4]).encode("ascii") + b"\x24\x00" + (b"\x00" * 22)
 hex_finfo = finfo.hex()
 with open(finf_file, "wb") as f:
     f.write(finfo)

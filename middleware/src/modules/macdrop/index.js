@@ -54,7 +54,7 @@ class MacDropModule {
     this.initRoutes();
 
     // Periodic sweep for closed/dead reverse channel sockets
-    setInterval(() => this.sweepDeadClients(), 3000);
+    setInterval(() => this.sweepDeadClients(), 1500);
   }
 
   /**
@@ -67,17 +67,18 @@ class MacDropModule {
                            c.res.destroyed ||
                            !c.res.socket ||
                            c.res.socket.destroyed ||
-                           (c.req && c.req.destroyed);
+                           (c.req && c.req.destroyed) ||
+                           c.res.writableEnded;
 
-      // If socket is dead and client has not reconnected in > 15 seconds, delete
-      if (isSocketDead && !c.writingDisk && (now - c.lastSeen > 15000)) {
+      // If socket is dead and client has not reconnected in > 2000ms, delete
+      if (isSocketDead && !c.writingDisk && (now - c.lastSeen > 2000)) {
         this.activeClients.delete(id);
         console.log(`[MacDrop] Cleaned up dead client socket: ${c.name} (${id})`);
         continue;
       }
 
-      // If client has not been seen in > 35 seconds, delete
-      if (!c.writingDisk && (now - c.lastSeen > 35000)) {
+      // If client has not been seen in > 16 seconds (two missed poll cycles), delete
+      if (!c.writingDisk && (now - c.lastSeen > 16000)) {
         this.activeClients.delete(id);
         console.log(`[MacDrop] Cleaned up timed out client: ${c.name} (${id})`);
         continue;
@@ -255,12 +256,13 @@ class MacDropModule {
         req,
         transferInProgress: false,
         writingDisk: false,
+        awaitingReconnect: false,
       };
 
       this.activeClients.set(clientId, clientObj);
       console.log(`[MacDrop] Reverse Channel connected: ${name} (${machine}) from ${remoteIp} [ID: ${clientId}]`);
 
-      // Idle poll timer: cleanly end response after 25s with 204 No Content so client reconnects and proves liveness
+      // Idle poll timer: cleanly end response after 8s with 204 No Content so client reconnects and proves liveness
       const pollTimer = setTimeout(() => {
         const curr = this.activeClients.get(clientId);
         if (curr && curr.res === res && !curr.transferInProgress && !curr.writingDisk && !res.writableEnded) {
@@ -269,7 +271,7 @@ class MacDropModule {
             res.end();
           } catch (_) {}
         }
-      }, 25000);
+      }, 8000);
 
       // Cleanup when connection closes or aborts
       const onDisconnect = () => {
@@ -287,14 +289,16 @@ class MacDropModule {
           } else if (curr.writingDisk) {
             console.log(`[MacDrop] Reverse channel stream completed; awaiting disk write ACK from ${name}`);
           } else {
-            console.log(`[MacDrop] Reverse channel poll ended: ${name} (${clientId})`);
+            // Reverse channel closed: client may be reconnecting (poll) or quit
+            // A live 68k client reconnects in ~150-250ms.
+            // If after 1200ms no new connection has taken over, client is offline!
             setTimeout(() => {
               const check = this.activeClients.get(clientId);
-              if (check && (!check.res || check.res === res || check.res.writableEnded) && (Date.now() - check.lastSeen > 30000)) {
+              if (check && (!check.res || check.res === res || check.res.writableEnded || check.res.destroyed)) {
                 this.activeClients.delete(clientId);
-                console.log(`[MacDrop] Cleaned up inactive client (no reconnect): ${name} (${clientId})`);
+                console.log(`[MacDrop] Cleaned up offline client (no reconnect after socket close): ${name} (${clientId})`);
               }
-            }, 15000);
+            }, 1200);
           }
         }
       };
@@ -707,13 +711,18 @@ class MacDropModule {
   async refreshAllClients() {
     this.sweepDeadClients();
 
+    const now = Date.now();
     // 1. Probe reverse channel clients: if idle, end response to prompt immediate reconnect
     for (const [id, c] of this.activeClients.entries()) {
-      if (c.mode === 'CHANNEL' && c.res && !c.res.writableEnded && !c.transferInProgress && !c.writingDisk) {
-        try {
-          c.res.writeHead(204, { 'X-MacDrop-Status': 'POLL' });
-          c.res.end();
-        } catch (_) {}
+      if (c.mode === 'CHANNEL' && !c.transferInProgress && !c.writingDisk) {
+        c.awaitingReconnect = true;
+        c.probeSentAt = now;
+        if (c.res && !c.res.writableEnded && !c.res.destroyed) {
+          try {
+            c.res.writeHead(204, { 'X-MacDrop-Status': 'POLL' });
+            c.res.end();
+          } catch (_) {}
+        }
       }
     }
 
@@ -727,8 +736,16 @@ class MacDropModule {
 
     await Promise.all(pingPromises);
 
-    // 3. Wait briefly for active reverse channel clients to reconnect (typically ~100-250ms)
-    await new Promise(r => setTimeout(r, 600));
+    // 3. Wait briefly for active reverse channel clients to reconnect (living clients reconnect in ~150-250ms)
+    await new Promise(r => setTimeout(r, 800));
+
+    // 4. Any client that was probed and did NOT reconnect is offline! Purge immediately!
+    for (const [id, c] of this.activeClients.entries()) {
+      if (c.awaitingReconnect) {
+        this.activeClients.delete(id);
+        console.log(`[MacDrop] Client did not reconnect after refresh probe, purged immediately: ${c.name} (${id})`);
+      }
+    }
 
     this.sweepDeadClients();
   }
