@@ -810,15 +810,29 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
 
     AudioStreamInit();
     if (gAudioRunning) {
-        if (sampleRateHz > 0 && sampleRateHz != gAudioSampleRateHz) {
-            gAudioSampleRateHz = sampleRateHz;
+        /* Verify that existing TCP stream is still actually alive and in ESTABLISHED state */
+        if (gAudioStream != 0) {
+            memset(&pb, 0, sizeof(pb));
+            pb.ioCRefNum = gMacTCPRef;
+            pb.csCode    = TCPStatus;
+            pb.tcpStream = gAudioStream;
+            if (PBControlSync((ParmBlkPtr)&pb) != noErr || pb.csParam.status.connectionState != 8) {
+                AudioStreamStop();
+            } else {
+                if (sampleRateHz > 0 && sampleRateHz != gAudioSampleRateHz) {
+                    gAudioSampleRateHz = sampleRateHz;
+                }
+                return true;
+            }
+        } else {
+            AudioStreamStop();
         }
-        return true;
     }
 
     if (!NetInit() || gServerIP == 0) return false;
     if (sampleRateHz > 0) gAudioSampleRateHz = sampleRateHz;
 
+    /* Always allocate a clean Sound Manager channel for the stream */
     gSndChan = NULL;
     if (SndNewChannel(&gSndChan, sampledSynth, initMono, gSndCallBackUPP) != noErr || !gSndChan) {
         gSndChan = NULL;

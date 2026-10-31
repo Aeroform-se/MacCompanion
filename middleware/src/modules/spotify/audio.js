@@ -941,6 +941,7 @@ class AudioStreamEngine extends EventEmitter {
       console.log(`[AudioEngine] 68k TCP client connected (${socket.remoteAddress}:${socket.remotePort}) — active clients: ${this.tcpClients.size}`);
 
       this.ensureStarted().catch(() => {});
+      audioHub.onClientConnected(socket);
 
       socket.on('close', () => {
         this.tcpClients.delete(socket);

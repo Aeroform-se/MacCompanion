@@ -1238,13 +1238,16 @@ router.all('/select', (req, res) => {
 router.all('/voice-settings', (req, res) => {
   const data = store.load();
   const voice = req.query.voice || (req.body && req.body.voice);
-  const tts = req.query.tts !== undefined ? req.query.tts : (req.body && req.body.tts);
+  const tts = req.query.tts !== undefined ? req.query.tts
+            : (req.query.enabled !== undefined ? req.query.enabled
+            : (req.body && (req.body.tts !== undefined ? req.body.tts
+            : (req.body.enabled !== undefined ? req.body.enabled : req.body.ttsEnabled))));
   const updates = {};
   if (voice) {
     updates.ttsVoice = String(voice).trim().toLowerCase();
   }
   if (tts !== undefined) {
-    updates.ttsEnabled = (tts === '1' || tts === true || tts === 'true');
+    updates.ttsEnabled = (tts === '1' || tts === 1 || tts === true || tts === 'true');
   }
   const saved = store.save(updates);
   return sendPipeResponse(
@@ -1398,7 +1401,11 @@ router.all('/scifi/start', async (req, res) => {
     const thinking = reqThinking || defaultTier;
     const reqModel = String(req.query.model || (req.body && req.body.model) || '').trim();
     const model = reqModel || (data.activeModels && data.activeModels[provider]) || PROVIDERS[provider].defaultModel;
-    const wantTts = req.query.tts === '1' || (req.body && req.body.tts === true);
+    const wantTts = req.query.tts !== undefined
+      ? (req.query.tts === '1' || req.query.tts === 'true' || req.query.tts === 1)
+      : (req.body && req.body.tts !== undefined
+          ? (req.body.tts === true || req.body.tts === 'true' || req.body.tts === '1')
+          : Boolean(data.ttsEnabled));
 
     const userName = discoverUserName(data);
 
@@ -1505,13 +1512,14 @@ CRITICAL: NEVER use the word "ASCII" or "ASCII art" in your conversational text 
 
     if (wantTts) {
       await audioHub.pauseSpotifyForVoice();
-      synthesizeSpeechToPcmU8(cleanReply, { hz: 22255, data })
-        .then((u8) => {
-          if (u8 && u8.length > 0) {
-            audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
-          }
-        })
-        .catch(() => {});
+      try {
+        const u8 = await synthesizeSpeechToPcmU8(cleanReply, { hz: 22255, data });
+        if (u8 && u8.length > 0) {
+          audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
+        }
+      } catch (ttsErr) {
+        console.warn('[MacAI:SciFi:TTS] Speech synthesis error:', ttsErr.message);
+      }
     }
 
     const pipeCols = ['REPLY', chat.id, chat.title, provider, thinking, cleanReply];
@@ -1554,7 +1562,11 @@ router.all('/ask', async (req, res) => {
     const thinking = reqThinking || defaultTier;
     const reqModel = String(req.query.model || (req.body && req.body.model) || '').trim();
     const model = reqModel || (data.activeModels && data.activeModels[provider]) || PROVIDERS[provider].defaultModel;
-    const wantTts = req.query.tts === '1' || (req.body && req.body.tts === true);
+    const wantTts = req.query.tts !== undefined
+      ? (req.query.tts === '1' || req.query.tts === 'true' || req.query.tts === 1)
+      : (req.body && req.body.tts !== undefined
+          ? (req.body.tts === true || req.body.tts === 'true' || req.body.tts === '1')
+          : Boolean(data.ttsEnabled));
     const isRetry = req.query.retry === '1' || (req.body && req.body.retry === true);
 
     let chatId = String(req.query.chat_id || (req.body && req.body.chat_id) || '').trim();
@@ -1730,13 +1742,14 @@ router.all('/ask', async (req, res) => {
 
     if (wantTts && !imageInfo) {
       await audioHub.pauseSpotifyForVoice();
-      synthesizeSpeechToPcmU8(replyText, { hz: 22255, data })
-        .then((u8) => {
-          if (u8 && u8.length > 0) {
-            audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
-          }
-        })
-        .catch(() => {});
+      try {
+        const u8 = await synthesizeSpeechToPcmU8(replyText, { hz: 22255, data });
+        if (u8 && u8.length > 0) {
+          audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
+        }
+      } catch (ttsErr) {
+        console.warn('[MacAI:TTS] Speech synthesis error:', ttsErr.message);
+      }
     }
 
     const pipeCols = ['REPLY', chat.id, chat.title || prompt, provider, thinking, replyText];

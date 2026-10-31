@@ -192,7 +192,7 @@ static unsigned long  gWaitStartTick      = 0;
 static Boolean        gUserCancelledWait  = false;
 static Boolean        gProviderMenuOpen   = false;
 static Boolean        gTierMenuOpen       = false;
-static Boolean        gReadRepliesTTS     = false;
+static Boolean        gReadRepliesTTS     = true;
 
 /* Sidebar & Chat History State */
 static Boolean        gSidebarCollapsed = false;
@@ -463,10 +463,10 @@ static Boolean LoadMacAIPrefs(ip_addr *outIP)
                         if (prefs.activeVoiceIdx >= 0 && prefs.activeVoiceIdx < 7) {
                             gActiveVoiceIdx = prefs.activeVoiceIdx;
                         }
-                        if (prefs.readRepliesTTS >= 0 && prefs.readRepliesTTS <= 1) {
+                        if (count >= 34 && prefs.readRepliesTTS >= 0 && prefs.readRepliesTTS <= 1) {
                             gReadRepliesTTS = (prefs.readRepliesTTS == 1);
+                            gUserHasSavedPrefs = true;
                         }
-                        gUserHasSavedPrefs = true;
                     }
                     return true;
                 }
@@ -2740,15 +2740,14 @@ static void FetchProvidersAndChats(void)
                     *p2++ = '\0';
                     p3 = strchr(p2, '|');
                     if (p3) *p3 = '\0';
-                    if (!gUserHasSavedPrefs) {
-                        gReadRepliesTTS = (p1[0] == '1');
-                        for (v = 0; v < 7; v++) {
-                            if (strcmp(gTtsVoiceNames[v], p2) == 0) {
-                                gActiveVoiceIdx = v;
-                                break;
-                            }
+                    gReadRepliesTTS = (p1[0] == '1');
+                    for (v = 0; v < 7; v++) {
+                        if (strcmp(gTtsVoiceNames[v], p2) == 0) {
+                            gActiveVoiceIdx = v;
+                            break;
                         }
                     }
+                    SyncSpeechMenuState();
                 }
             }
             line = next ? (next + 1) : NULL;
@@ -2766,6 +2765,7 @@ static void FetchProvidersAndChats(void)
         }
     }
     SyncAIMenuState();
+    SyncSpeechMenuState();
 
     RefreshChatList();
 
@@ -4015,7 +4015,7 @@ static void HandleKeyPress(char key, short keyCode, short modifiers)
             gReadRepliesTTS = !gReadRepliesTTS;
             SyncSpeechMenuState();
             SaveMacAIPrefs();
-            sprintf(url, "/api/macai/voice-settings?enabled=%d", gReadRepliesTTS ? 1 : 0);
+            sprintf(url, "/api/macai/voice-settings?tts=%d&enabled=%d", gReadRepliesTTS ? 1 : 0, gReadRepliesTTS ? 1 : 0);
             NetHttpGet(url, gNetBuf, NET_BUF_SIZE);
             return;
         }
@@ -4429,7 +4429,7 @@ static void HandleMenuChoice(long menuChoice)
                 gReadRepliesTTS = !gReadRepliesTTS;
                 SyncSpeechMenuState();
                 SaveMacAIPrefs();
-                sprintf(url, "/api/macai/voice-settings?enabled=%d", gReadRepliesTTS ? 1 : 0);
+                sprintf(url, "/api/macai/voice-settings?tts=%d&enabled=%d", gReadRepliesTTS ? 1 : 0, gReadRepliesTTS ? 1 : 0);
                 NetHttpGet(url, gNetBuf, NET_BUF_SIZE);
                 break;
             }
@@ -5037,6 +5037,10 @@ static void ScifiSendPrompt(const char *promptText)
     gScifiAwaitingReply = true;
     RenderScifiWindow();
 
+    if (gReadRepliesTTS) {
+        AudioStreamStart(22255);
+    }
+
     UrlEncode(promptText, encPrompt, sizeof(encPrompt));
     sprintf(url, "/api/macai/ask?chat_id=%s&q=%s&provider=%s&tier=%s&tts=%d",
             gActiveChatId, encPrompt, gActiveProvider, gActiveTier, gReadRepliesTTS ? 1 : 0);
@@ -5340,6 +5344,10 @@ static void EnterScifiMode(void)
         RenderScifiWindow();
         gScifiAwaitingReply = true;
 
+        if (gReadRepliesTTS) {
+            AudioStreamStart(22255);
+        }
+
         {
             char url[256];
             sprintf(url, "/api/macai/scifi/start?provider=%s&tier=%s&tts=%d",
@@ -5456,6 +5464,7 @@ int main(void)
         SetMenuBar(menuBar);
         AppendResMenu(GetMenuHandle(mApple), 'DRVR');
         SyncAIMenuState();
+        SyncSpeechMenuState();
         DrawMenuBar();
     }
 

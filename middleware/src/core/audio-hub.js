@@ -20,6 +20,7 @@ class SharedAudioHub {
     this.pauseSpotifyFn = null;
     this.ttsActiveUntil = 0;
     this.activeTtsTimer = null;
+    this.pendingTts = null;
   }
 
   registerSpotifyEngine(engine, pauseFn) {
@@ -51,9 +52,23 @@ class SharedAudioHub {
    */
   stopTtsStream() {
     this.ttsActiveUntil = 0;
+    this.pendingTts = null;
     if (this.activeTtsTimer) {
       clearTimeout(this.activeTtsTimer);
       this.activeTtsTimer = null;
+    }
+  }
+
+  /**
+   * Called when a 68k client connects to TCP port 6802.
+   * If TTS speech audio was synthesized while the client was connecting, immediately flush it!
+   */
+  onClientConnected(socket) {
+    if (this.pendingTts && Date.now() < this.pendingTts.expiresAt && this.pendingTts.buffer && this.pendingTts.buffer.length > 0) {
+      const { buffer, hz } = this.pendingTts;
+      this.pendingTts = null;
+      console.log(`[AudioHub] 68k TCP client connected — streaming ${buffer.length} buffered TTS bytes`);
+      this.streamPcmU8ToTcpClients(buffer, { hz });
     }
   }
 
@@ -69,6 +84,12 @@ class SharedAudioHub {
     this.ttsActiveUntil = Date.now() + durationMs + 500;
 
     if (!this.spotifyEngine || !this.spotifyEngine.tcpClients || this.spotifyEngine.tcpClients.size === 0) {
+      console.log(`[AudioHub] No active 68k TCP client connected (:6802); buffering ${u8Buffer.length} bytes for client arrival...`);
+      this.pendingTts = {
+        buffer: u8Buffer,
+        hz,
+        expiresAt: Date.now() + 15000,
+      };
       return { streamedBytes: u8Buffer.length, durationMs };
     }
 
