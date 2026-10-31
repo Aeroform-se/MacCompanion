@@ -8,6 +8,7 @@ const { startDiscoveryServer, getLocalIpAddress, DEFAULT_UDP_PORT, DISCOVERY_MAG
 const { SERVER_NAME, SERVER_VERSION_SLUG, SERVER_CODENAME } = require('./version');
 const spotifyModule = require('./modules/spotify');
 const macaiModule = require('./modules/macai');
+const macdropModule = require('./modules/macdrop');
 
 const HTTP_PORT = parseInt(process.env.PORT || '6800', 10);
 const UDP_PORT = DEFAULT_UDP_PORT;
@@ -24,6 +25,7 @@ function createApp() {
   // Register standalone modules
   registry.register(spotifyModule);
   registry.register(macaiModule);
+  registry.register(macdropModule);
 
   // Mount all registered module routers (/api/spotify, /api/macai, etc.)
   registry.mountAll(app);

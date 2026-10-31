@@ -139,7 +139,7 @@
       grid-template-columns: repeat(auto-fit, minmax(360px, 420px));
       gap: 28px;
       width: 100%;
-      max-width: 900px;
+      max-width: 1320px;
       justify-content: center;
     }
 
@@ -158,6 +158,190 @@
       align-items: center;
       width: 100%;
       min-height: 410px;
+    }
+
+    /* MacDrop AirDrop-Style Interactive Dropzone on Card */
+    .macdrop-dropzone {
+      width: 100%;
+      flex: 1;
+      min-height: 220px;
+      margin: 4px 0 16px 0;
+      border: 1.5px dotted #000000;
+      border-radius: 4px;
+      background: #ffffff;
+      padding: 16px 12px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s, border-color 0.15s;
+      position: relative;
+    }
+
+    .macdrop-dropzone:hover {
+      background: #fafafa;
+    }
+
+    .macdrop-dropzone.drag-active {
+      border-style: dashed !important;
+      background: #f5f5f5 !important;
+    }
+
+    .macdrop-refresh-btn {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      font-size: 11px;
+      padding: 3px 8px;
+      background: #ffffff;
+      border: 1.5px solid #000000;
+      color: #000000;
+      cursor: pointer;
+      z-index: 10;
+      box-shadow: 1px 1px 0 #000000;
+      transition: background 0.1s, color 0.1s, transform 0.1s;
+    }
+
+    .macdrop-refresh-btn:hover {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .macdrop-refresh-btn:active {
+      transform: translate(1px, 1px);
+      box-shadow: none;
+    }
+
+    .macdrop-devices-wrap {
+      width: 100%;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .macdrop-device-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 10px 14px;
+      border: 1.5px solid transparent;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.12s, border-color 0.12s, transform 0.12s;
+    }
+
+    .macdrop-device-item:hover {
+      background: #f0f0f0;
+      border-color: #000000;
+      transform: translateY(-1px);
+    }
+
+    .macdrop-device-item.drag-over {
+      background: #000000 !important;
+      color: #ffffff !important;
+      border-color: #000000 !important;
+      transform: scale(1.05);
+    }
+
+    .macdrop-device-item.drag-over .macdrop-device-label,
+    .macdrop-device-item.drag-over .macdrop-device-name {
+      color: #ffffff !important;
+    }
+
+    .macdrop-device-icon {
+      width: 38px;
+      height: 48px;
+      object-fit: contain;
+      image-rendering: pixelated;
+      margin-bottom: 8px;
+      display: block;
+    }
+
+    .macdrop-device-icon.dim {
+      opacity: 0.35;
+      filter: grayscale(100%);
+    }
+
+    .macdrop-device-label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      color: #000000;
+      white-space: nowrap;
+    }
+
+    .macdrop-empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: #666666;
+    }
+
+    .macdrop-empty-hint {
+      font-size: 11px;
+      color: #888888;
+      margin-top: 4px;
+    }
+
+    /* MacDrop Live Progress Box */
+    .macdrop-progress-box {
+      width: 90%;
+      max-width: 280px;
+      margin: 8px 0;
+      padding: 10px 12px;
+      border: 1px solid #000;
+      background: #ffffff;
+      box-sizing: border-box;
+      box-shadow: 2px 2px 0 #000;
+      position: absolute;
+      z-index: 10;
+    }
+
+    .macdrop-progress-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      font-weight: bold;
+      margin-bottom: 5px;
+    }
+
+    .macdrop-progress-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 200px;
+    }
+
+    .macdrop-bar-wrap {
+      width: 100%;
+      height: 12px;
+      background: #ffffff;
+      border: 1px solid #000;
+      overflow: hidden;
+      margin-bottom: 5px;
+    }
+
+    .macdrop-bar-fill {
+      height: 100%;
+      background: #000000;
+      width: 0%;
+      transition: width 0.1s linear;
+    }
+
+    .macdrop-progress-sub {
+      font-size: 10px;
+      color: #555;
+      text-align: center;
     }
 
     .card-icon-wrap {
@@ -799,6 +983,52 @@
         </div>
       </section>
     </div>
+
+    <!-- Card 3: MacDrop -->
+    <div class="service-card-wrap">
+      <section class="service-card pixel-card-clip" id="macdrop-card">
+        <div class="card-icon-wrap">
+          <img
+            src="/img/MacDrop-serviceIcon.png"
+            class="card-icon"
+            width="86"
+            height="88"
+            alt="MacDrop"
+          />
+        </div>
+
+        <!-- Big AirDrop-Style Drop Zone -->
+        <div class="macdrop-dropzone" id="macdrop-dropzone">
+          <button type="button" id="macdrop-refresh-btn" class="macdrop-refresh-btn action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)" title="Scan & refresh connected Macs">
+            ⟳ Refresh
+          </button>
+          <input type="file" id="macdrop-file-input" style="display:none;" multiple onchange="handleFileSelect(event)" />
+          
+          <div class="macdrop-devices-wrap" id="macdrop-devices-wrap">
+            <!-- Dynamically populated connected devices (AirDrop style) -->
+          </div>
+
+          <!-- Live Transfer Progress Box -->
+          <div class="macdrop-progress-box hidden" id="macdrop-progress-box">
+            <div class="macdrop-progress-header">
+              <span class="macdrop-progress-name" id="macdrop-progress-name">File.sit</span>
+              <span class="macdrop-progress-pct" id="macdrop-progress-pct">0%</span>
+            </div>
+            <div class="macdrop-bar-wrap">
+              <div class="macdrop-bar-fill" id="macdrop-bar-fill"></div>
+            </div>
+            <div class="macdrop-progress-sub" id="macdrop-progress-sub">Streaming to Macintosh...</div>
+          </div>
+        </div>
+
+        <div class="configure-btn-wrap">
+          <a href="#macdrop" class="configure-btn pixel-btn-clip">
+            <span>Configure MacDrop</span>
+            <span>&gt;</span>
+          </a>
+        </div>
+      </section>
+    </div>
   </main>
 
   <!-- VIEW 2: SpotiMac Subpage -->
@@ -1173,6 +1403,80 @@
     </div>
   </main>
 
+  <!-- VIEW 4: MacDrop Subpage -->
+  <main id="view-macdrop" class="subpage-view hidden">
+    <div class="subpage-header">
+      <div class="back-btn-wrap">
+        <a href="#" class="back-btn pixel-pill-clip">&larr; Back to Overview</a>
+      </div>
+      <h2 class="subpage-title">MacDrop Settings</h2>
+    </div>
+
+    <div class="settings-card-wrap">
+      <section class="settings-card pixel-card-clip">
+        <!-- Status Banner -->
+        <div class="status-banner" id="macdrop-sub-banner">
+          <img src="/img/status-off.png" id="macdrop-sub-icon" class="status-icon" width="8" height="8" alt="Status" />
+          <span id="macdrop-sub-text">Awaiting 68k Macintosh client...</span>
+        </div>
+
+        <!-- Connected Macintosh Clients Table -->
+        <div class="section-box">
+          <div class="section-title-row">
+            <span>Macintosh Clients</span>
+            <span id="macdrop-clients-count" style="font-size:12px; color:#666;">0 connected</span>
+          </div>
+          <div style="font-size:13px; line-height:1.4; margin-bottom:12px;">
+            Vintage Macs running MacDrop appear here automatically via outbound Reverse Push Channel. You can also manually add a static LAN client below.
+          </div>
+          <div style="overflow-x:auto;">
+            <table style="width:100%; border-collapse:collapse; font-size:12px; text-align:left;">
+              <thead>
+                <tr style="border-bottom:2px solid #000;">
+                  <th style="padding:6px 4px; width:24px;"></th>
+                  <th style="padding:6px 4px;">Macintosh Name</th>
+                  <th style="padding:6px 4px;">Hardware Model</th>
+                  <th style="padding:6px 4px;">IP Address</th>
+                  <th style="padding:6px 4px;">Type</th>
+                  <th style="padding:6px 4px; text-align:right;">Target</th>
+                </tr>
+              </thead>
+              <tbody id="macdrop-clients-tbody">
+                <tr>
+                  <td colspan="6" style="padding:10px 4px; color:#666; text-align:center;">No Macintosh clients currently online. Launch MacDrop on your 68k Mac to connect.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div style="margin-top:10px; display:flex; justify-content:space-between; align-items:center;">
+            <button type="button" id="macdrop-sub-refresh-btn" class="action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)">⟳ Refresh Status</button>
+            <button type="button" id="macdrop-broadcast-btn" class="action-btn-sm pixel-pill-clip" style="display:none;" onclick="changeMacDropTarget('all')">🌟 Broadcast to All Connected Macs</button>
+          </div>
+        </div>
+
+        <!-- Manually Add Client -->
+        <div class="section-box">
+          <div class="section-title-row">
+            <span>Manually Add Client (LAN Fallback)</span>
+            <span id="macdrop-target-state-pill" style="font-size:12px; color:#666;">Direct TCP :6803</span>
+          </div>
+          <div style="font-size:13px; line-height:1.4; margin-bottom:10px;">
+            If your vintage Mac is on a physical network without outbound gateway access, enter its IP address below. The server will ping it before adding:
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <input type="text" id="macdrop-name-input" placeholder="Client Name (e.g. Mac SE/30)" style="flex:1; min-width:140px; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <input type="text" id="macdrop-ip-input" placeholder="IP (e.g. 192.168.1.50)" style="flex:1; min-width:120px; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <input type="number" id="macdrop-port-input" value="6803" placeholder="6803" style="width:70px; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <div class="action-btn-wrap">
+              <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveMacDropTarget()">Add &amp; Ping Client</button>
+            </div>
+          </div>
+          <div id="macdrop-ping-result" style="font-size:12px; margin-top:8px; color:#555;"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
   <!-- Platform Footer / Support -->
   <footer class="platform-footer">
     <div class="footer-pill-wrap">
@@ -1192,27 +1496,37 @@
     };
     let lastSpotifyData = null;
 
-    // View Routing (#spotimac, #macai, or default #overview)
+    // View Routing (#spotimac, #macai, #macdrop, or default #overview)
     function updateRoute() {
       const hash = window.location.hash.toLowerCase();
       const viewDash = document.getElementById('view-dashboard');
       const viewSpoti = document.getElementById('view-spotimac');
       const viewMacAI = document.getElementById('view-macai');
+      const viewMacDrop = document.getElementById('view-macdrop');
 
       if (hash === '#spotimac') {
         viewDash.classList.add('hidden');
         viewSpoti.classList.remove('hidden');
         viewMacAI.classList.add('hidden');
+        if (viewMacDrop) viewMacDrop.classList.add('hidden');
         window.scrollTo(0, 0);
       } else if (hash === '#macai') {
         viewDash.classList.add('hidden');
         viewSpoti.classList.add('hidden');
         viewMacAI.classList.remove('hidden');
+        if (viewMacDrop) viewMacDrop.classList.add('hidden');
+        window.scrollTo(0, 0);
+      } else if (hash === '#macdrop') {
+        viewDash.classList.add('hidden');
+        viewSpoti.classList.add('hidden');
+        viewMacAI.classList.add('hidden');
+        if (viewMacDrop) viewMacDrop.classList.remove('hidden');
         window.scrollTo(0, 0);
       } else {
         viewDash.classList.remove('hidden');
         viewSpoti.classList.add('hidden');
         viewMacAI.classList.add('hidden');
+        if (viewMacDrop) viewMacDrop.classList.add('hidden');
       }
     }
 
@@ -1596,6 +1910,447 @@
       });
     }
 
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    let activeUploadTargetId = null;
+
+    function triggerMacDropTarget(targetId) {
+      activeUploadTargetId = targetId;
+      const fileInput = document.getElementById('macdrop-file-input');
+      if (fileInput) fileInput.click();
+    }
+
+    function renderMacDrop(macdrop) {
+      if (!macdrop) return;
+
+      const subBanner = document.getElementById('macdrop-sub-banner');
+      const subIcon = document.getElementById('macdrop-sub-icon');
+      const subText = document.getElementById('macdrop-sub-text');
+      const targetPill = document.getElementById('macdrop-target-state-pill');
+      const clientsCount = document.getElementById('macdrop-clients-count');
+      const clientsTbody = document.getElementById('macdrop-clients-tbody');
+      const broadcastBtn = document.getElementById('macdrop-broadcast-btn');
+      const ipInput = document.getElementById('macdrop-ip-input');
+      const portInput = document.getElementById('macdrop-port-input');
+
+      const clients = macdrop.clients || [];
+      const savedTargets = macdrop.savedTargets || [];
+      const selectedId = macdrop.selectedTargetId || 'auto';
+      const active = macdrop.activeTarget;
+      const isOnline = active && active.online;
+
+      // Update Subpage Banner
+      if (isOnline) {
+        if (subIcon) setIconStatus(subIcon, 'ok');
+        if (subText) subText.textContent = `Target Ready: ${active.name} (${active.ip})`;
+        if (targetPill) targetPill.textContent = 'Online & Ready';
+      } else if (active) {
+        if (subIcon) setIconStatus(subIcon, 'off');
+        if (subText) subText.textContent = `Target offline: ${active.name} (${active.ip})`;
+        if (targetPill) targetPill.textContent = 'Standby (Offline)';
+      } else {
+        if (subIcon) setIconStatus(subIcon, 'off');
+        if (subText) subText.textContent = 'Awaiting 68k Macintosh client connection...';
+        if (targetPill) targetPill.textContent = 'No Target';
+      }
+
+      // Collect all truly online clients for display
+      const onlineClients = [...clients];
+      for (const t of savedTargets) {
+        if (t.online && !onlineClients.some(c => c.ip === t.ip)) {
+          onlineClients.push({
+            id: t.id || t.ip,
+            name: t.name || t.ip,
+            machine: t.machine || 'Macintosh (Direct TCP)',
+            ip: t.ip,
+            version: t.version || 'LAN',
+            online: true,
+            mode: 'DIRECT',
+          });
+        }
+      }
+
+      // Populate AirDrop-style connected devices on dashboard card
+      const devicesWrap = document.getElementById('macdrop-devices-wrap');
+      if (devicesWrap) {
+        if (onlineClients.length === 0) {
+          devicesWrap.innerHTML = `
+            <div class="macdrop-empty-state">
+              <img src="/img/happymac.png" class="macdrop-device-icon dim" alt="Awaiting Mac" />
+              <div class="macdrop-device-label" style="color:#777;">
+                <img src="/img/status-off.png" class="status-icon" width="8" height="8" alt="Offline" />
+                <span>Awaiting 68k Mac...</span>
+              </div>
+              <div class="macdrop-empty-hint">Launch MacDrop on your vintage Mac</div>
+            </div>
+          `;
+        } else {
+          devicesWrap.innerHTML = onlineClients.map(c => `
+            <div class="macdrop-device-item" data-id="${escapeHtml(c.id)}" onclick="event.stopPropagation(); triggerMacDropTarget('${escapeHtml(c.id)}')">
+              <img src="/img/happymac.png" class="macdrop-device-icon" alt="${escapeHtml(c.name)}" />
+              <div class="macdrop-device-label">
+                <img src="/img/status-ok.png" class="status-icon" width="8" height="8" alt="Online" />
+                <span class="macdrop-device-name">${escapeHtml(c.name)}</span>
+              </div>
+            </div>
+          `).join('');
+        }
+      }
+
+      // Populate Subpage Connected Clients Table
+      if (clientsCount) {
+        clientsCount.textContent = `${onlineClients.length} online`;
+      }
+      if (broadcastBtn) {
+        broadcastBtn.style.display = onlineClients.length > 1 ? 'inline-block' : 'none';
+        if (selectedId === 'all') {
+          broadcastBtn.textContent = '✓ Broadcasting to All Macs';
+          broadcastBtn.style.background = '#000';
+          broadcastBtn.style.color = '#fff';
+        } else {
+          broadcastBtn.textContent = '🌟 Broadcast to All Connected Macs';
+          broadcastBtn.style.background = '';
+          broadcastBtn.style.color = '';
+        }
+      }
+      if (clientsTbody) {
+        // All clients (active channel + saved manual targets)
+        const allKnown = [...clients.map(c => ({ ...c, type: 'Reverse Push Channel' }))];
+        for (const t of savedTargets) {
+          if (!allKnown.some(c => c.ip === t.ip)) {
+            allKnown.push({
+              id: t.id || t.ip,
+              name: t.name || t.ip,
+              machine: t.machine || 'Vintage Macintosh',
+              ip: `${t.ip}:${t.port || 6803}`,
+              type: 'Direct TCP :6803',
+              online: Boolean(t.online),
+            });
+          }
+        }
+
+        if (allKnown.length === 0) {
+          clientsTbody.innerHTML = '<tr><td colspan="6" style="padding:10px 4px; color:#666; text-align:center;">No Macintosh clients currently online. Launch MacDrop on your 68k Mac to connect.</td></tr>';
+        } else {
+          clientsTbody.innerHTML = allKnown.map(c => {
+            const isSelected = selectedId === c.id || (selectedId === 'auto' && active && (active.id === c.id || active.ip === c.ip));
+            const statusImg = c.online ? '/img/status-ok.png' : '/img/status-off.png';
+            return `
+              <tr style="border-bottom:1px solid #eee;">
+                <td style="padding:6px 4px; text-align:center;">
+                  <img src="${statusImg}" class="status-icon" width="8" height="8" alt="${c.online ? 'Online' : 'Offline'}" />
+                </td>
+                <td style="padding:6px 4px; font-weight:bold;">${escapeHtml(c.name)}</td>
+                <td style="padding:6px 4px;">${escapeHtml(c.machine || 'Macintosh 68k')}</td>
+                <td style="padding:6px 4px; font-family:monospace;">${escapeHtml(c.ip)}</td>
+                <td style="padding:6px 4px; font-size:11px; color:#555;">${escapeHtml(c.type || 'Reverse Push Channel')}</td>
+                <td style="padding:6px 4px; text-align:right;">
+                  <button type="button" class="action-btn-sm pixel-pill-clip" style="${isSelected ? 'background:#000;color:#fff;' : ''}" onclick="changeMacDropTarget('${c.id}')">
+                    ${isSelected ? '✓ Active Target' : 'Set Target'}
+                  </button>
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
+      if (active && ipInput && document.activeElement !== ipInput) {
+        ipInput.value = active.ip || '';
+      }
+      if (active && portInput && document.activeElement !== portInput) {
+        portInput.value = active.port || 6803;
+      }
+    }
+
+    async function changeMacDropTarget(targetId) {
+      try {
+        const res = await fetch('/api/macdrop/select-target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetId }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          pollStatus();
+        }
+      } catch (err) {
+        console.error('Failed to change target:', err);
+      }
+    }
+
+    async function triggerMacDropManualScan(event) {
+      if (event) event.stopPropagation();
+      const btn = document.getElementById('macdrop-refresh-btn');
+      const subBtn = document.getElementById('macdrop-sub-refresh-btn');
+      const origText = '⟳ Refresh';
+      if (btn) {
+        btn.textContent = 'Scanning...';
+        btn.disabled = true;
+      }
+      if (subBtn) {
+        subBtn.textContent = 'Scanning...';
+        subBtn.disabled = true;
+      }
+
+      try {
+        const res = await fetch('/api/macdrop/refresh');
+        const data = await res.json();
+        if (data.ok !== false) {
+          await pollStatus();
+        }
+      } catch (err) {
+        console.error('Manual scan failed:', err);
+      } finally {
+        if (btn) {
+          btn.textContent = '✓ Scanned';
+          setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1400);
+        }
+        if (subBtn) {
+          subBtn.textContent = '✓ Scanned';
+          setTimeout(() => { subBtn.textContent = '⟳ Refresh Status'; subBtn.disabled = false; }, 1400);
+        }
+      }
+    }
+
+    function setupMacDropEvents() {
+      const dropzone = document.getElementById('macdrop-dropzone');
+
+      ['dragenter', 'dragover'].forEach(name => {
+        window.addEventListener(name, (e) => {
+          e.preventDefault();
+          if (dropzone) dropzone.classList.add('drag-active');
+        });
+      });
+
+      ['dragleave', 'drop'].forEach(name => {
+        window.addEventListener(name, (e) => {
+          e.preventDefault();
+          if (e.type === 'drop' || !e.relatedTarget) {
+            if (dropzone) dropzone.classList.remove('drag-active');
+            document.querySelectorAll('.macdrop-device-item').forEach(el => el.classList.remove('drag-over'));
+          }
+        });
+      });
+
+      if (dropzone) {
+        // Drag over device item highlight
+        dropzone.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          const deviceEl = e.target.closest('.macdrop-device-item');
+          document.querySelectorAll('.macdrop-device-item').forEach(el => {
+            el.classList.toggle('drag-over', el === deviceEl);
+          });
+        });
+
+        dropzone.addEventListener('dragleave', (e) => {
+          if (!dropzone.contains(e.relatedTarget)) {
+            document.querySelectorAll('.macdrop-device-item').forEach(el => el.classList.remove('drag-over'));
+          }
+        });
+
+        dropzone.addEventListener('drop', (e) => {
+          e.preventDefault();
+          dropzone.classList.remove('drag-active');
+          const deviceEl = e.target.closest('.macdrop-device-item');
+          const targetId = deviceEl ? deviceEl.getAttribute('data-id') : null;
+          document.querySelectorAll('.macdrop-device-item').forEach(el => el.classList.remove('drag-over'));
+
+          if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            uploadFiles(Array.from(e.dataTransfer.files), targetId);
+          }
+        });
+
+        // Click dropzone background
+        dropzone.addEventListener('click', (e) => {
+          if (!e.target.closest('.macdrop-device-item')) {
+            activeUploadTargetId = null;
+            const input = document.getElementById('macdrop-file-input');
+            if (input) input.click();
+          }
+        });
+      }
+    }
+
+    function handleFileSelect(event) {
+      const files = event.target.files;
+      if (files && files.length > 0) {
+        uploadFiles(Array.from(files), activeUploadTargetId);
+      }
+      activeUploadTargetId = null;
+      event.target.value = '';
+    }
+
+    async function uploadFiles(files, targetId = null) {
+      if (!files || files.length === 0) return;
+
+      const progressBox = document.getElementById('macdrop-progress-box');
+      const nameEl = document.getElementById('macdrop-progress-name');
+      const pctEl = document.getElementById('macdrop-progress-pct');
+      const barFill = document.getElementById('macdrop-bar-fill');
+      const subEl = document.getElementById('macdrop-progress-sub');
+
+      if (progressBox) progressBox.classList.remove('hidden');
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (nameEl) nameEl.textContent = file.name;
+        if (pctEl) pctEl.textContent = '0%';
+        if (barFill) {
+          barFill.style.background = '#000000';
+          barFill.style.width = '0%';
+        }
+        if (subEl) subEl.textContent = `Uploading "${file.name}" to server... (${i + 1}/${files.length})`;
+
+        try {
+          const result = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            const uploadUrl = targetId ? `/api/macdrop/upload?target_id=${encodeURIComponent(targetId)}` : '/api/macdrop/upload';
+            xhr.open('POST', uploadUrl, true);
+            xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+            xhr.setRequestHeader('x-filename', file.name);
+            if (targetId) {
+              xhr.setRequestHeader('x-target-id', targetId);
+            }
+
+            xhr.upload.onprogress = (evt) => {
+              if (evt.lengthComputable) {
+                const pct = Math.round((evt.loaded / evt.total) * 60); // 0-60% browser upload
+                if (pctEl) pctEl.textContent = `${pct}%`;
+                if (barFill) barFill.style.width = `${pct}%`;
+                if (pct >= 60 && subEl) {
+                  subEl.textContent = `Streaming to Macintosh client & awaiting disk write...`;
+                }
+              }
+            };
+
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                  const res = JSON.parse(xhr.responseText);
+                  if (res.ok) {
+                    resolve(res);
+                  } else {
+                    reject(new Error(res.error || 'Server reported transfer error'));
+                  }
+                } catch (_) {
+                  resolve({ ok: true });
+                }
+              } else {
+                let errText = `HTTP ${xhr.status}`;
+                try {
+                  const errJson = JSON.parse(xhr.responseText);
+                  if (errJson.error) errText = errJson.error;
+                } catch (_) {}
+                reject(new Error(errText));
+              }
+            };
+
+            xhr.onerror = () => reject(new Error('Network error uploading file'));
+            xhr.send(file);
+          });
+
+          if (barFill) barFill.style.width = '100%';
+          if (pctEl) pctEl.textContent = '100%';
+          if (subEl) subEl.textContent = `✓ Delivered "${file.name}" to ${result.transfer?.targetName || 'Macintosh'}`;
+        } catch (err) {
+          if (subEl) subEl.textContent = `✗ Transfer Failed: ${err.message}`;
+          if (barFill) {
+            barFill.style.background = '#cc0000';
+            setTimeout(() => { if (barFill) barFill.style.background = '#000000'; }, 4000);
+          }
+          break;
+        }
+      }
+
+      await pollStatus();
+      setTimeout(() => {
+        if (progressBox) progressBox.classList.add('hidden');
+      }, 5000);
+    }
+
+    async function saveMacDropTarget() {
+      const name = (document.getElementById('macdrop-name-input')?.value || '').trim();
+      const ip = (document.getElementById('macdrop-ip-input')?.value || '').trim();
+      const port = parseInt(document.getElementById('macdrop-port-input')?.value || '6803', 10);
+      const resEl = document.getElementById('macdrop-ping-result');
+
+      if (!ip) {
+        alert('Please enter an IP address');
+        return;
+      }
+
+      if (resEl) {
+        resEl.textContent = `Pinging ${ip}:${port}...`;
+        resEl.style.color = '#555';
+      }
+
+      try {
+        const res = await fetch('/api/macdrop/target', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ip, port, name }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          if (data.online) {
+            if (resEl) {
+              resEl.textContent = `✓ Connected to ${data.activeTarget.name} (${data.activeTarget.ip}:${data.activeTarget.port})! Client is online.`;
+              resEl.style.color = 'green';
+            }
+          } else {
+            if (resEl) {
+              resEl.textContent = `⚠ Saved ${data.activeTarget.name}, but ping timed out to ${data.activeTarget.ip}:${data.activeTarget.port}. Ensure MacDrop is running on the client.`;
+              resEl.style.color = '#c67800';
+            }
+          }
+          await pollStatus();
+        } else {
+          if (resEl) {
+            resEl.textContent = `Error: ${data.error}`;
+            resEl.style.color = 'red';
+          }
+        }
+      } catch (err) {
+        if (resEl) {
+          resEl.textContent = `Network error: ${err.message}`;
+          resEl.style.color = 'red';
+        }
+      }
+    }
+
+    async function testMacDropPing() {
+      const resEl = document.getElementById('macdrop-ping-result');
+      if (resEl) {
+        resEl.textContent = 'Testing connection to target Macintosh...';
+        resEl.style.color = '#555';
+      }
+
+      try {
+        const res = await fetch('/api/macdrop/ping-target');
+        const data = await res.json();
+        if (data.ok) {
+          if (resEl) {
+            resEl.textContent = `✓ ${data.message}`;
+            resEl.style.color = 'green';
+          }
+        } else {
+          if (resEl) {
+            resEl.textContent = `✗ ${data.error}`;
+            resEl.style.color = 'red';
+          }
+        }
+      } catch (err) {
+        if (resEl) {
+          resEl.textContent = `✗ Ping failed: ${err.message}`;
+          resEl.style.color = 'red';
+        }
+      }
+    }
+
     function renderUI(data) {
       const spotify = data.modules && data.modules.spotify;
       lastSpotifyData = spotify;
@@ -1628,6 +2383,10 @@
 
       if (data.modules && data.modules.macai) {
         renderMacAI(data.modules.macai);
+      }
+
+      if (data.modules && data.modules.macdrop) {
+        renderMacDrop(data.modules.macdrop);
       }
 
       if (!spotify) return;
@@ -1770,6 +2529,7 @@
 
     pollStatus();
     setInterval(pollStatus, 4000);
+    setupMacDropEvents();
   </script>
 </body>
 </html>
