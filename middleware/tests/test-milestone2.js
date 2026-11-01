@@ -207,6 +207,7 @@ async function runTests() {
   } finally {
     spotifyModule.setFetchImpl(null);
     server.close();
+    process.exit(0);
   }
 }
 

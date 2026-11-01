@@ -145,5 +145,6 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
     process.exit(1);
   } finally {
     server.close();
+    process.exit(0);
   }
 })();

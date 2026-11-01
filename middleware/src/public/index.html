@@ -203,11 +203,38 @@
       z-index: 10;
       box-shadow: 1px 1px 0 #000000;
       transition: background 0.1s, color 0.1s, transform 0.1s;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      line-height: 1;
+    }
+
+    #macdrop-sub-refresh-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      line-height: 1;
+    }
+
+    .macdrop-reload-icon {
+      height: 12px;
+      width: auto;
+      display: block;
+      object-fit: contain;
+      margin: 0;
+      padding: 0;
     }
 
     .macdrop-refresh-btn:hover {
       background: #000000;
       color: #ffffff;
+    }
+
+    .macdrop-refresh-btn:hover .macdrop-reload-icon,
+    .action-btn-sm:hover .macdrop-reload-icon {
+      filter: invert(1);
     }
 
     .macdrop-refresh-btn:active {
@@ -1071,7 +1098,7 @@
       <section class="service-card pixel-card-clip" id="macdrop-card">
         <div class="card-icon-wrap">
           <img
-            src="/img/MacDrop-serviceIcon.png"
+            src="/img/MacDrop-serviceIcon-2.png"
             class="card-icon"
             width="86"
             height="88"
@@ -1082,7 +1109,7 @@
         <!-- Big AirDrop-Style Drop Zone -->
         <div class="macdrop-dropzone" id="macdrop-dropzone">
           <button type="button" id="macdrop-refresh-btn" class="macdrop-refresh-btn action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)" title="Scan & refresh connected Macs">
-            ⟳ Refresh
+            <img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh
           </button>
           <input type="file" id="macdrop-file-input" style="display:none;" multiple onchange="handleFileSelect(event)" />
           
@@ -1521,39 +1548,37 @@
         <!-- Status Banner -->
         <div class="status-banner" id="macdrop-sub-banner">
           <img src="/img/status-off.png" id="macdrop-sub-icon" class="status-icon" width="8" height="8" alt="Status" />
-          <span id="macdrop-sub-text">Awaiting 68k Macintosh client...</span>
+          <span id="macdrop-sub-text">No clients found / online.</span>
         </div>
 
         <!-- Connected Macintosh Clients Table -->
         <div class="section-box">
           <div class="section-title-row">
-            <span>Macintosh Clients</span>
-            <span id="macdrop-clients-count" style="font-size:12px; color:#666;">0 connected</span>
+            <span>MacDrop target devices</span>
+            <span id="macdrop-clients-count" style="font-size:12px; color:#666;">0 online</span>
           </div>
           <div style="font-size:13px; line-height:1.4; margin-bottom:12px;">
-            Vintage Macs running MacDrop appear here automatically via outbound Reverse Push Channel. You can also manually add a static LAN client below.
+            Devices running MacDrop appear here automatically. If a device is failing to be found, please try to add it manually below.
           </div>
           <div style="overflow-x:auto;">
             <table style="width:100%; border-collapse:collapse; font-size:12px; text-align:left;">
               <thead>
                 <tr style="border-bottom:2px solid #000;">
-                  <th style="padding:6px 4px; width:24px;"></th>
-                  <th style="padding:6px 4px;">Macintosh Name</th>
-                  <th style="padding:6px 4px;">Hardware Model</th>
-                  <th style="padding:6px 4px;">IP Address</th>
-                  <th style="padding:6px 4px;">Type</th>
-                  <th style="padding:6px 4px; text-align:right;">Target</th>
+                  <th style="padding:6px 8px;">Device name</th>
+                  <th style="padding:6px 8px;">Hardware Model</th>
+                  <th style="padding:6px 8px;">IP Address</th>
+                  <th style="padding:6px 8px; text-align:right;">Status</th>
                 </tr>
               </thead>
               <tbody id="macdrop-clients-tbody">
                 <tr>
-                  <td colspan="6" style="padding:10px 4px; color:#666; text-align:center;">No Macintosh clients currently online. Launch MacDrop on your 68k Mac to connect.</td>
+                  <td colspan="4" style="padding:10px 4px; color:#666; text-align:center;">No devices found or added.</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <div style="margin-top:10px; display:flex; justify-content:space-between; align-items:center;">
-            <button type="button" id="macdrop-sub-refresh-btn" class="action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)">⟳ Refresh Status</button>
+            <button type="button" id="macdrop-sub-refresh-btn" class="action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)"><img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh Status</button>
             <button type="button" id="macdrop-broadcast-btn" class="action-btn-sm pixel-pill-clip" style="display:none;" onclick="changeMacDropTarget('all')">🌟 Broadcast to All Connected Macs</button>
           </div>
         </div>
@@ -1561,11 +1586,11 @@
         <!-- Manually Add Client -->
         <div class="section-box">
           <div class="section-title-row">
-            <span>Manually Add Client (LAN Fallback)</span>
+            <span>Add client manually</span>
             <span id="macdrop-target-state-pill" style="font-size:12px; color:#666;">Direct TCP :6803</span>
           </div>
           <div style="font-size:13px; line-height:1.4; margin-bottom:10px;">
-            If your vintage Mac is on a physical network without outbound gateway access, enter its IP address below. The server will ping it before adding:
+            If a device fails to be found, enter it's ip address below. If the device responds to MacDrop pings it will be added.
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
             <input type="text" id="macdrop-name-input" placeholder="Client Name (e.g. Mac SE/30)" style="flex:1; min-width:140px; font-size:13px; padding:6px 8px; border:2px solid #000;" />
@@ -2051,13 +2076,9 @@
         if (subIcon) setIconStatus(subIcon, 'ok');
         if (subText) subText.textContent = `Target Ready: ${active.name} (${active.ip})`;
         if (targetPill) targetPill.textContent = 'Online & Ready';
-      } else if (active) {
-        if (subIcon) setIconStatus(subIcon, 'off');
-        if (subText) subText.textContent = `Target offline: ${active.name} (${active.ip})`;
-        if (targetPill) targetPill.textContent = 'Standby (Offline)';
       } else {
         if (subIcon) setIconStatus(subIcon, 'off');
-        if (subText) subText.textContent = 'Awaiting 68k Macintosh client connection...';
+        if (subText) subText.textContent = 'No clients found / online.';
         if (targetPill) targetPill.textContent = 'No Target';
       }
 
@@ -2083,12 +2104,10 @@
         if (onlineClients.length === 0) {
           devicesWrap.innerHTML = `
             <div class="macdrop-empty-state">
-              <img src="/img/happymac.png" class="macdrop-device-icon dim" alt="Awaiting Mac" />
-              <div class="macdrop-device-label" style="color:#777;">
-                <img src="/img/status-off.png" class="status-icon" width="8" height="8" alt="Offline" />
-                <span>Awaiting 68k Mac...</span>
+              <div style="font-size: 13px; font-weight: bold; color: #222;">No devices found.</div>
+              <div class="macdrop-empty-hint" style="margin-top: 5px; font-size: 12px; color: #666;">
+                Missing a device? <a href="#macdrop" style="color: inherit; text-decoration: underline; cursor: pointer;">Try to add it manually.</a>
               </div>
-              <div class="macdrop-empty-hint">Launch MacDrop on your vintage Mac</div>
             </div>
           `;
         } else {
@@ -2121,40 +2140,62 @@
         }
       }
       if (clientsTbody) {
-        // All clients (active channel + saved manual targets)
-        const allKnown = [...clients.map(c => ({ ...c, type: 'Reverse Push Channel' }))];
-        for (const t of savedTargets) {
-          if (!allKnown.some(c => c.ip === t.ip)) {
-            allKnown.push({
-              id: t.id || t.ip,
-              name: t.name || t.ip,
-              machine: t.machine || 'Vintage Macintosh',
-              ip: `${t.ip}:${t.port || 6803}`,
-              type: 'Direct TCP :6803',
-              online: Boolean(t.online),
-            });
+        // Collect all known devices (from macdrop.devices or synthesized from clients + savedTargets)
+        let allDevices = macdrop.devices;
+        if (!allDevices) {
+          const map = new Map();
+          for (const c of clients) {
+            map.set(c.id || c.ip, { ...c, online: true });
           }
+          for (const t of savedTargets) {
+            const key = t.id || t.ip;
+            if (!map.has(key)) {
+              map.set(key, {
+                id: key,
+                name: t.name || t.ip,
+                machine: t.machine || 'Vintage Macintosh',
+                ip: t.ip,
+                port: t.port || 6803,
+                online: Boolean(t.online),
+              });
+            }
+          }
+          allDevices = Array.from(map.values());
         }
 
-        if (allKnown.length === 0) {
-          clientsTbody.innerHTML = '<tr><td colspan="6" style="padding:10px 4px; color:#666; text-align:center;">No Macintosh clients currently online. Launch MacDrop on your 68k Mac to connect.</td></tr>';
+        // Strictly deduplicate by IP: only one entry per IP, keeping latest reported
+        const seenIps = new Set();
+        const dedupedDevices = [];
+        for (const d of allDevices) {
+          if (!d || !d.ip || seenIps.has(d.ip)) continue;
+          seenIps.add(d.ip);
+          dedupedDevices.push(d);
+        }
+        allDevices = dedupedDevices;
+
+        if (allDevices.length === 0) {
+          clientsTbody.innerHTML = '<tr><td colspan="4" style="padding:10px 4px; color:#666; text-align:center;">No devices found or added.</td></tr>';
         } else {
-          clientsTbody.innerHTML = allKnown.map(c => {
-            const isSelected = selectedId === c.id || (selectedId === 'auto' && active && (active.id === c.id || active.ip === c.ip));
-            const statusImg = c.online ? '/img/status-ok.png' : '/img/status-off.png';
+          clientsTbody.innerHTML = allDevices.map(c => {
+            const isOnline = Boolean(c.online);
+            const statusImg = isOnline ? '/img/status-ok.png' : '/img/status-off.png';
+            const statusText = isOnline ? 'Online' : 'Offline';
+            const statusColor = isOnline ? '#1a7f37' : '#666';
+            const removeBtn = !isOnline ? `
+              <button type="button" onclick="removeMacDropTarget('${escapeHtml(c.id)}', '${escapeHtml(c.ip)}', event)" title="Remove device" style="border:none; background:transparent; cursor:pointer; color:#999; font-size:14px; padding:0 0 0 6px; line-height:1; vertical-align:middle;">&times;</button>
+            ` : '';
+
             return `
               <tr style="border-bottom:1px solid #eee;">
-                <td style="padding:6px 4px; text-align:center;">
-                  <img src="${statusImg}" class="status-icon" width="8" height="8" alt="${c.online ? 'Online' : 'Offline'}" />
-                </td>
-                <td style="padding:6px 4px; font-weight:bold;">${escapeHtml(c.name)}</td>
-                <td style="padding:6px 4px;">${escapeHtml(c.machine || 'Macintosh 68k')}</td>
-                <td style="padding:6px 4px; font-family:monospace;">${escapeHtml(c.ip)}</td>
-                <td style="padding:6px 4px; font-size:11px; color:#555;">${escapeHtml(c.type || 'Reverse Push Channel')}</td>
-                <td style="padding:6px 4px; text-align:right;">
-                  <button type="button" class="action-btn-sm pixel-pill-clip" style="${isSelected ? 'background:#000;color:#fff;' : ''}" onclick="changeMacDropTarget('${c.id}')">
-                    ${isSelected ? '✓ Active Target' : 'Set Target'}
-                  </button>
+                <td style="padding:6px 8px; font-weight:bold;">${escapeHtml(c.name)}</td>
+                <td style="padding:6px 8px;">${escapeHtml(c.machine || 'Macintosh 68k')}</td>
+                <td style="padding:6px 8px; font-family:monospace;">${escapeHtml(c.ip)}</td>
+                <td style="padding:6px 8px; text-align:right;">
+                  <span style="display:inline-flex; align-items:center; justify-content:flex-end; gap:5px; color:${statusColor}; font-weight:500;">
+                    <img src="${statusImg}" class="status-icon" width="8" height="8" alt="${statusText}" />
+                    <span>${statusText}</span>
+                    ${removeBtn}
+                  </span>
                 </td>
               </tr>
             `;
@@ -2339,13 +2380,14 @@
       if (event) event.stopPropagation();
       const btn = document.getElementById('macdrop-refresh-btn');
       const subBtn = document.getElementById('macdrop-sub-refresh-btn');
-      const origText = '⟳ Refresh';
+      const origHtml = '<img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh';
+      const origSubHtml = '<img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh Status';
       if (btn) {
-        btn.textContent = 'Scanning...';
+        btn.innerHTML = 'Scanning...';
         btn.disabled = true;
       }
       if (subBtn) {
-        subBtn.textContent = 'Scanning...';
+        subBtn.innerHTML = 'Scanning...';
         subBtn.disabled = true;
       }
 
@@ -2359,13 +2401,27 @@
         console.error('Manual scan failed:', err);
       } finally {
         if (btn) {
-          btn.textContent = '✓ Scanned';
-          setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1400);
+          btn.innerHTML = '✓ Scanned';
+          setTimeout(() => { btn.innerHTML = origHtml; btn.disabled = false; }, 1400);
         }
         if (subBtn) {
-          subBtn.textContent = '✓ Scanned';
-          setTimeout(() => { subBtn.textContent = '⟳ Refresh Status'; subBtn.disabled = false; }, 1400);
+          subBtn.innerHTML = '✓ Scanned';
+          setTimeout(() => { subBtn.innerHTML = origSubHtml; subBtn.disabled = false; }, 1400);
         }
+      }
+    }
+
+    async function removeMacDropTarget(targetId, targetIp, event) {
+      if (event) event.stopPropagation();
+      try {
+        await fetch('/api/macdrop/target/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: targetId, ip: targetIp }),
+        });
+        await pollStatus();
+      } catch (err) {
+        console.error('Failed to remove target:', err);
       }
     }
 
@@ -2648,20 +2704,15 @@
         if (data.ok) {
           if (data.online) {
             if (resEl) {
-              resEl.textContent = `✓ Connected to ${data.activeTarget.name} (${data.activeTarget.ip}:${data.activeTarget.port})! Client is online.`;
-              resEl.style.color = 'green';
-            }
-          } else {
-            if (resEl) {
-              resEl.textContent = `⚠ Saved ${data.activeTarget.name}, but ping timed out to ${data.activeTarget.ip}:${data.activeTarget.port}. Ensure MacDrop is running on the client.`;
-              resEl.style.color = '#c67800';
+              resEl.textContent = `✓ Connected to ${data.activeTarget.name} (${data.activeTarget.ip})! Client is online and added.`;
+              resEl.style.color = '#1a7f37';
             }
           }
           await pollStatus();
         } else {
           if (resEl) {
-            resEl.textContent = `Error: ${data.error}`;
-            resEl.style.color = 'red';
+            resEl.textContent = `Error: ${data.error || 'Device did not respond to MacDrop pings.'}`;
+            resEl.style.color = '#cf222e';
           }
         }
       } catch (err) {

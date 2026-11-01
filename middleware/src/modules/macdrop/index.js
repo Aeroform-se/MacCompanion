@@ -120,6 +120,7 @@ class MacDropModule {
 
     this.store = createModuleStore('macdrop', {
       targets: [],
+      knownDevices: [],
       activeTarget: null,
       selectedTargetId: 'auto',
       recentTransfers: [],
@@ -130,10 +131,140 @@ class MacDropModule {
       this.selectedTargetId = saved.selectedTargetId;
     }
 
+    this._ensureKnownDevices();
     this.initRoutes();
 
     // Periodic sweep for closed/dead reverse channel sockets
-    setInterval(() => this.sweepDeadClients(), 1500);
+    this.sweepTimer = setInterval(() => this.sweepDeadClients(), 1500);
+    if (this.sweepTimer && this.sweepTimer.unref) {
+      this.sweepTimer.unref();
+    }
+  }
+
+  /**
+   * Seeds/ensures knownDevices list is populated from targets or transfer history,
+   * strictly maintaining one entry per IP with the last name and model reported/seen.
+   */
+  _ensureKnownDevices() {
+    try {
+      const data = this.store.load();
+      const deviceByIp = new Map();
+
+      // Seed from historical recent transfers (newest first, so first seen per IP is latest)
+      if (Array.isArray(data.recentTransfers)) {
+        for (const xfer of data.recentTransfers) {
+          if (xfer && xfer.targetIp && !deviceByIp.has(xfer.targetIp)) {
+            let machine = 'Vintage Macintosh';
+            if (xfer.targetName && xfer.targetName.includes('SE/30')) machine = 'Macintosh SE/30';
+            else if (xfer.targetName && xfer.targetName.includes('IIci')) machine = 'Macintosh IIci';
+            else if (xfer.targetName && xfer.targetName.includes('Basilisk')) machine = 'Macintosh 68k (Basilisk II)';
+
+            deviceByIp.set(xfer.targetIp, {
+              id: `device_${xfer.targetIp.replace(/\./g, '_')}`,
+              name: xfer.targetName || `Macintosh (${xfer.targetIp})`,
+              machine,
+              ip: xfer.targetIp,
+              port: DEFAULT_MACDROP_PORT,
+              version: '',
+              lastSeen: xfer.timestamp || Date.now(),
+              source: 'history',
+            });
+          }
+        }
+      }
+
+      // Existing knownDevices take precedence if they have newer or manually configured data
+      if (Array.isArray(data.knownDevices)) {
+        for (const d of data.knownDevices) {
+          if (d && d.ip) {
+            const cleanIp = d.ip.trim();
+            const existing = deviceByIp.get(cleanIp);
+            if (!existing || (d.lastSeen && d.lastSeen >= (existing.lastSeen || 0))) {
+              deviceByIp.set(cleanIp, {
+                id: `device_${cleanIp.replace(/\./g, '_')}`,
+                name: d.name || `Macintosh (${cleanIp})`,
+                machine: d.machine || 'Vintage Macintosh',
+                ip: cleanIp,
+                port: d.port || DEFAULT_MACDROP_PORT,
+                version: d.version || '',
+                lastSeen: d.lastSeen || Date.now(),
+                source: d.source || 'reverse_channel',
+              });
+            }
+          }
+        }
+      }
+
+      // Manual targets also merged strictly by IP
+      if (Array.isArray(data.targets)) {
+        for (const t of data.targets) {
+          if (t && t.ip) {
+            const cleanIp = t.ip.trim();
+            deviceByIp.set(cleanIp, {
+              id: `device_${cleanIp.replace(/\./g, '_')}`,
+              name: t.name || `Macintosh (${cleanIp})`,
+              machine: t.machine || 'Vintage Macintosh',
+              ip: cleanIp,
+              port: t.port || DEFAULT_MACDROP_PORT,
+              version: t.version || '',
+              lastSeen: t.lastSeen || Date.now(),
+              source: 'manual',
+            });
+          }
+        }
+      }
+
+      const cleanedList = Array.from(deviceByIp.values());
+      this.store.save({ knownDevices: cleanedList });
+    } catch (err) {
+      console.warn('[MacDrop] Failed to initialize known devices:', err);
+    }
+  }
+
+  /**
+   * Records or updates a known device in the store (strictly one entry per IP,
+   * retaining the latest name, model and timestamp reported).
+   */
+  recordKnownDevice(dev) {
+    try {
+      if (!dev || !dev.ip) return;
+      const cleanIp = dev.ip.trim();
+      const data = this.store.load();
+      let knownDevices = Array.isArray(data.knownDevices) ? [...data.knownDevices] : [];
+
+      const idx = knownDevices.findIndex(d => d.ip === cleanIp);
+
+      const entry = {
+        id: `device_${cleanIp.replace(/\./g, '_')}`,
+        name: dev.name || (idx >= 0 ? knownDevices[idx].name : `Macintosh (${cleanIp})`),
+        machine: dev.machine || (idx >= 0 ? knownDevices[idx].machine : 'Macintosh 68k'),
+        ip: cleanIp,
+        port: dev.port || (idx >= 0 ? knownDevices[idx].port : DEFAULT_MACDROP_PORT),
+        version: dev.version || (idx >= 0 ? knownDevices[idx].version : ''),
+        lastSeen: Date.now(),
+        source: dev.source || (idx >= 0 ? knownDevices[idx].source : 'reverse_channel'),
+      };
+
+      if (idx >= 0) {
+        knownDevices[idx] = entry;
+      } else {
+        knownDevices.push(entry);
+      }
+
+      // Strictly deduplicate by IP across the list
+      const deduped = [];
+      const seenIps = new Set();
+      for (const d of knownDevices) {
+        if (d && d.ip && !seenIps.has(d.ip)) {
+          seenIps.add(d.ip);
+          deduped.push(d);
+        }
+      }
+
+      this.store.save({ knownDevices: deduped });
+    } catch (e) {
+      console.warn('[MacDrop] Failed to record known device:', e);
+    }
   }
 
   /**
@@ -471,6 +602,17 @@ class MacDropModule {
 
       this.activeClients.set(clientId, clientObj);
       console.log(`[MacDrop] Reverse Channel connected: ${name} (${machine}) from ${remoteIp} [ID: ${clientId}]`);
+
+      // Persist to known devices
+      this.recordKnownDevice({
+        id: clientId,
+        name,
+        machine,
+        version,
+        ip: remoteIp,
+        port: DEFAULT_MACDROP_PORT,
+        source: 'reverse_channel',
+      });
 
       // Notify any in-flight transfer waiting for channel reconnection
       const waiter = this.channelWaiters.get(clientId);
@@ -1029,6 +1171,13 @@ class MacDropModule {
       const isOnline = await this.pingTarget(cleanIp, numPort);
       this.pingCache.set(`${cleanIp}:${numPort}`, { online: isOnline, checkedAt: Date.now() });
 
+      if (!isOnline) {
+        return res.status(400).json({
+          ok: false,
+          error: `Ping timed out to ${cleanIp}:${numPort}. Device did not respond to MacDrop pings.`,
+        });
+      }
+
       const data = this.store.load();
       const targets = Array.isArray(data.targets) ? [...data.targets] : [];
 
@@ -1037,8 +1186,10 @@ class MacDropModule {
         ip: cleanIp,
         port: numPort,
         name: targetName,
+        machine: 'Vintage Macintosh',
         lastSeen: Date.now(),
-        online: isOnline,
+        online: true,
+        source: 'manual',
       };
 
       const existingIdx = targets.findIndex(t => t.ip === targetObj.ip && t.port === targetObj.port);
@@ -1055,7 +1206,33 @@ class MacDropModule {
         selectedTargetId: targetObj.id,
       });
 
+      this.recordKnownDevice(targetObj);
+
       res.json({ ok: true, activeTarget: targetObj, online: isOnline });
+    });
+
+    // Remove a saved/known target
+    this.router.delete('/target/:id', (req, res) => {
+      const targetId = req.params.id;
+      const data = this.store.load();
+      const knownDevices = (data.knownDevices || []).filter(d => d.id !== targetId && d.ip !== targetId);
+      const targets = (data.targets || []).filter(t => t.id !== targetId && t.ip !== targetId);
+      this.store.save({ knownDevices, targets });
+      res.json({ ok: true });
+    });
+
+    this.router.post('/target/remove', (req, res) => {
+      const targetId = req.body?.id || req.query?.id;
+      const targetIp = req.body?.ip || req.query?.ip;
+      const data = this.store.load();
+      const knownDevices = (data.knownDevices || []).filter(d =>
+        d.id !== targetId && d.ip !== targetId && (!targetIp || d.ip !== targetIp)
+      );
+      const targets = (data.targets || []).filter(t =>
+        t.id !== targetId && t.ip !== targetId && (!targetIp || t.ip !== targetIp)
+      );
+      this.store.save({ knownDevices, targets });
+      res.json({ ok: true });
     });
 
     // 6. Test Ping (tests both reverse channel and direct TCP)
@@ -1598,6 +1775,59 @@ class MacDropModule {
     }));
 
     const data = this.store.load();
+    const knownDevices = Array.isArray(data.knownDevices) ? data.knownDevices : [];
+
+    // Unified devices map: strictly one entry per IP
+    const deviceByIp = new Map();
+
+    // 1. Add known devices (offline by default; only manual LAN targets are pinged)
+    for (const kd of knownDevices) {
+      if (!kd || !kd.ip) continue;
+      const cleanIp = kd.ip.trim();
+
+      let isOnline = false;
+      if (kd.source === 'manual') {
+        const key = `${cleanIp}:${kd.port || DEFAULT_MACDROP_PORT}`;
+        const pingEntry = this.pingCache.get(key);
+        isOnline = Boolean(pingEntry && pingEntry.online);
+
+        if (!pingEntry || (Date.now() - pingEntry.checkedAt > 10000)) {
+          this.pingTarget(cleanIp, kd.port || DEFAULT_MACDROP_PORT).then(resOnline => {
+            this.pingCache.set(key, { online: resOnline, checkedAt: Date.now() });
+          });
+        }
+      }
+
+      deviceByIp.set(cleanIp, {
+        id: `device_${cleanIp.replace(/\./g, '_')}`,
+        name: kd.name,
+        machine: kd.machine || 'Vintage Macintosh',
+        ip: cleanIp,
+        port: kd.port || DEFAULT_MACDROP_PORT,
+        version: kd.version || '',
+        online: isOnline,
+        lastSeen: kd.lastSeen || 0,
+      });
+    }
+
+    // 2. Overlay live active reverse-channel clients (always online, and updates latest reported name/machine)
+    for (const c of activeClientsList) {
+      if (!c || !c.ip) continue;
+      const cleanIp = c.ip.trim();
+      deviceByIp.set(cleanIp, {
+        id: `device_${cleanIp.replace(/\./g, '_')}`,
+        name: c.name,
+        machine: c.machine || 'Macintosh 68k',
+        ip: cleanIp,
+        port: DEFAULT_MACDROP_PORT,
+        version: c.version || '',
+        online: true,
+        lastSeen: c.connectedAt || Date.now(),
+      });
+    }
+
+    const allDevices = Array.from(deviceByIp.values());
+
     const savedTargets = (data.targets || []).map(t => {
       const isOnline = Boolean(this.pingCache.get(`${t.ip}:${t.port || DEFAULT_MACDROP_PORT}`)?.online);
       return {
@@ -1649,11 +1879,12 @@ class MacDropModule {
       state: isOnline ? 'READY' : 'STANDBY',
       message: isOnline
         ? `Target: ${activeTarget.name} (${activeTarget.ip})`
-        : 'Awaiting 68k Macintosh client connection...',
+        : 'No clients found / online.',
       activeTarget,
       selectedTargetId: this.selectedTargetId,
       clients: activeClientsList,
       savedTargets,
+      devices: allDevices,
       inboundTransfers,
     };
   }
