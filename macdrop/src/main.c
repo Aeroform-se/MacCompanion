@@ -273,49 +273,117 @@ static void PascalToCStr(ConstStr255Param pStr, char *cStr, short maxLen)
     cStr[len] = '\0';
 }
 
-static void ChooseDestinationWithFilePicker(void)
+static Boolean gFolderChoosePressed = false;
+
+static pascal short FolderDlgHookYD(short item, DialogRef theDialog, void *yourDataPtr)
+{
+    if (GetWRefCon(theDialog) != sfMainDialogRefCon)
+        return item;
+
+    if (gFolderChoosePressed) {
+        short type;
+        Rect r;
+        ControlHandle openBtn = NULL;
+        GetDialogItem(theDialog, sfItemOpenButton, &type, (Handle *)&openBtn, &r);
+        if (openBtn) {
+            HiliteControl(openBtn, 0);
+        }
+        return sfItemOpenButton;
+    }
+
+    if (item == 10) { /* Custom "Choose" button */
+        short type;
+        Rect r;
+        ControlHandle openBtn = NULL;
+        GetDialogItem(theDialog, sfItemOpenButton, &type, (Handle *)&openBtn, &r);
+
+        gFolderChoosePressed = true;
+        if (openBtn && (*openBtn)->contrlHilite == 0) {
+            /* A folder in the list is highlighted; enter it first */
+            return sfHookOpenFolder;
+        } else {
+            /* No folder highlighted; choose the current directory */
+            if (openBtn) {
+                HiliteControl(openBtn, 0);
+            }
+            return sfItemOpenButton;
+        }
+    }
+
+    return item;
+}
+
+static pascal Boolean FolderFilterYD(CInfoPBPtr pb, void *yourDataPtr)
+{
+    /* Return true to filter out (hide) regular files from the list */
+    if (!(pb->hFileInfo.ioFlAttrib & 0x10)) {
+        return true;
+    }
+    return false;
+}
+
+static void ChooseDestinationWithFolderPicker(void)
 {
     StandardFileReply reply;
+    Point dlgPt = { -1, -1 };
+    DlgHookYDUPP hookUPP;
+    FileFilterYDUPP filterUPP;
+
     EnsureFrontProcess();
     DrawMenuBar();
-    StandardGetFile(NULL, -1, NULL, &reply);
-    if (reply.sfGood) {
+
+    /* Pre-set the dialog to open into the currently configured download directory */
+    if (gDestVRefNum != 0 && gDestDirID != 0) {
+        LMSetSFSaveDisk(-gDestVRefNum);
+        LMSetCurDirStore(gDestDirID);
+    }
+
+    hookUPP = NewDlgHookYDUPP(FolderDlgHookYD);
+    filterUPP = NewFileFilterYDUPP(FolderFilterYD);
+    gFolderChoosePressed = false;
+
+    CustomGetFile(
+        filterUPP,
+        -1,
+        NULL,
+        &reply,
+        130,            /* Custom DLOG / DITL ID */
+        dlgPt,
+        hookUPP,
+        NULL,
+        NULL,
+        NULL,
+        NULL
+    );
+
+    DisposeDlgHookYDUPP(hookUPP);
+    DisposeFileFilterYDUPP(filterUPP);
+
+    if (gFolderChoosePressed) {
+        short vRefNum = -LMGetSFSaveDisk();
+        long dirID    = LMGetCurDirStore();
         CInfoPBRec cinfo;
+        Str255 dirName;
+
+        gDestVRefNum = vRefNum;
+        gDestDirID   = dirID;
+
         memset(&cinfo, 0, sizeof(cinfo));
-        cinfo.hFileInfo.ioVRefNum   = reply.sfFile.vRefNum;
-        cinfo.hFileInfo.ioDirID     = reply.sfFile.parID;
-        cinfo.hFileInfo.ioNamePtr   = reply.sfFile.name;
-        cinfo.hFileInfo.ioFDirIndex = 0;
+        cinfo.dirInfo.ioVRefNum   = vRefNum;
+        cinfo.dirInfo.ioDrDirID   = dirID;
+        cinfo.dirInfo.ioNamePtr   = dirName;
+        dirName[0] = 0;
+        cinfo.dirInfo.ioFDirIndex = -1; /* get info on directory itself */
 
-        if (PBGetCatInfoSync(&cinfo) == noErr) {
-            if (cinfo.hFileInfo.ioFlAttrib & 0x10) {
-                /* Selected item is a directory */
-                gDestVRefNum = reply.sfFile.vRefNum;
-                gDestDirID   = cinfo.dirInfo.ioDrDirID;
-                PascalToCStr(reply.sfFile.name, gDestFolderName, sizeof(gDestFolderName));
-            } else {
-                /* Selected item is a file: use its parent directory */
-                CInfoPBRec dirCinfo;
-                Str255 dirName;
-                gDestVRefNum = reply.sfFile.vRefNum;
-                gDestDirID   = reply.sfFile.parID;
+        if (PBGetCatInfoSync(&cinfo) == noErr && dirName[0] > 0) {
+            PascalToCStr(dirName, gDestFolderName, sizeof(gDestFolderName));
+        } else {
+            strncpy(gDestFolderName, "Downloads", sizeof(gDestFolderName) - 1);
+        }
 
-                memset(&dirCinfo, 0, sizeof(dirCinfo));
-                dirCinfo.dirInfo.ioVRefNum   = reply.sfFile.vRefNum;
-                dirCinfo.dirInfo.ioDrDirID   = reply.sfFile.parID;
-                dirCinfo.dirInfo.ioNamePtr   = dirName;
-                dirCinfo.dirInfo.ioFDirIndex = -1; /* get info on directory itself */
-
-                if (PBGetCatInfoSync(&dirCinfo) == noErr) {
-                    PascalToCStr(dirName, gDestFolderName, sizeof(gDestFolderName));
-                } else {
-                    strncpy(gDestFolderName, "Downloads", sizeof(gDestFolderName) - 1);
-                }
-            }
-            SavePreferences();
-            if (gWindow && IsWindowVisible(gWindow)) {
-                DrawWindow();
-            }
+        SavePreferences();
+        if (gWindow && IsWindowVisible(gWindow)) {
+            DrawWindow();
         }
     }
 }
@@ -785,7 +853,7 @@ static void ProcessSharedCommand(void)
         }
 
         case CMD_CHOOSE_FOLDER:
-            ChooseDestinationWithFilePicker();
+            ChooseDestinationWithFolderPicker();
             SyncSharedData();
             UpdateMenuStates();
             break;
@@ -876,7 +944,7 @@ static void HandleMenuChoice(long choice)
                     }
                     break;
                 case ITEM_DOWNLOAD:
-                    ChooseDestinationWithFilePicker();
+                    ChooseDestinationWithFolderPicker();
                     break;
                 case ITEM_SET_NAME:
                     gWasHiddenBeforeName = (!gWindow || !IsWindowVisible(gWindow));
@@ -1044,9 +1112,9 @@ static void HandleMouseDown(EventRecord *evt)
                     }
                 }
 
-                /* Ready View: Click on Download Folder row -> Open File Picker */
+                /* Ready View: Click on Download Folder row -> Open Folder Picker */
                 if (!gTransferActive && gConnState == CONN_READY && PtInRect(localPt, &gDownloadFolderRowRect)) {
-                    ChooseDestinationWithFilePicker();
+                    ChooseDestinationWithFolderPicker();
                     return;
                 }
 
