@@ -16,6 +16,7 @@
 #include <Icons.h>
 #include <Processes.h>
 #include <LowMem.h>
+#include <AppleEvents.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -224,6 +225,72 @@ static void CleanupDragManager(void)
     }
     if (gDragTrackingUPP && gWindow) {
         RemoveTrackingHandler(gDragTrackingUPP, gWindow);
+    }
+}
+
+/* ============================================================================
+ * Apple Events (System 7 Quit & Open events for clean shutdown/reboot)
+ * ============================================================================ */
+
+static AEEventHandlerUPP gQuitAEUPP    = NULL;
+static AEEventHandlerUPP gOpenAppAEUPP = NULL;
+static AEEventHandlerUPP gOpenDocAEUPP = NULL;
+
+static pascal OSErr HandleQuitAppleEvent(const AppleEvent *theAppleEvent, AppleEvent *reply, long handlerRefcon)
+{
+    (void)theAppleEvent;
+    (void)reply;
+    (void)handlerRefcon;
+    gDone = true;
+    return noErr;
+}
+
+static pascal OSErr HandleOpenAppAppleEvent(const AppleEvent *theAppleEvent, AppleEvent *reply, long handlerRefcon)
+{
+    (void)theAppleEvent;
+    (void)reply;
+    (void)handlerRefcon;
+    return noErr;
+}
+
+static pascal OSErr HandleOpenDocAppleEvent(const AppleEvent *theAppleEvent, AppleEvent *reply, long handlerRefcon)
+{
+    (void)theAppleEvent;
+    (void)reply;
+    (void)handlerRefcon;
+    return noErr;
+}
+
+static void SetupAppleEvents(void)
+{
+    long response = 0;
+    if (Gestalt(gestaltAppleEventsAttr, &response) == noErr && (response & (1 << gestaltAppleEventsPresent))) {
+        gQuitAEUPP    = NewAEEventHandlerUPP(HandleQuitAppleEvent);
+        gOpenAppAEUPP = NewAEEventHandlerUPP(HandleOpenAppAppleEvent);
+        gOpenDocAEUPP = NewAEEventHandlerUPP(HandleOpenDocAppleEvent);
+
+        if (gQuitAEUPP)    AEInstallEventHandler(kCoreEventClass, kAEQuitApplication, gQuitAEUPP,    0, false);
+        if (gOpenAppAEUPP) AEInstallEventHandler(kCoreEventClass, kAEOpenApplication, gOpenAppAEUPP, 0, false);
+        if (gOpenDocAEUPP) AEInstallEventHandler(kCoreEventClass, kAEOpenDocuments,   gOpenDocAEUPP, 0, false);
+    }
+}
+
+static void CleanupAppleEvents(void)
+{
+    if (gQuitAEUPP) {
+        AERemoveEventHandler(kCoreEventClass, kAEQuitApplication, gQuitAEUPP, false);
+        DisposeAEEventHandlerUPP(gQuitAEUPP);
+        gQuitAEUPP = NULL;
+    }
+    if (gOpenAppAEUPP) {
+        AERemoveEventHandler(kCoreEventClass, kAEOpenApplication, gOpenAppAEUPP, false);
+        DisposeAEEventHandlerUPP(gOpenAppAEUPP);
+        gOpenAppAEUPP = NULL;
+    }
+    if (gOpenDocAEUPP) {
+        AERemoveEventHandler(kCoreEventClass, kAEOpenDocuments, gOpenDocAEUPP, false);
+        DisposeAEEventHandlerUPP(gOpenDocAEUPP);
+        gOpenDocAEUPP = NULL;
     }
 }
 
@@ -1328,6 +1395,9 @@ int main(void)
     /* Initialize Drag Manager handlers if system supports it */
     SetupDragManager();
 
+    /* Initialize Apple Events (handle system quit/restart signals) */
+    SetupAppleEvents();
+
     /* Initialize Network */
     NetInit();
     NetStartListener();
@@ -1451,6 +1521,15 @@ int main(void)
                         DrawWindow();
                     }
                     break;
+                case kHighLevelEvent: {
+                    OSType eventID = 0;
+                    memcpy(&eventID, &event.where, sizeof(OSType));
+                    if (event.message == kCoreEventClass && eventID == kAEQuitApplication) {
+                        gDone = true;
+                    }
+                    AEProcessAppleEvent(&event);
+                    break;
+                }
             }
         }
     }
@@ -1460,6 +1539,7 @@ int main(void)
         gSharedData->UpdateUI = true;
     }
 
+    CleanupAppleEvents();
     CleanupDragManager();
     NetStopChannel();
     NetStopListener();
@@ -1471,5 +1551,6 @@ int main(void)
         DisposeWindow(gWindow);
     }
 
+    ExitToShell();
     return 0;
 }
