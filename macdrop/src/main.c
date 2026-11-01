@@ -33,11 +33,10 @@
 #define ITEM_ABOUT      1
 
 #define ITEM_SEND_FILE  1
-#define ITEM_RECONNECT  3
-#define ITEM_DOWNLOAD   4
-#define ITEM_SET_NAME   5
-#define ITEM_CLOSE      7
-#define ITEM_QUIT       8
+#define ITEM_DOWNLOAD   3
+#define ITEM_SET_NAME   4
+#define ITEM_CLOSE      6
+#define ITEM_QUIT       7
 
 #define ITEM_SOUND      1
 #define ITEM_NOTIFY     2
@@ -56,15 +55,18 @@ static MenuHandle gMenuOptions         = NULL;
 static ProcessSerialNumber gMacDropPSN;
 
 /* About Box Modal state */
-static Boolean   gAboutModalOpen       = false;
+static WindowPtr gAboutWindow          = NULL;
 static Boolean   gWasHiddenBeforeAbout = false;
+static Rect      gBtnAboutOkRect;
+
+/* Set Client Name Modal state */
+static Boolean   gModalSetName         = false;
+static Boolean   gWasHiddenBeforeName  = false;
+static char      gClientNameInput[64]  = "";
 
 static ConnState gConnState          = CONN_READY;
 static char      gServerIpInput[32]  = "10.0.2.2";
 static char      gConnErrorMsg[64]   = "";
-
-static Boolean   gModalSetName       = false;
-static char      gClientNameInput[64]= "";
 
 /* UI Rectangles for hit testing */
 static Rect      gBtnRetryScanRect;
@@ -72,9 +74,13 @@ static Rect      gBtnConnectRect;
 static Rect      gBtnCancelConnRect;
 static Rect      gBtnSaveNameRect;
 static Rect      gBtnCancelNameRect;
+static Rect      gDownloadFolderRowRect;
 static Rect      gDropZoneRect;
 
 void UpdateProgressUI(void);
+static void SwitchToFinder(void);
+static void SyncSharedData(void);
+static void UpdateMenuStates(void);
 
 static void DrawCString(const char *str)
 {
@@ -239,29 +245,98 @@ static void BlitBitmap(const unsigned char *bits, short rowBytes,
     CopyBits(&srcBM, &curPort->portBits, &srcR, &dstR, mode, NULL);
 }
 
-static void DrawAboutModal(void)
+static void EnsureFrontProcess(void)
 {
-    Rect dlgRect, shadowRect, btnOk;
+    ProcessSerialNumber frontPSN;
+    Boolean isFront = false;
+
+    GetFrontProcess(&frontPSN);
+    SameProcess(&gMacDropPSN, &frontPSN, &isFront);
+    if (!isFront) {
+        short i;
+        SetFrontProcess(&gMacDropPSN);
+        for (i = 0; i < 30; i++) {
+            EventRecord ev;
+            WaitNextEvent(everyEvent, &ev, 2, NULL);
+            GetFrontProcess(&frontPSN);
+            SameProcess(&gMacDropPSN, &frontPSN, &isFront);
+            if (isFront) break;
+        }
+    }
+}
+
+static void PascalToCStr(ConstStr255Param pStr, char *cStr, short maxLen)
+{
+    short len = pStr[0];
+    if (len > maxLen - 1) len = maxLen - 1;
+    memcpy(cStr, &pStr[1], len);
+    cStr[len] = '\0';
+}
+
+static void ChooseDestinationWithFilePicker(void)
+{
+    StandardFileReply reply;
+    EnsureFrontProcess();
+    DrawMenuBar();
+    StandardGetFile(NULL, -1, NULL, &reply);
+    if (reply.sfGood) {
+        CInfoPBRec cinfo;
+        memset(&cinfo, 0, sizeof(cinfo));
+        cinfo.hFileInfo.ioVRefNum   = reply.sfFile.vRefNum;
+        cinfo.hFileInfo.ioDirID     = reply.sfFile.parID;
+        cinfo.hFileInfo.ioNamePtr   = reply.sfFile.name;
+        cinfo.hFileInfo.ioFDirIndex = 0;
+
+        if (PBGetCatInfoSync(&cinfo) == noErr) {
+            if (cinfo.hFileInfo.ioFlAttrib & 0x10) {
+                /* Selected item is a directory */
+                gDestVRefNum = reply.sfFile.vRefNum;
+                gDestDirID   = cinfo.dirInfo.ioDrDirID;
+                PascalToCStr(reply.sfFile.name, gDestFolderName, sizeof(gDestFolderName));
+            } else {
+                /* Selected item is a file: use its parent directory */
+                CInfoPBRec dirCinfo;
+                Str255 dirName;
+                gDestVRefNum = reply.sfFile.vRefNum;
+                gDestDirID   = reply.sfFile.parID;
+
+                memset(&dirCinfo, 0, sizeof(dirCinfo));
+                dirCinfo.dirInfo.ioVRefNum   = reply.sfFile.vRefNum;
+                dirCinfo.dirInfo.ioDrDirID   = reply.sfFile.parID;
+                dirCinfo.dirInfo.ioNamePtr   = dirName;
+                dirCinfo.dirInfo.ioFDirIndex = -1; /* get info on directory itself */
+
+                if (PBGetCatInfoSync(&dirCinfo) == noErr) {
+                    PascalToCStr(dirName, gDestFolderName, sizeof(gDestFolderName));
+                } else {
+                    strncpy(gDestFolderName, "Downloads", sizeof(gDestFolderName) - 1);
+                }
+            }
+            SavePreferences();
+            if (gWindow && IsWindowVisible(gWindow)) {
+                DrawWindow();
+            }
+        }
+    }
+}
+
+static void DrawAboutWindow(void)
+{
+    Rect r;
+    short cx, w;
     const char *verLine    = "MacDrop " APP_VERSION_SHORT;
     const char *codeLine   = "\"" APP_CODENAME "\"";
     const char *coffeeLine = "Like MacDrop? Buy me a coffee!";
-    short cx = (gWindow->portRect.left + gWindow->portRect.right) / 2;
-    short topY = (gWindow->portRect.bottom - gWindow->portRect.top - 216) / 2;
-    short w;
 
-    if (topY < 6) topY = 6;
+    if (!gAboutWindow) return;
+    SetPortWindowPort(gAboutWindow);
+    r = gAboutWindow->portRect;
+    EraseRect(&r);
 
-    SetRect(&shadowRect, cx - 116, topY + 4, cx + 124, topY + 220);
-    FillRoundRect(&shadowRect, 10, 10, &qd.gray);
-
-    SetRect(&dlgRect, cx - 120, topY, cx + 120, topY + 216);
-    EraseRoundRect(&dlgRect, 10, 10);
-    FrameRoundRect(&dlgRect, 10, 10);
-    InsetRect(&dlgRect, 2, 2);
-    FrameRoundRect(&dlgRect, 8, 8);
+    cx = (r.left + r.right) / 2;
 
     /* MacDrop 32x32 Logo centered at top */
-    BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, cx - 16, topY + 12, srcCopy);
+    BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, cx - 16, 12, srcCopy);
 
     TextFont(kFontIDGeneva);
     TextSize(9);
@@ -269,26 +344,64 @@ static void DrawAboutModal(void)
     TextMode(srcOr);
 
     w = MeasureCString(verLine);
-    MoveTo(cx - (w / 2), topY + 58);
+    MoveTo(cx - (w / 2), 58);
     DrawCString(verLine);
 
     w = MeasureCString(codeLine);
-    MoveTo(cx - (w / 2), topY + 72);
+    MoveTo(cx - (w / 2), 72);
     DrawCString(codeLine);
 
     w = MeasureCString(coffeeLine);
-    MoveTo(cx - (w / 2), topY + 90);
+    MoveTo(cx - (w / 2), 90);
     DrawCString(coffeeLine);
 
     /* 58x58 QR code (~2x2cm on 9" Compact Mac CRT) centered below text */
-    BlitBitmap(gAboutQrCodeBits, 8, 58, 58, cx - 29, topY + 104, srcCopy);
+    BlitBitmap(gAboutQrCodeBits, 8, 58, 58, cx - 29, 104, srcCopy);
 
-    SetRect(&btnOk, cx - 40, topY + 176, cx + 40, topY + 200);
-    PaintRoundRect(&btnOk, 6, 6);
+    /* "OK" button */
+    SetRect(&gBtnAboutOkRect, cx - 40, 176, cx + 40, 200);
+    PaintRoundRect(&gBtnAboutOkRect, 6, 6);
     TextMode(srcBic);
-    MoveTo(cx - 8, topY + 192);
+    MoveTo(cx - 8, 192);
     DrawCString("OK");
     TextMode(srcOr);
+}
+
+static void CloseAboutWindow(void)
+{
+    if (gAboutWindow) {
+        DisposeWindow(gAboutWindow);
+        gAboutWindow = NULL;
+    }
+    if (gWasHiddenBeforeAbout) {
+        SwitchToFinder();
+    }
+    SyncSharedData();
+    UpdateMenuStates();
+}
+
+static void OpenAboutWindow(void)
+{
+    Rect aboutRect;
+    short cardW = 240;
+    short cardH = 216;
+    short scrW = qd.screenBits.bounds.right - qd.screenBits.bounds.left;
+    short scrH = qd.screenBits.bounds.bottom - qd.screenBits.bounds.top;
+    short left = (scrW - cardW) / 2;
+    short top  = qd.screenBits.bounds.top + 20 + ((scrH - 20 - cardH) / 2);
+
+    if (gAboutWindow) {
+        SelectWindow(gAboutWindow);
+        return;
+    }
+
+    SetRect(&aboutRect, left, top, left + cardW, top + cardH);
+    gAboutWindow = NewWindow(NULL, &aboutRect, "\p", true, plainDBox, (WindowPtr)-1, false, 0);
+    if (gAboutWindow) {
+        SelectWindow(gAboutWindow);
+        SetPortWindowPort(gAboutWindow);
+        DrawAboutWindow();
+    }
 }
 
 static MacDropSharedData *gSharedData = NULL;
@@ -352,9 +465,9 @@ static void SyncSharedData(void)
 
 static void UpdateMenuStates(void)
 {
-    Boolean isVis = (gWindow && IsWindowVisible(gWindow) && !gAboutModalOpen);
+    Boolean isVis = (gWindow && IsWindowVisible(gWindow));
 
-    /* Update File Menu Item 7: "Open Window" vs "Hide Window" */
+    /* Update File Menu Item 6: "Open Window" vs "Hide Window" */
     if (gMenuFile) {
         SetMenuItemText(gMenuFile, ITEM_CLOSE, isVis ? "\pHide Window" : "\pOpen Window");
     }
@@ -379,11 +492,6 @@ static void DrawWindow(void)
     SetPort(gWindow);
     r = gWindow->portRect;
     EraseRect(&r);
-
-    if (gAboutModalOpen) {
-        DrawAboutModal();
-        return;
-    }
 
     TextFont(kFontIDGeneva);
     TextSize(9);
@@ -502,6 +610,7 @@ static void DrawWindow(void)
     y += 13;
 
     /* Destination folder (labeled "Download Folder:" per user request) */
+    SetRect(&gDownloadFolderRowRect, 16, y - 10, r.right - 16, y + 4);
     MoveTo(16, y);
     {
         Str255 volName;
@@ -626,6 +735,7 @@ static void DrawWindow(void)
         SetRect(&gBtnCancelNameRect, cx + 15, dlgR.bottom - 32, cx + 90, dlgR.bottom - 12);
         DrawButton(&gBtnCancelNameRect, "Cancel", false);
     }
+
 }
 
 static void ProcessSharedCommand(void)
@@ -660,7 +770,7 @@ static void ProcessSharedCommand(void)
 
         case CMD_SEND_FILE: {
             StandardFileReply reply;
-            SetFrontProcess(&gMacDropPSN);
+            EnsureFrontProcess();
             DrawMenuBar();
             StandardGetFile(NULL, -1, NULL, &reply);
             if (reply.sfGood) {
@@ -674,39 +784,8 @@ static void ProcessSharedCommand(void)
             break;
         }
 
-        case CMD_FIND_SERVER:
-            SetFrontProcess(&gMacDropPSN);
-            DrawMenuBar();
-            gConnState = CONN_SEARCHING;
-            gConnErrorMsg[0] = '\0';
-            if (gWindow) {
-                ShowWindow(gWindow);
-                SelectWindow(gWindow);
-                SetPortWindowPort(gWindow);
-                DrawWindow();
-            }
-            if (NetDiscoverServer()) {
-                FormatIP(gServerIP, gServerIpInput);
-                gConnState = CONN_READY;
-                NetConnectChannel();
-            } else {
-                gConnState = CONN_FAILED;
-            }
-            if (gWindow && IsWindowVisible(gWindow)) {
-                DrawWindow();
-            }
-            SyncSharedData();
-            UpdateMenuStates();
-            break;
-
         case CMD_CHOOSE_FOLDER:
-            SetFrontProcess(&gMacDropPSN);
-            DrawMenuBar();
-            if (ChooseDestinationFolder()) {
-                if (gWindow && IsWindowVisible(gWindow)) {
-                    DrawWindow();
-                }
-            }
+            ChooseDestinationWithFilePicker();
             SyncSharedData();
             UpdateMenuStates();
             break;
@@ -714,6 +793,7 @@ static void ProcessSharedCommand(void)
         case CMD_SET_NAME:
             SetFrontProcess(&gMacDropPSN);
             DrawMenuBar();
+            gWasHiddenBeforeName = (!gWindow || !IsWindowVisible(gWindow));
             gModalSetName = true;
             strncpy(gClientNameInput, gClientName, sizeof(gClientNameInput) - 1);
             gClientNameInput[sizeof(gClientNameInput) - 1] = '\0';
@@ -742,16 +822,10 @@ static void ProcessSharedCommand(void)
             break;
 
         case CMD_ABOUT:
-            SetFrontProcess(&gMacDropPSN);
+            EnsureFrontProcess();
             DrawMenuBar();
             gWasHiddenBeforeAbout = (!gWindow || !IsWindowVisible(gWindow));
-            gAboutModalOpen = true;
-            if (gWindow) {
-                ShowWindow(gWindow);
-                SelectWindow(gWindow);
-                SetPortWindowPort(gWindow);
-                DrawWindow();
-            }
+            OpenAboutWindow();
             SyncSharedData();
             UpdateMenuStates();
             break;
@@ -777,12 +851,8 @@ static void HandleMenuChoice(long choice)
             if (itemID == ITEM_ABOUT) {
                 Boolean isVis = (gWindow && IsWindowVisible(gWindow));
                 gWasHiddenBeforeAbout = !isVis;
-                gAboutModalOpen = true;
-                if (!isVis && gWindow) {
-                    ShowWindow(gWindow);
-                    SelectWindow(gWindow);
-                }
-                DrawWindow();
+                OpenAboutWindow();
+                SyncSharedData();
                 UpdateMenuStates();
             } else {
                 Str255 name;
@@ -796,6 +866,8 @@ static void HandleMenuChoice(long choice)
                 case ITEM_SEND_FILE:
                     if (!gTransferActive) {
                         StandardFileReply reply;
+                        EnsureFrontProcess();
+                        DrawMenuBar();
                         StandardGetFile(NULL, -1, NULL, &reply);
                         if (reply.sfGood) {
                             NetSendFile(&reply.sfFile);
@@ -803,25 +875,11 @@ static void HandleMenuChoice(long choice)
                         }
                     }
                     break;
-                case ITEM_RECONNECT:
-                    gConnState = CONN_SEARCHING;
-                    gConnErrorMsg[0] = '\0';
-                    DrawWindow();
-                    if (NetDiscoverServer()) {
-                        FormatIP(gServerIP, gServerIpInput);
-                        gConnState = CONN_READY;
-                        NetConnectChannel();
-                    } else {
-                        gConnState = CONN_FAILED;
-                    }
-                    DrawWindow();
-                    break;
                 case ITEM_DOWNLOAD:
-                    if (ChooseDestinationFolder()) {
-                        DrawWindow();
-                    }
+                    ChooseDestinationWithFilePicker();
                     break;
                 case ITEM_SET_NAME:
+                    gWasHiddenBeforeName = (!gWindow || !IsWindowVisible(gWindow));
                     gModalSetName = true;
                     strncpy(gClientNameInput, gClientName, sizeof(gClientNameInput) - 1);
                     gClientNameInput[sizeof(gClientNameInput) - 1] = '\0';
@@ -869,20 +927,6 @@ static void HandleMouseDown(EventRecord *evt)
     WindowPtr win;
     short part = FindWindow(evt->where, &win);
 
-    /* If About Modal is open, any click dismisses it */
-    if (gAboutModalOpen) {
-        gAboutModalOpen = false;
-        if (gWasHiddenBeforeAbout && gWindow) {
-            HideWindow(gWindow);
-            SwitchToFinder();
-        } else {
-            DrawWindow();
-        }
-        SyncSharedData();
-        UpdateMenuStates();
-        return;
-    }
-
     switch (part) {
         case inMenuBar:
             UpdateMenuStates();
@@ -911,25 +955,41 @@ static void HandleMouseDown(EventRecord *evt)
             break;
 
         case inContent:
+            if (win == gAboutWindow) {
+                CloseAboutWindow();
+                return;
+            }
             if (win != FrontWindow()) {
                 SelectWindow(win);
             } else if (win == gWindow) {
                 Point localPt = evt->where;
                 GlobalToLocal(&localPt);
 
-                /* Modal 1: Set Client Name */
+                /* Modal: Set Client Name */
                 if (gModalSetName) {
                     if (PtInRect(localPt, &gBtnSaveNameRect)) {
                         SetClientName(gClientNameInput);
                         gModalSetName = false;
                         NetStopChannel();
                         NetConnectChannel();
-                        DrawWindow();
+                        if (gWasHiddenBeforeName) {
+                            HideWindow(gWindow);
+                            SwitchToFinder();
+                        } else {
+                            DrawWindow();
+                        }
+                        SyncSharedData();
+                        UpdateMenuStates();
                         return;
                     }
                     if (PtInRect(localPt, &gBtnCancelNameRect)) {
                         gModalSetName = false;
-                        DrawWindow();
+                        if (gWasHiddenBeforeName) {
+                            HideWindow(gWindow);
+                            SwitchToFinder();
+                        } else {
+                            DrawWindow();
+                        }
                         return;
                     }
                     return;
@@ -984,9 +1044,17 @@ static void HandleMouseDown(EventRecord *evt)
                     }
                 }
 
+                /* Ready View: Click on Download Folder row -> Open File Picker */
+                if (!gTransferActive && gConnState == CONN_READY && PtInRect(localPt, &gDownloadFolderRowRect)) {
+                    ChooseDestinationWithFilePicker();
+                    return;
+                }
+
                 /* Ready View: Drop Box Click -> Open Standard File Picker */
                 if (!gTransferActive && gConnState == CONN_READY && PtInRect(localPt, &gDropZoneRect)) {
                     StandardFileReply reply;
+                    EnsureFrontProcess();
+                    DrawMenuBar();
                     StandardGetFile(NULL, -1, NULL, &reply);
                     if (reply.sfGood) {
                         NetSendFile(&reply.sfFile);
@@ -1010,17 +1078,9 @@ static void HandleKeyDown(EventRecord *evt)
 {
     char key = (char)(evt->message & charCodeMask);
 
-    /* If About Modal is open, any key dismisses it */
-    if (gAboutModalOpen) {
-        gAboutModalOpen = false;
-        if (gWasHiddenBeforeAbout && gWindow) {
-            HideWindow(gWindow);
-            SwitchToFinder();
-        } else {
-            DrawWindow();
-        }
-        SyncSharedData();
-        UpdateMenuStates();
+    /* If About Window is open, any key dismisses it */
+    if (gAboutWindow) {
+        CloseAboutWindow();
         return;
     }
 
@@ -1047,10 +1107,22 @@ static void HandleKeyDown(EventRecord *evt)
             gModalSetName = false;
             NetStopChannel();
             NetConnectChannel();
-            DrawWindow();
+            if (gWasHiddenBeforeName) {
+                HideWindow(gWindow);
+                SwitchToFinder();
+            } else {
+                DrawWindow();
+            }
+            SyncSharedData();
+            UpdateMenuStates();
         } else if (key == 27) {
             gModalSetName = false;
-            DrawWindow();
+            if (gWasHiddenBeforeName) {
+                HideWindow(gWindow);
+                SwitchToFinder();
+            } else {
+                DrawWindow();
+            }
         } else if (key == 8 && len > 0) {
             gClientNameInput[len - 1] = '\0';
             DrawWindow();
@@ -1251,7 +1323,11 @@ int main(void)
                     }
                     break;
                 case updateEvt:
-                    if ((WindowPtr)event.message == gWindow) {
+                    if ((WindowPtr)event.message == gAboutWindow) {
+                        BeginUpdate(gAboutWindow);
+                        DrawAboutWindow();
+                        EndUpdate(gAboutWindow);
+                    } else if ((WindowPtr)event.message == gWindow) {
                         BeginUpdate(gWindow);
                         DrawWindow();
                         EndUpdate(gWindow);
@@ -1274,6 +1350,10 @@ int main(void)
     CleanupDragManager();
     NetStopChannel();
     NetStopListener();
+    if (gAboutWindow) {
+        DisposeWindow(gAboutWindow);
+        gAboutWindow = NULL;
+    }
     if (gWindow) {
         DisposeWindow(gWindow);
     }

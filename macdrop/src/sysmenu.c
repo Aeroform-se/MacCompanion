@@ -330,37 +330,34 @@ static void UpdateMenuContents(void)
     /* Item 6: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 7: Find server */
-    AddMenuItem(glob.mHdl, "\pFind Server...", true);
-
-    /* Item 8: Download folder */
+    /* Item 7: Download folder */
     AddMenuItem(glob.mHdl, "\pDownload Folder...", true);
 
-    /* Item 9: Set client name */
+    /* Item 8: Set client name */
     AddMenuItem(glob.mHdl, "\pSet Client Name...", true);
 
-    /* Item 10: Separator */
+    /* Item 9: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 11: Play Sound Chime */
+    /* Item 10: Play Sound Chime */
     AddMenuItem(glob.mHdl, "\pPlay Sound Chime", true);
     if (sharedData.SoundEnabled) {
+        SetItemMark(glob.mHdl, 10, checkMark);
+    }
+
+    /* Item 11: Notification Alert */
+    AddMenuItem(glob.mHdl, "\pNotification Alert", true);
+    if (sharedData.NotifyEnabled) {
         SetItemMark(glob.mHdl, 11, checkMark);
     }
 
-    /* Item 12: Notification Alert */
-    AddMenuItem(glob.mHdl, "\pNotification Alert", true);
-    if (sharedData.NotifyEnabled) {
-        SetItemMark(glob.mHdl, 12, checkMark);
-    }
-
-    /* Item 13: Separator */
+    /* Item 12: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 14: About */
+    /* Item 13: About */
     AddMenuItem(glob.mHdl, "\pAbout MacDrop...", true);
 
-    /* Item 15: Quit */
+    /* Item 14: Quit */
     AddMenuItem(glob.mHdl, "\pQuit MacDrop", true);
 }
 
@@ -396,7 +393,7 @@ static pascal void Patched_SystemMenu(long result)
     if (menuID == glob.menuID) {
         InitCursor();
 
-        if (!sharedData.DaemonRunning && itemID != 15) {
+        if (!sharedData.DaemonRunning && itemID != 14) {
             TryLaunchDaemon();
         }
 
@@ -407,29 +404,26 @@ static pascal void Patched_SystemMenu(long result)
             case 5: /* Send file */
                 sharedData.PendingCommand = CMD_SEND_FILE;
                 break;
-            case 7: /* Reconnect / Find Server */
-                sharedData.PendingCommand = CMD_FIND_SERVER;
-                break;
-            case 8: /* Download folder */
+            case 7: /* Download folder */
                 sharedData.PendingCommand = CMD_CHOOSE_FOLDER;
                 break;
-            case 9: /* Client name */
+            case 8: /* Client name */
                 sharedData.PendingCommand = CMD_SET_NAME;
                 break;
-            case 11: /* Sound */
+            case 10: /* Sound */
                 sharedData.SoundEnabled = !sharedData.SoundEnabled;
                 sharedData.PendingCommand = CMD_TOGGLE_SOUND;
                 sharedData.UpdateUI = true;
                 break;
-            case 12: /* Notify */
+            case 11: /* Notify */
                 sharedData.NotifyEnabled = !sharedData.NotifyEnabled;
                 sharedData.PendingCommand = CMD_TOGGLE_NOTIFY;
                 sharedData.UpdateUI = true;
                 break;
-            case 14: /* About */
+            case 13: /* About */
                 sharedData.PendingCommand = CMD_ABOUT;
                 break;
-            case 15: /* Quit */
+            case 14: /* Quit */
                 sharedData.PendingCommand = CMD_QUIT;
                 break;
         }

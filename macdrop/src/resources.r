@@ -124,7 +124,7 @@ resource 'ICN#' (128, "MacDrop", purgeable) {
     }
 };
 
-/* 16x16 Small Application Icon & Mask ('ics#' 128) from ui/MacDrop/MacDrop-16x16.png */
+/* 16x16 Small Application Icon & Mask ('ics#' 128) from ui/MacDrop/MacDrop-16x16-update.png */
 resource 'ics#' (128, "MacDrop Small", purgeable) {
     {
         /* Small Icon Bits */
@@ -142,8 +142,8 @@ resource 'ics#' (128, "MacDrop Small", purgeable) {
         $"1010"
         $"15D0"
         $"1010"
-        $"1FF0"
-        $"0FE0",
+        $"0FE0"
+        $"0000",
         /* Small Mask Bits */
         $"07C0"
         $"1830"
@@ -159,8 +159,8 @@ resource 'ics#' (128, "MacDrop Small", purgeable) {
         $"1FF0"
         $"1FF0"
         $"1FF0"
-        $"1FF0"
         $"0FE0"
+        $"0000"
     }
 };
 
@@ -254,8 +254,8 @@ resource 'ics#' (129, "Menu Bar Icon", purgeable) {
         $"1010"
         $"15D0"
         $"1010"
-        $"1FF0"
-        $"0FE0",
+        $"0FE0"
+        $"0000",
         /* Small Mask Bits */
         $"07C0"
         $"1830"
@@ -271,8 +271,8 @@ resource 'ics#' (129, "Menu Bar Icon", purgeable) {
         $"1FF0"
         $"1FF0"
         $"1FF0"
-        $"1FF0"
         $"0FE0"
+        $"0000"
     }
 };
 
@@ -293,8 +293,8 @@ resource 'SICN' (128, "MacDrop", purgeable) {
         $"1010"
         $"15D0"
         $"1010"
-        $"1FF0"
         $"0FE0"
+        $"0000"
     }
 };
 
@@ -387,8 +387,8 @@ resource 'ics#' (-16455, "Custom Small Icon", purgeable) {
         $"1010"
         $"15D0"
         $"1010"
-        $"1FF0"
-        $"0FE0",
+        $"0FE0"
+        $"0000",
         /* Small Mask Bits */
         $"07C0"
         $"1830"
@@ -404,8 +404,8 @@ resource 'ics#' (-16455, "Custom Small Icon", purgeable) {
         $"1FF0"
         $"1FF0"
         $"1FF0"
-        $"1FF0"
         $"0FE0"
+        $"0000"
     }
 };
 
@@ -458,7 +458,6 @@ resource 'MENU' (129, "File") {
     {
         "Send File to Modern Mac...", noIcon, "S", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
-        "Server Connection...", noIcon, "R", noMark, plain,
         "Download Folder...", noIcon, "F", noMark, plain,
         "Set Client Name...", noIcon, "M", noMark, plain,
         "-", noIcon, noKey, noMark, plain,

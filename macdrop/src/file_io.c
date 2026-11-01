@@ -243,65 +243,9 @@ void SavePreferences(void)
     }
 }
 
-static pascal short PutFolderDlgHook(short item, DialogRef theDialog, void *yourDataPtr)
-{
-    if (item == sfHookFirstCall) {
-        short itemType;
-        Handle itemH = NULL;
-        Rect itemBox;
-        /* Item 1 is the primary confirmation button (Save) */
-        GetDialogItem(theDialog, 1, &itemType, &itemH, &itemBox);
-        if (itemH) {
-            SetControlTitle((ControlHandle)itemH, "\pSelect");
-        }
-    }
-    return item;
-}
-
 Boolean ChooseDestinationFolder(void)
 {
-    StandardFileReply reply;
-    Point where = {-1, -1};
-    DlgHookYDUPP hookUPP = NewDlgHookYDUPP(PutFolderDlgHook);
-
-    CustomPutFile(
-        "\pSelect destination folder for received files:",
-        "\p(Select Current Folder)",
-        &reply,
-        0,
-        where,
-        hookUPP,
-        NULL,
-        NULL,
-        NULL,
-        NULL
-    );
-
-    DisposeDlgHookYDUPP(hookUPP);
-
-    if (reply.sfGood) {
-        CInfoPBRec cinfo;
-        Str255 folderPName;
-        memset(&cinfo, 0, sizeof(cinfo));
-        cinfo.dirInfo.ioVRefNum   = reply.sfFile.vRefNum;
-        cinfo.dirInfo.ioDrDirID   = reply.sfFile.parID;
-        cinfo.dirInfo.ioNamePtr   = folderPName;
-        cinfo.dirInfo.ioFDirIndex = -1; /* get info on directory itself */
-
-        if (PBGetCatInfoSync(&cinfo) == noErr) {
-            short len = folderPName[0];
-            if (len > MAX_FOLDER_NAME - 1) len = MAX_FOLDER_NAME - 1;
-            memcpy(gDestFolderName, &folderPName[1], len);
-            gDestFolderName[len] = '\0';
-        } else {
-            strncpy(gDestFolderName, "Custom Folder", sizeof(gDestFolderName) - 1);
-        }
-
-        gDestVRefNum = reply.sfFile.vRefNum;
-        gDestDirID   = reply.sfFile.parID;
-        SavePreferences();
-        return true;
-    }
+    /* Handled natively via in-app modal in main.c */
     return false;
 }
 
