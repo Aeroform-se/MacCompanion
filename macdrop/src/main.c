@@ -388,6 +388,75 @@ static void ChooseDestinationWithFolderPicker(void)
     }
 }
 
+static pascal short SendDlgHookYD(short item, DialogRef theDialog, void *yourDataPtr)
+{
+    if (GetWRefCon(theDialog) != sfMainDialogRefCon)
+        return item;
+
+    /* Keep "Send" button (item 10) enabled/disabled state matching "Open" (item 1) */
+    if (item == sfHookFirstCall || item == sfHookNullEvent ||
+        item == sfHookChangeSelection || item == sfHookRebuildList) {
+        short type;
+        Rect r;
+        ControlHandle openBtn = NULL;
+        ControlHandle sendBtn = NULL;
+        GetDialogItem(theDialog, sfItemOpenButton, &type, (Handle *)&openBtn, &r);
+        GetDialogItem(theDialog, 10, &type, (Handle *)&sendBtn, &r);
+        if (openBtn && sendBtn) {
+            HiliteControl(sendBtn, (*openBtn)->contrlHilite);
+        }
+        return item;
+    }
+
+    if (item == 10) { /* User clicked "Send" button */
+        short type;
+        Rect r;
+        ControlHandle openBtn = NULL;
+        GetDialogItem(theDialog, sfItemOpenButton, &type, (Handle *)&openBtn, &r);
+        if (openBtn && (*openBtn)->contrlHilite == 0) {
+            return sfItemOpenButton;
+        }
+        return sfHookNullEvent;
+    }
+
+    return item;
+}
+
+static void SendFileWithPicker(void)
+{
+    StandardFileReply reply;
+    Point dlgPt = { -1, -1 };
+    DlgHookYDUPP hookUPP;
+
+    EnsureFrontProcess();
+    DrawMenuBar();
+
+    hookUPP = NewDlgHookYDUPP(SendDlgHookYD);
+
+    CustomGetFile(
+        NULL,           /* fileFilter: show all files */
+        -1,             /* numTypes: -1 means pass all types */
+        NULL,
+        &reply,
+        131,            /* Custom DLOG / DITL ID for Send File */
+        dlgPt,
+        hookUPP,
+        NULL,
+        NULL,
+        NULL,
+        NULL
+    );
+
+    DisposeDlgHookYDUPP(hookUPP);
+
+    if (reply.sfGood) {
+        NetSendFile(&reply.sfFile);
+        if (gWindow && IsWindowVisible(gWindow)) {
+            DrawWindow();
+        }
+    }
+}
+
 static void DrawAboutWindow(void)
 {
     Rect r;
@@ -455,8 +524,25 @@ static void OpenAboutWindow(void)
     short cardH = 216;
     short scrW = qd.screenBits.bounds.right - qd.screenBits.bounds.left;
     short scrH = qd.screenBits.bounds.bottom - qd.screenBits.bounds.top;
-    short left = (scrW - cardW) / 2;
-    short top  = qd.screenBits.bounds.top + 20 + ((scrH - 20 - cardH) / 2);
+    short left = qd.screenBits.bounds.left + (scrW / 2) - (cardW / 2);
+    short top;
+
+    /*
+     * The card should render with its center at the visual screen center.
+     * In windowed emulators (1024x768 framebuffer clamped to ~600-625p window),
+     * rendering at top=168 lifts the window by half its height (108 px),
+     * placing the window center right at y=276.
+     */
+    if (scrH >= 700) {
+        top = qd.screenBits.bounds.top + 168;
+    } else if (scrH >= 480) {
+        top = qd.screenBits.bounds.top + 20 + ((scrH - 20 - cardH) / 3);
+    } else {
+        top = qd.screenBits.bounds.top + 20 + ((scrH - 20 - cardH) / 2);
+    }
+
+    EnsureFrontProcess();
+    DrawMenuBar();
 
     if (gAboutWindow) {
         SelectWindow(gAboutWindow);
@@ -552,7 +638,6 @@ static void DrawWindow(void)
 {
     Rect r;
     char buf[256];
-    char ipStr[32];
     short y = 20;
 
     if (!gWindow || !IsWindowVisible(gWindow)) return;
@@ -642,44 +727,31 @@ static void DrawWindow(void)
 
     /* --- VIEW C: NORMAL READY STATUS VIEW --- */
 
-    /* Top Title */
+    /* Top Status line */
     MoveTo(16, y);
     TextFace(bold);
-    DrawCString("MacDrop");
+    DrawCString("Status: ");
     TextFace(normal);
-    DrawCString(" - Retro Push File Receiver (v" APP_VERSION_STR ")");
-    y += 15;
-
-    /* Machine identification */
-    MoveTo(16, y);
-    sprintf(buf, "Machine: %s (%s)", gClientName, GetMacMachineName());
-    DrawCString(buf);
-    y += 13;
-
-    /* Network connection status */
-    MoveTo(16, y);
     if (gChannelConnected) {
-        FormatIP(gServerIP, ipStr);
-        sprintf(buf, "Server: Connected to %s:%u (Push Channel Active)", ipStr, gServerPort);
+        if (gClientName[0]) {
+            snprintf(buf, sizeof(buf), "Connected to server as %s", gClientName);
+        } else {
+            snprintf(buf, sizeof(buf), "Connected to server");
+        }
     } else if (gServerConnected) {
-        FormatIP(gServerIP, ipStr);
-        sprintf(buf, "Server: Connecting to %s:%u...", ipStr, gServerPort);
+        snprintf(buf, sizeof(buf), "Connecting to server...");
     } else {
-        sprintf(buf, "Server: Searching on local subnet (UDP %u)...", DEFAULT_UDP_PORT);
+        snprintf(buf, sizeof(buf), "Searching for server...");
     }
     DrawCString(buf);
-    y += 13;
+    y += 16;
 
-    /* Local listener info */
-    MoveTo(16, y);
-    FormatIP(gOurIP, ipStr);
-    sprintf(buf, "Receiver: Listening on %s:%u", ipStr, MACDROP_TCP_PORT);
-    DrawCString(buf);
-    y += 13;
-
-    /* Destination folder (labeled "Download Folder:" per user request) */
+    /* Destination folder (labeled "Download Dir:" to match menu) */
     SetRect(&gDownloadFolderRowRect, 16, y - 10, r.right - 16, y + 4);
     MoveTo(16, y);
+    TextFace(bold);
+    DrawCString("Download Dir: ");
+    TextFace(normal);
     {
         Str255 volName;
         volName[0] = 0;
@@ -689,13 +761,13 @@ static void DrawWindow(void)
             short vLen = volName[0] > 63 ? 63 : volName[0];
             memcpy(volStr, &volName[1], vLen);
             volStr[vLen] = '\0';
-            snprintf(buf, sizeof(buf), "Download Folder: %s:%s:", volStr, gDestFolderName);
+            snprintf(buf, sizeof(buf), "%s:%s:", volStr, gDestFolderName);
         } else {
-            snprintf(buf, sizeof(buf), "Download Folder: :%s:", gDestFolderName);
+            snprintf(buf, sizeof(buf), ":%s:", gDestFolderName);
         }
     }
     DrawCString(buf);
-    y += 15;
+    y += 16;
 
     /* Divider */
     MoveTo(16, y);
@@ -743,10 +815,10 @@ static void DrawWindow(void)
     } else {
         /* Drop Box Area */
         Rect dropBox;
-        short boxH = 46;
+        short boxH = 142;
         short cx = (r.left + r.right) / 2;
-        const char *t1 = "Drag file here from Finder";
-        const char *t2 = "or Click to send to MacCompanion";
+        const char *t1 = "Drag file here to send,";
+        const char *t2 = "or click to pick file.";
 
         SetRect(&dropBox, 16, y, r.right - 16, y + boxH);
         gDropZoneRect = dropBox;
@@ -758,18 +830,15 @@ static void DrawWindow(void)
         FrameRoundRect(&dropBox, 6, 6);
         PenNormal();
 
+        /* Draw 32x32 MacDrop logo in center of box */
+        BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, cx - 16, dropBox.top + 28, srcCopy);
+
         TextFace(bold);
-        MoveTo(cx - MeasureCString(t1) / 2, dropBox.top + 18);
+        MoveTo(cx - MeasureCString(t1) / 2, dropBox.top + 80);
         DrawCString(t1);
         TextFace(normal);
-        MoveTo(cx - MeasureCString(t2) / 2, dropBox.top + 33);
+        MoveTo(cx - MeasureCString(t2) / 2, dropBox.top + 98);
         DrawCString(t2);
-
-        y += boxH + 12;
-        MoveTo(16, y);
-        TextFace(italic);
-        DrawCString("Also ready to receive files via drag-and-drop on server.");
-        TextFace(normal);
     }
 
     /* --- MODAL DIALOG: SET CLIENT NAME --- */
@@ -836,21 +905,11 @@ static void ProcessSharedCommand(void)
             UpdateMenuStates();
             break;
 
-        case CMD_SEND_FILE: {
-            StandardFileReply reply;
-            EnsureFrontProcess();
-            DrawMenuBar();
-            StandardGetFile(NULL, -1, NULL, &reply);
-            if (reply.sfGood) {
-                NetSendFile(&reply.sfFile);
-                if (gWindow && IsWindowVisible(gWindow)) {
-                    DrawWindow();
-                }
-            }
+        case CMD_SEND_FILE:
+            SendFileWithPicker();
             SyncSharedData();
             UpdateMenuStates();
             break;
-        }
 
         case CMD_CHOOSE_FOLDER:
             ChooseDestinationWithFolderPicker();
@@ -933,14 +992,7 @@ static void HandleMenuChoice(long choice)
             switch (itemID) {
                 case ITEM_SEND_FILE:
                     if (!gTransferActive) {
-                        StandardFileReply reply;
-                        EnsureFrontProcess();
-                        DrawMenuBar();
-                        StandardGetFile(NULL, -1, NULL, &reply);
-                        if (reply.sfGood) {
-                            NetSendFile(&reply.sfFile);
-                            DrawWindow();
-                        }
+                        SendFileWithPicker();
                     }
                     break;
                 case ITEM_DOWNLOAD:
@@ -1118,16 +1170,9 @@ static void HandleMouseDown(EventRecord *evt)
                     return;
                 }
 
-                /* Ready View: Drop Box Click -> Open Standard File Picker */
+                /* Ready View: Drop Box Click -> Open Send File Picker */
                 if (!gTransferActive && gConnState == CONN_READY && PtInRect(localPt, &gDropZoneRect)) {
-                    StandardFileReply reply;
-                    EnsureFrontProcess();
-                    DrawMenuBar();
-                    StandardGetFile(NULL, -1, NULL, &reply);
-                    if (reply.sfGood) {
-                        NetSendFile(&reply.sfFile);
-                        DrawWindow();
-                    }
+                    SendFileWithPicker();
                     return;
                 }
 

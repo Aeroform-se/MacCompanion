@@ -284,19 +284,12 @@ static void UpdateMenuContents(void)
         itemCount--;
     }
 
-    /* Item 1: App Version Header */
-    AddMenuItem(glob.mHdl, "\pMacDrop " APP_VERSION_SHORT, false);
-
-    /* Item 2: Status */
+    /* Item 1: Status */
     if (sharedData.DaemonRunning) {
         if (sharedData.TransferActive) {
             snprintf(sbuf, sizeof(sbuf), "Status: Transferring...");
         } else if (sharedData.ChannelConnected) {
-            if (sharedData.ClientName[0]) {
-                snprintf(sbuf, sizeof(sbuf), "Connected: %s", sharedData.ClientName);
-            } else {
-                snprintf(sbuf, sizeof(sbuf), "Status: Connected");
-            }
+            snprintf(sbuf, sizeof(sbuf), "Server connection OK");
         } else {
             snprintf(sbuf, sizeof(sbuf), "Status: Ready / Offline");
         }
@@ -314,51 +307,48 @@ static void UpdateMenuContents(void)
     memcpy(pStatus + 1, sbuf, slen);
     AddMenuItem(glob.mHdl, pStatus, false);
 
-    /* Item 3: Separator */
+    /* Item 2: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 4: Window visibility toggle */
+    /* Item 3: Window visibility toggle */
     if (sharedData.WindowVisible) {
         AddMenuItem(glob.mHdl, "\pHide MacDrop Window", true);
     } else {
         AddMenuItem(glob.mHdl, "\pOpen MacDrop Window", true);
     }
 
-    /* Item 5: Send file */
-    AddMenuItem(glob.mHdl, "\pSend File to Modern Mac...", !sharedData.TransferActive);
+    /* Item 4: Send file */
+    AddMenuItem(glob.mHdl, "\pSend a file...", !sharedData.TransferActive);
 
-    /* Item 6: Separator */
+    /* Item 5: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 7: Download folder */
-    AddMenuItem(glob.mHdl, "\pDownload Folder...", true);
+    /* Item 6: Download directory */
+    AddMenuItem(glob.mHdl, "\pSet Download Dir.", true);
 
-    /* Item 8: Set client name */
+    /* Item 7: Set client name */
     AddMenuItem(glob.mHdl, "\pSet Client Name...", true);
 
-    /* Item 9: Separator */
+    /* Item 8: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 10: Play Sound Chime */
+    /* Item 9: Play Sound Chime */
     AddMenuItem(glob.mHdl, "\pPlay Sound Chime", true);
     if (sharedData.SoundEnabled) {
+        SetItemMark(glob.mHdl, 9, checkMark);
+    }
+
+    /* Item 10: Notification Alert */
+    AddMenuItem(glob.mHdl, "\pNotification Alert", true);
+    if (sharedData.NotifyEnabled) {
         SetItemMark(glob.mHdl, 10, checkMark);
     }
 
-    /* Item 11: Notification Alert */
-    AddMenuItem(glob.mHdl, "\pNotification Alert", true);
-    if (sharedData.NotifyEnabled) {
-        SetItemMark(glob.mHdl, 11, checkMark);
-    }
-
-    /* Item 12: Separator */
+    /* Item 11: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 13: About */
+    /* Item 12: About */
     AddMenuItem(glob.mHdl, "\pAbout MacDrop...", true);
-
-    /* Item 14: Quit */
-    AddMenuItem(glob.mHdl, "\pQuit MacDrop", true);
 }
 
 static pascal long Patched_MenuSelect(Point where)
@@ -393,38 +383,35 @@ static pascal void Patched_SystemMenu(long result)
     if (menuID == glob.menuID) {
         InitCursor();
 
-        if (!sharedData.DaemonRunning && itemID != 14) {
+        if (!sharedData.DaemonRunning) {
             TryLaunchDaemon();
         }
 
         switch (itemID) {
-            case 4: /* Window toggle */
+            case 3: /* Window toggle */
                 sharedData.PendingCommand = sharedData.WindowVisible ? CMD_HIDE_WINDOW : CMD_OPEN_WINDOW;
                 break;
-            case 5: /* Send file */
+            case 4: /* Send file */
                 sharedData.PendingCommand = CMD_SEND_FILE;
                 break;
-            case 7: /* Download folder */
+            case 6: /* Download folder */
                 sharedData.PendingCommand = CMD_CHOOSE_FOLDER;
                 break;
-            case 8: /* Client name */
+            case 7: /* Client name */
                 sharedData.PendingCommand = CMD_SET_NAME;
                 break;
-            case 10: /* Sound */
+            case 9: /* Sound */
                 sharedData.SoundEnabled = !sharedData.SoundEnabled;
                 sharedData.PendingCommand = CMD_TOGGLE_SOUND;
                 sharedData.UpdateUI = true;
                 break;
-            case 11: /* Notify */
+            case 10: /* Notify */
                 sharedData.NotifyEnabled = !sharedData.NotifyEnabled;
                 sharedData.PendingCommand = CMD_TOGGLE_NOTIFY;
                 sharedData.UpdateUI = true;
                 break;
-            case 13: /* About */
+            case 12: /* About */
                 sharedData.PendingCommand = CMD_ABOUT;
-                break;
-            case 14: /* Quit */
-                sharedData.PendingCommand = CMD_QUIT;
                 break;
         }
 

@@ -2,18 +2,18 @@
 #define MACDROP_VERSION_H
 
 #define APP_NAME               "MacDrop"
-#define APP_CODENAME           "First Drop"
+#define APP_CODENAME           "Cold Brew"
 
-/* Numeric BCD fields for Mac OS 'vers' resource (0.1.22 Alpha) */
+/* Numeric BCD fields for Mac OS 'vers' resource (0.2 Release) */
 #define APP_VERSION_MAJOR_BCD  0x00
-#define APP_VERSION_MINOR_BCD  0x22
-#define APP_VERSION_STAGE      0x40   /* alpha */
+#define APP_VERSION_MINOR_BCD  0x20
+#define APP_VERSION_STAGE      0x80   /* release / final */
 #define APP_VERSION_NONFINAL   0x00
 
 /* Human-readable strings */
-#define APP_VERSION_STR        "0.1.22"
-#define APP_VERSION_TAG        "v0.1.22-alpha"
-#define APP_VERSION_SHORT      "0.1.22 Alpha"
-#define APP_VERSION_LONG       "0.1.22 Alpha (First Drop)"
+#define APP_VERSION_STR        "0.2"
+#define APP_VERSION_TAG        "v0.2"
+#define APP_VERSION_SHORT      "0.2"
+#define APP_VERSION_LONG       "0.2 (Cold Brew)"
 
 #endif /* MACDROP_VERSION_H */

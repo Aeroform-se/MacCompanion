@@ -458,9 +458,9 @@ resource 'MENU' (129, "File") {
     allEnabled,
     enabled, "File",
     {
-        "Send File to Modern Mac...", noIcon, "S", noMark, plain,
+        "Send a file...", noIcon, "S", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
-        "Download Folder...", noIcon, "F", noMark, plain,
+        "Set Download Dir.", noIcon, "F", noMark, plain,
         "Set Client Name...", noIcon, "M", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Close Window", noIcon, "W", noMark, plain,
@@ -509,5 +509,39 @@ resource 'DITL' (130, "Choose Folder", purgeable) {
         {93, 251, 94, 333}, Picture { disabled, 11 },
         /* [10] Custom Choose button */
         {138, 252, 158, 332}, Button { enabled, "Choose" }
+    }
+};
+
+/*
+ * Custom Dialog & Item List for Send File Selection ('DLOG' 131 and 'DITL' 131)
+ * Adds item 10 ("Send") to the standard System 7 file dialog layout.
+ */
+resource 'DLOG' (131, "Send File", purgeable) {
+    {0, 0, 200, 344}, dBoxProc, invisible, noGoAway, 0,
+    131, "", noAutoCenter
+};
+
+resource 'DITL' (131, "Send File", purgeable) {
+    {
+        /* [1] Open button */
+        {169, 252, 189, 332}, Button { enabled, "Open" },
+        /* [2] Cancel button */
+        {107, 252, 127, 332}, Button { enabled, "Cancel" },
+        /* [3] Balloon Help item */
+        {0, 0, 0, 0}, HelpItem { disabled, HMScanhdlg { -6042 } },
+        /* [4] Volume user item */
+        {8, 235, 24, 337}, UserItem { enabled },
+        /* [5] Eject button */
+        {32, 252, 52, 332}, Button { enabled, "Eject" },
+        /* [6] Desktop button */
+        {60, 252, 80, 332}, Button { enabled, "Desktop" },
+        /* [7] File list user item */
+        {29, 12, 193, 230}, UserItem { enabled },
+        /* [8] Pop-up menu user item */
+        {6, 12, 25, 230}, UserItem { enabled },
+        /* [9] Divider line picture */
+        {93, 251, 94, 333}, Picture { disabled, 11 },
+        /* [10] Custom Send button */
+        {138, 252, 158, 332}, Button { enabled, "Send" }
     }
 };
