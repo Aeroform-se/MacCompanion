@@ -23,10 +23,14 @@ Boolean         gServerConnected     = false;
 Boolean         gChannelConnected    = false;
 
 Boolean         gTransferActive      = false;
+Boolean         gTransferIsUpload    = false;
 char            gActiveTransferName[64] = "";
 unsigned long   gActiveTransferBytes = 0;
 unsigned long   gActiveTransferTotal = 0;
+unsigned long   gTransferSpeedBps    = 0;
 char            gCurrentTransferId[64] = "";
+Rect            gBtnCancelTransferRect;
+static Boolean  gCancelUpload        = false;
 
 #define LISTEN_RCV_BUF_SIZE 65536
 #define CHAN_RCV_BUF_SIZE   65536
@@ -143,6 +147,27 @@ static void TriggerTransferNotification(const char *fileName)
     if (gNotifyEnabled) {
         static Str255 notifyMsg;
         short len = sprintf((char *)&notifyMsg[1], "Received: %s", fileName);
+        if (len > 255) len = 255;
+        notifyMsg[0] = (unsigned char)len;
+
+        memset(&gNMRec, 0, sizeof(gNMRec));
+        gNMRec.qType   = 8; /* nmType */
+        gNMRec.nmMark  = 1; /* flash Apple icon in menu bar */
+        gNMRec.nmStr   = notifyMsg;
+        gNMRec.nmResp  = (NMUPP)-1; /* auto-remove on display */
+        NMInstall(&gNMRec);
+    }
+}
+
+static void TriggerUploadNotification(const char *fileName)
+{
+    if (gSoundEnabled) {
+        SysBeep(30);
+    }
+
+    if (gNotifyEnabled) {
+        static Str255 notifyMsg;
+        short len = sprintf((char *)&notifyMsg[1], "Sent: %s", fileName);
         if (len > 255) len = 255;
         notifyMsg[0] = (unsigned char)len;
 
@@ -352,6 +377,308 @@ void NetSendTransferAck(const char *transferId, const char *status, unsigned lon
     snprintf(path, sizeof(path), "/api/macdrop/ack?id=%s&transfer_id=%s&status=%s&bytes=%lu",
              encId, transferId, status ? status : "OK", bytesReceived);
     NetHttpGet(path, reply, sizeof(reply));
+}
+
+extern void UpdateProgressUI(void);
+
+void NetCancelActiveTransfer(void)
+{
+    if (!gTransferActive) return;
+
+    if (gTransferIsUpload) {
+        gCancelUpload = true;
+    } else {
+        if (gChannelState == CHAN_STREAMING) {
+            MacBinaryRx_Abort(&gChannelRx);
+            if (gCurrentTransferId[0] != '\0') {
+                NetSendTransferAck(gCurrentTransferId, "CANCELLED", 0);
+                gCurrentTransferId[0] = '\0';
+            }
+            NetStopChannel();
+            gLastChannelAttemptTick = 0; /* prompt immediate reconnect for next transfer */
+        } else {
+            MacBinaryRx_Abort(&gPassiveRx);
+            NetStopListener();
+            NetStartListener();
+        }
+        gTransferActive   = false;
+        gTransferIsUpload = false;
+        gActiveTransferBytes = 0;
+        gActiveTransferTotal = 0;
+        gActiveTransferName[0] = '\0';
+        SysBeep(1);
+        UpdateProgressUI();
+    }
+}
+
+Boolean NetSendFile(const FSSpec *spec)
+{
+    MacBinaryTx tx;
+    TCPiopb pb;
+    StreamPtr stream;
+    Ptr tcpRcvBuf;
+    char req[1024];
+    char hostStr[32];
+    char encId[128];
+    char encName[128];
+    wdsEntry wds[2];
+    OSErr err;
+    unsigned char *chunkBuf;
+    unsigned long startTicks, lastSpeedTicks, speedBytes;
+    unsigned long totalSize;
+    extern void UpdateProgressUI(void);
+
+    if (!spec || !NetInit() || gServerIP == 0) return false;
+
+    /* Initialize MacBinaryTx encoder */
+    err = MacBinaryTx_Init(&tx, spec);
+    if (err != noErr) {
+        return false;
+    }
+
+    totalSize = 128 + tx.dataBytesTarget + tx.rsrcBytesTarget;
+
+    tcpRcvBuf = NewPtr(4096);
+    if (!tcpRcvBuf) {
+        MacBinaryTx_Abort(&tx);
+        return false;
+    }
+
+    chunkBuf = (unsigned char *)NewPtr(8192);
+    if (!chunkBuf) {
+        DisposePtr(tcpRcvBuf);
+        MacBinaryTx_Abort(&tx);
+        return false;
+    }
+
+    /* Create TCP stream */
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum                 = gMacTCPRef;
+    pb.csCode                    = TCPCreate;
+    pb.csParam.create.rcvBuff    = tcpRcvBuf;
+    pb.csParam.create.rcvBuffLen = 4096;
+    pb.csParam.create.notifyProc = NULL;
+    if (PBControlSync((ParmBlkPtr)&pb) != noErr) {
+        DisposePtr((Ptr)chunkBuf);
+        DisposePtr(tcpRcvBuf);
+        MacBinaryTx_Abort(&tx);
+        return false;
+    }
+    stream = pb.tcpStream;
+
+    /* Open connection to server */
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum                        = gMacTCPRef;
+    pb.csCode                           = TCPActiveOpen;
+    pb.tcpStream                        = stream;
+    pb.csParam.open.ulpTimeoutValue     = 10;
+    pb.csParam.open.ulpTimeoutAction    = 1;
+    pb.csParam.open.validityFlags       = timeoutValue | timeoutAction;
+    pb.csParam.open.commandTimeoutValue = 6;
+    pb.csParam.open.remoteHost          = gServerIP;
+    pb.csParam.open.remotePort          = gServerPort;
+    pb.csParam.open.localPort           = 0;
+
+    err = PBControlAsync((ParmBlkPtr)&pb);
+    startTicks = TickCount();
+    while (pb.ioResult > 0 && (TickCount() - startTicks) < 360) {
+        SystemTask();
+    }
+    if (pb.ioResult != noErr) {
+        memset(&pb, 0, sizeof(pb));
+        pb.ioCRefNum = gMacTCPRef;
+        pb.csCode    = TCPAbort;
+        pb.tcpStream = stream;
+        PBControlSync((ParmBlkPtr)&pb);
+        pb.csCode    = TCPRelease;
+        PBControlSync((ParmBlkPtr)&pb);
+        DisposePtr((Ptr)chunkBuf);
+        DisposePtr(tcpRcvBuf);
+        MacBinaryTx_Abort(&tx);
+        return false;
+    }
+
+    FormatIP(gServerIP, hostStr);
+    URLEncode(gClientID, encId, sizeof(encId));
+    URLEncode(gClientName, encName, sizeof(encName));
+
+    sprintf(req,
+        "POST /api/macdrop/inbound/upload?id=%s&name=%s HTTP/1.0\r\n"
+        "Host: %s:%u\r\n"
+        "User-Agent: MacDrop-68k\r\n"
+        "Content-Type: application/x-macbinary\r\n"
+        "Content-Length: %lu\r\n"
+        "X-Client-Id: %s\r\n"
+        "X-Client-Name: %s\r\n"
+        "X-Filename: %s\r\n"
+        "Connection: close\r\n\r\n",
+        encId, encName, hostStr, gServerPort, totalSize,
+        gClientID, gClientName, tx.fileName);
+
+    wds[0].length = (unsigned short)strlen(req);
+    wds[0].ptr    = (Ptr)req;
+    wds[1].length = 0;
+    wds[1].ptr    = NULL;
+
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum                        = gMacTCPRef;
+    pb.csCode                           = TCPSend;
+    pb.tcpStream                        = stream;
+    pb.csParam.send.ulpTimeoutValue     = 10;
+    pb.csParam.send.ulpTimeoutAction    = 1;
+    pb.csParam.send.validityFlags       = timeoutValue | timeoutAction;
+    pb.csParam.send.pushFlag            = true;
+    pb.csParam.send.urgentFlag          = false;
+    pb.csParam.send.wdsPtr              = (Ptr)wds;
+    if (PBControlSync((ParmBlkPtr)&pb) != noErr) {
+        goto abort_transfer;
+    }
+
+    /* Set global transfer state */
+    gTransferActive      = true;
+    gTransferIsUpload    = true;
+    gCancelUpload        = false;
+    gActiveTransferBytes = 0;
+    gActiveTransferTotal = totalSize;
+    gTransferSpeedBps    = 0;
+    strncpy(gActiveTransferName, tx.fileName, sizeof(gActiveTransferName) - 1);
+    gActiveTransferName[sizeof(gActiveTransferName) - 1] = '\0';
+
+    lastSpeedTicks = TickCount();
+    speedBytes = 0;
+
+    UpdateProgressUI();
+
+    /* Streaming loop */
+    while (tx.state != TX_COMPLETE && tx.state != TX_ERROR) {
+        EventRecord evt;
+        if (gCancelUpload) {
+            goto abort_transfer;
+        }
+        if (GetNextEvent(everyEvent, &evt)) {
+            if (evt.what == mouseDown) {
+                extern WindowRef gWindow;
+                WindowPtr win;
+                short part = FindWindow(evt.where, &win);
+                if (part == inContent && win == gWindow) {
+                    Point localPt = evt.where;
+                    SetPort(gWindow);
+                    GlobalToLocal(&localPt);
+                    if (PtInRect(localPt, &gBtnCancelTransferRect)) {
+                        goto abort_transfer;
+                    }
+                }
+            } else if (evt.what == keyDown) {
+                char key = (char)(evt.message & charCodeMask);
+                if (((evt.modifiers & cmdKey) && key == '.') || key == 27) {
+                    goto abort_transfer;
+                }
+            }
+        }
+
+        long bytesToRead = MacBinaryTx_ReadBytes(&tx, chunkBuf, 8192);
+        if (bytesToRead <= 0) break;
+
+        wds[0].length = (unsigned short)bytesToRead;
+        wds[0].ptr    = (Ptr)chunkBuf;
+        wds[1].length = 0;
+        wds[1].ptr    = NULL;
+
+        memset(&pb, 0, sizeof(pb));
+        pb.ioCRefNum                        = gMacTCPRef;
+        pb.csCode                           = TCPSend;
+        pb.tcpStream                        = stream;
+        pb.csParam.send.ulpTimeoutValue     = 15;
+        pb.csParam.send.ulpTimeoutAction    = 1;
+        pb.csParam.send.validityFlags       = timeoutValue | timeoutAction;
+        pb.csParam.send.pushFlag            = true;
+        pb.csParam.send.urgentFlag          = false;
+        pb.csParam.send.wdsPtr              = (Ptr)wds;
+        err = PBControlSync((ParmBlkPtr)&pb);
+        if (err != noErr) {
+            goto abort_transfer;
+        }
+
+        gActiveTransferBytes += bytesToRead;
+        speedBytes += bytesToRead;
+
+        if ((TickCount() - lastSpeedTicks) >= 30) {
+            unsigned long ticks = TickCount() - lastSpeedTicks;
+            gTransferSpeedBps = (speedBytes * 60) / ticks;
+            lastSpeedTicks = TickCount();
+            speedBytes = 0;
+        }
+
+        UpdateProgressUI();
+        SystemTask();
+    }
+
+    if (tx.state == TX_ERROR) {
+        goto abort_transfer;
+    }
+
+    MacBinaryTx_Finish(&tx);
+
+    /* Read server response */
+    {
+        char respBuf[512];
+        memset(&pb, 0, sizeof(pb));
+        pb.ioCRefNum                           = gMacTCPRef;
+        pb.csCode                              = TCPRcv;
+        pb.tcpStream                           = stream;
+        pb.csParam.receive.commandTimeoutValue = 5;
+        pb.csParam.receive.rcvBuff             = respBuf;
+        pb.csParam.receive.rcvBuffLen          = sizeof(respBuf) - 1;
+        PBControlSync((ParmBlkPtr)&pb);
+    }
+
+    /* Clean close TCP */
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum                        = gMacTCPRef;
+    pb.csCode                           = TCPClose;
+    pb.tcpStream                        = stream;
+    pb.csParam.close.ulpTimeoutValue     = 5;
+    pb.csParam.close.ulpTimeoutAction    = 1;
+    pb.csParam.close.validityFlags       = timeoutValue | timeoutAction;
+    PBControlSync((ParmBlkPtr)&pb);
+
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum = gMacTCPRef;
+    pb.csCode    = TCPRelease;
+    pb.tcpStream = stream;
+    PBControlSync((ParmBlkPtr)&pb);
+
+    DisposePtr((Ptr)chunkBuf);
+    DisposePtr(tcpRcvBuf);
+
+    gTransferActive   = false;
+    gTransferIsUpload = false;
+
+    TriggerUploadNotification(tx.fileName);
+    UpdateProgressUI();
+    return true;
+
+abort_transfer:
+    MacBinaryTx_Abort(&tx);
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum = gMacTCPRef;
+    pb.csCode    = TCPAbort;
+    pb.tcpStream = stream;
+    PBControlSync((ParmBlkPtr)&pb);
+
+    memset(&pb, 0, sizeof(pb));
+    pb.ioCRefNum = gMacTCPRef;
+    pb.csCode    = TCPRelease;
+    pb.tcpStream = stream;
+    PBControlSync((ParmBlkPtr)&pb);
+
+    DisposePtr((Ptr)chunkBuf);
+    DisposePtr(tcpRcvBuf);
+
+    gTransferActive   = false;
+    gTransferIsUpload = false;
+    UpdateProgressUI();
+    return false;
 }
 
 Boolean NetDiscoverServer(void)

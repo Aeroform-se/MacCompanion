@@ -10,6 +10,9 @@
 #include <OSUtils.h>
 #include <ToolUtils.h>
 #include <SegLoad.h>
+#include <StandardFile.h>
+#include <Drag.h>
+#include <Gestalt.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,11 +27,12 @@
 
 #define ITEM_ABOUT      1
 
-#define ITEM_RECONNECT  1
-#define ITEM_DOWNLOAD   2
-#define ITEM_SET_NAME   3
-#define ITEM_CLOSE      5
-#define ITEM_QUIT       6
+#define ITEM_SEND_FILE  1
+#define ITEM_RECONNECT  3
+#define ITEM_DOWNLOAD   4
+#define ITEM_SET_NAME   5
+#define ITEM_CLOSE      7
+#define ITEM_QUIT       8
 
 #define ITEM_SOUND      1
 #define ITEM_NOTIFY     2
@@ -40,7 +44,7 @@ typedef enum {
 } ConnState;
 
 static Boolean   gDone               = false;
-static WindowPtr gWindow             = NULL;
+WindowPtr        gWindow             = NULL;
 static MenuHandle gMenuApple         = NULL;
 static MenuHandle gMenuFile          = NULL;
 static MenuHandle gMenuOptions       = NULL;
@@ -58,6 +62,9 @@ static Rect      gBtnConnectRect;
 static Rect      gBtnCancelConnRect;
 static Rect      gBtnSaveNameRect;
 static Rect      gBtnCancelNameRect;
+static Rect      gDropZoneRect;
+
+void UpdateProgressUI(void);
 
 static void DrawCString(const char *str)
 {
@@ -124,7 +131,7 @@ static void DrawProgressBar(short left, short top, short width, short height, un
 
     if (total > 0 && current > 0) {
         if (current > total) current = total;
-        fillW = (short)(((unsigned long)(width - 4) * current) / total);
+        fillW = (short)(((unsigned long long)(width - 4) * current) / total);
     }
 
     if (fillW > 0) {
@@ -135,6 +142,72 @@ static void DrawProgressBar(short left, short top, short width, short height, un
     if (fillW < width - 4) {
         SetRect(&fillR, left + 2 + fillW, top + 2, left + width - 2, top + height - 2);
         FillRect(&fillR, &qd.white);
+    }
+}
+
+static void DrawWindow(void);
+
+void UpdateProgressUI(void)
+{
+    if (!gWindow || !IsWindowVisible(gWindow)) return;
+    DrawWindow();
+}
+
+static DragTrackingHandlerUPP gDragTrackingUPP = NULL;
+static DragReceiveHandlerUPP  gDragReceiveUPP  = NULL;
+
+static pascal OSErr MyDragTrackingHandler(DragTrackingMessage message, WindowRef theWindow, void *handlerRefCon, DragRef theDrag)
+{
+    return noErr;
+}
+
+static pascal OSErr MyDragReceiveHandler(WindowRef theWindow, void *handlerRefCon, DragRef theDrag)
+{
+    unsigned short numItems = 0;
+    unsigned short i;
+    OSErr err;
+
+    err = CountDragItems(theDrag, &numItems);
+    if (err != noErr || numItems == 0) return dragNotAcceptedErr;
+
+    for (i = 1; i <= numItems; i++) {
+        ItemReference item;
+        HFSFlavor hfs;
+        Size sz = sizeof(hfs);
+
+        if (GetDragItemReferenceNumber(theDrag, i, &item) == noErr) {
+            if (GetFlavorData(theDrag, item, flavorTypeHFS, &hfs, &sz, 0) == noErr) {
+                NetSendFile(&hfs.fileSpec);
+                DrawWindow();
+                return noErr;
+            }
+        }
+    }
+    return dragNotAcceptedErr;
+}
+
+static void SetupDragManager(void)
+{
+    long dragAttr = 0;
+    if (Gestalt(gestaltDragMgrAttr, &dragAttr) == noErr && (dragAttr & (1 << gestaltDragMgrPresent))) {
+        gDragTrackingUPP = NewDragTrackingHandlerUPP(MyDragTrackingHandler);
+        gDragReceiveUPP  = NewDragReceiveHandlerUPP(MyDragReceiveHandler);
+        if (gDragReceiveUPP && gWindow) {
+            InstallReceiveHandler(gDragReceiveUPP, gWindow, NULL);
+        }
+        if (gDragTrackingUPP && gWindow) {
+            InstallTrackingHandler(gDragTrackingUPP, gWindow, NULL);
+        }
+    }
+}
+
+static void CleanupDragManager(void)
+{
+    if (gDragReceiveUPP && gWindow) {
+        RemoveReceiveHandler(gDragReceiveUPP, gWindow);
+    }
+    if (gDragTrackingUPP && gWindow) {
+        RemoveTrackingHandler(gDragTrackingUPP, gWindow);
     }
 }
 
@@ -299,30 +372,65 @@ static void DrawWindow(void)
 
         MoveTo(16, y);
         TextFace(bold);
-        DrawCString("Receiving: ");
+        if (gTransferIsUpload) {
+            DrawCString("Sending to Server: ");
+        } else {
+            DrawCString("Receiving: ");
+        }
         TextFace(normal);
-        DrawCString(gActiveTransferName[0] ? gActiveTransferName : "Incoming stream...");
+        DrawCString(gActiveTransferName[0] ? gActiveTransferName : "Active stream...");
         y += 16;
 
-        DrawProgressBar(16, y, r.right - 32, 14, gActiveTransferBytes, gActiveTransferTotal);
+        /* Progress Bar with Cancel Button */
+        short barW = r.right - 32 - 76;
+        DrawProgressBar(16, y, barW, 14, gActiveTransferBytes, gActiveTransferTotal);
+
+        SetRect(&gBtnCancelTransferRect, r.right - 16 - 70, y - 2, r.right - 16, y + 16);
+        DrawButton(&gBtnCancelTransferRect, "Cancel", false);
         y += 20;
 
         MoveTo(16, y);
         if (gActiveTransferTotal > 0) {
-            unsigned short pct = (unsigned short)(((unsigned long)gActiveTransferBytes * 100) / gActiveTransferTotal);
-            sprintf(buf, "%s / %s (%u%%)", curStr, totStr, pct);
+            unsigned short pct = (unsigned short)(((unsigned long long)gActiveTransferBytes * 100) / gActiveTransferTotal);
+            if (gTransferSpeedBps >= 1024) {
+                sprintf(buf, "%s / %s (%u%%) - %lu.%lu kB/s", curStr, totStr, pct,
+                        gTransferSpeedBps / 1024, (gTransferSpeedBps % 1024) * 10 / 1024);
+            } else {
+                sprintf(buf, "%s / %s (%u%%)", curStr, totStr, pct);
+            }
         } else {
             sprintf(buf, "%s transferred", curStr);
         }
         DrawCString(buf);
     } else {
-        MoveTo(16, y);
-        DrawCString("Ready to receive files via drag-and-drop on MacCompanion.");
-        y += 15;
+        /* Drop Box Area */
+        Rect dropBox;
+        short boxH = 46;
+        short cx = (r.left + r.right) / 2;
+        const char *t1 = "Drag file here from Finder";
+        const char *t2 = "or Click to send to MacCompanion";
 
+        SetRect(&dropBox, 16, y, r.right - 16, y + boxH);
+        gDropZoneRect = dropBox;
+
+        EraseRoundRect(&dropBox, 8, 8);
+        FrameRoundRect(&dropBox, 8, 8);
+        InsetRect(&dropBox, 2, 2);
+        PenPat(&qd.gray);
+        FrameRoundRect(&dropBox, 6, 6);
+        PenNormal();
+
+        TextFace(bold);
+        MoveTo(cx - MeasureCString(t1) / 2, dropBox.top + 18);
+        DrawCString(t1);
+        TextFace(normal);
+        MoveTo(cx - MeasureCString(t2) / 2, dropBox.top + 33);
+        DrawCString(t2);
+
+        y += boxH + 12;
         MoveTo(16, y);
         TextFace(italic);
-        DrawCString("Drop files on this Mac from your modern browser or phone.");
+        DrawCString("Also ready to receive files via drag-and-drop on server.");
         TextFace(normal);
     }
 
@@ -383,6 +491,16 @@ static void HandleMenuChoice(long choice)
 
         case MENU_FILE:
             switch (itemID) {
+                case ITEM_SEND_FILE:
+                    if (!gTransferActive) {
+                        StandardFileReply reply;
+                        StandardGetFile(NULL, -1, NULL, &reply);
+                        if (reply.sfGood) {
+                            NetSendFile(&reply.sfFile);
+                            DrawWindow();
+                        }
+                    }
+                    break;
                 case ITEM_RECONNECT:
                     gConnState = CONN_SEARCHING;
                     gConnErrorMsg[0] = '\0';
@@ -535,6 +653,24 @@ static void HandleMouseDown(EventRecord *evt)
                         return;
                     }
                 }
+
+                /* Ready View: Drop Box Click -> Open Standard File Picker */
+                if (!gTransferActive && gConnState == CONN_READY && PtInRect(localPt, &gDropZoneRect)) {
+                    StandardFileReply reply;
+                    StandardGetFile(NULL, -1, NULL, &reply);
+                    if (reply.sfGood) {
+                        NetSendFile(&reply.sfFile);
+                        DrawWindow();
+                    }
+                    return;
+                }
+
+                /* Active Transfer: Cancel Button */
+                if (gTransferActive && PtInRect(localPt, &gBtnCancelTransferRect)) {
+                    NetCancelActiveTransfer();
+                    DrawWindow();
+                    return;
+                }
             }
             break;
     }
@@ -543,6 +679,15 @@ static void HandleMouseDown(EventRecord *evt)
 static void HandleKeyDown(EventRecord *evt)
 {
     char key = (char)(evt->message & charCodeMask);
+
+    /* Cancel active transfer via Cmd-. or Escape */
+    if (gTransferActive) {
+        if (((evt->modifiers & cmdKey) && key == '.') || key == 27) {
+            NetCancelActiveTransfer();
+            DrawWindow();
+            return;
+        }
+    }
 
     if (evt->modifiers & cmdKey) {
         HandleMenuChoice(MenuKey(key));
@@ -647,8 +792,11 @@ int main(void)
     }
 
     /* Create status window (centered horizontally) */
-    SetRect(&r, 40, 45, 430, 245);
+    SetRect(&r, 40, 45, 430, 275);
     gWindow = NewWindow(NULL, &r, "\pMacDrop", true, documentProc, (WindowPtr)-1, true, 0);
+
+    /* Initialize Drag Manager handlers if system supports it */
+    SetupDragManager();
 
     /* Initialize Network */
     NetInit();
@@ -747,6 +895,7 @@ int main(void)
         }
     }
 
+    CleanupDragManager();
     NetStopChannel();
     NetStopListener();
     if (gWindow) {

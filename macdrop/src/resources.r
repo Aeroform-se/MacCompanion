@@ -362,6 +362,8 @@ resource 'MENU' (129, "File") {
     allEnabled,
     enabled, "File",
     {
+        "Send File to Modern Mac...", noIcon, "S", noMark, plain,
+        "-", noIcon, noKey, noMark, plain,
         "Server Connection...", noIcon, "R", noMark, plain,
         "Download Folder...", noIcon, "F", noMark, plain,
         "Set Client Name...", noIcon, "M", noMark, plain,
@@ -376,7 +378,7 @@ resource 'MENU' (130, "Options") {
     allEnabled,
     enabled, "Options",
     {
-        "Play Sound Chime", noIcon, "S", check, plain,
+        "Play Sound Chime", noIcon, noKey, check, plain,
         "Notification Alert", noIcon, "N", check, plain
     }
 };

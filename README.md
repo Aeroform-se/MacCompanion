@@ -14,18 +14,32 @@ Spotify for your 68k Mac. Supports local playback and multitasking so you can ge
 
 **Requirements:**
 - **Account:** Spotify Premium + a free Spotify Developer Client ID.
-- **Minimum:** Macintosh Plus or SE / Classic, System 6.0.8 with a network connection.
-- **Recommended:** Macintosh SE/30, Classic II, LC, Mac II, or Quadra running System 7.1-7.5.5. Supports 9" Compact Mac (512×342) and larger displays.
+- **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
+- **CPU:** 68000 minimum (Macintosh Plus, SE, Classic and up); 68020+ recommended for real-time audio visualizers.
+- **Sound:** Sound Manager 3.0 (built into System 7.5+; available as an Apple extension for System 7.0/7.1).
+- **Networking:** MacTCP 2.0.6+ or Open Transport with an active local network connection.
 
 ---
 
 ### MacAI
-AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude and more right from within System 7. Featuring image generation, bi-directional voice and an omnious sentient mainframe.
+AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq right from within System 7. Featuring image generation, bi-directional voice, and an ominous sentient mainframe.
 
 **Requirements:**
-- **Account:** Free or paid API key for Google Gemini, OpenAI, or Anthropic Claude.
-- **Minimum:** Macintosh Plus or SE / Classic, System 6.0.8+
-- **Recommended:** Macintosh SE/30, Classic II, LC, Mac II, or Quadra running System 7.1–7.5.5.
+- **Account:** Free or paid API key for Google Gemini, Groq, OpenAI, or Anthropic Claude.
+- **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
+- **CPU:** 68000 minimum; 68020+ recommended for faster 1-bit image dithering.
+- **Networking:** MacTCP 2.0.6+ or Open Transport with an active local network connection.
+
+---
+
+### MacDrop
+Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. 
+
+**Requirements:**
+- **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
+- **CPU:** 68000 minimum (Macintosh Plus, SE, Classic, and up).
+- **RAM:** 512 KB minimum / 1024 KB preferred.
+- **Networking:** MacTCP 2.0.6+ or Open Transport (zero-configuration reverse-push channel & UDP auto-discovery).
 
 ---
 

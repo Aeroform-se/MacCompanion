@@ -15,12 +15,82 @@
 const express = require('express');
 const net = require('net');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { EventEmitter } = require('events');
 const { createMacBinary, isMacBinary, parseMacBinaryHeader, getTypeCreatorForFilename, sanitizeMacFilename } = require('./macbinary');
 const { createModuleStore } = require('../../core/storage');
 
 const DEFAULT_MACDROP_PORT = 6803;
 const TCP_CONNECT_TIMEOUT_MS = 6000;
 const MAX_TRANSFER_LOGS = 30;
+
+// Temporary staging directory for inbound 68k -> modern transfers
+const INBOUND_DIR = path.join(os.tmpdir(), 'maccompanion-macdrop-inbound');
+if (fs.existsSync(INBOUND_DIR)) {
+  try {
+    const staleFiles = fs.readdirSync(INBOUND_DIR);
+    for (const file of staleFiles) {
+      if (file.endsWith('.bin')) {
+        try { fs.unlinkSync(path.join(INBOUND_DIR, file)); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+} else {
+  try { fs.mkdirSync(INBOUND_DIR, { recursive: true }); } catch (_) {}
+}
+
+const TYPE_TO_EXT = {
+  'PICT': 'pict',
+  'TEXT': 'txt',
+  'JPEG': 'jpg',
+  'GIFf': 'gif',
+  'PNGf': 'png',
+  'BMP ': 'bmp',
+  'TIFF': 'tif',
+  'Midi': 'mid',
+  'AIFF': 'aif',
+  'WAVE': 'wav',
+  'Mp3 ': 'mp3',
+  'PDF ': 'pdf',
+  'ZIP ': 'zip',
+  'dImg': 'dsk',
+};
+
+function getMimeType(filename, type) {
+  const ext = (filename.split('.').pop() || '').toLowerCase();
+  switch (ext) {
+    case 'pict':
+    case 'pct':  return 'image/pict';
+    case 'jpg':
+    case 'jpeg': return 'image/jpeg';
+    case 'gif':  return 'image/gif';
+    case 'png':  return 'image/png';
+    case 'bmp':  return 'image/bmp';
+    case 'tif':
+    case 'tiff': return 'image/tiff';
+    case 'txt':
+    case 'text':
+    case 'log':
+    case 'c':
+    case 'h':    return 'text/plain';
+    case 'pdf':  return 'application/pdf';
+    case 'aif':
+    case 'aiff': return 'audio/aiff';
+    case 'wav':  return 'audio/wav';
+    case 'mid':
+    case 'midi': return 'audio/midi';
+    case 'mp3':  return 'audio/mpeg';
+    case 'zip':  return 'application/zip';
+    case 'dsk':
+    case 'img':  return 'application/octet-stream';
+    case 'bin':  return 'application/x-macbinary';
+    default:
+      if (type === 'PICT') return 'image/pict';
+      if (type === 'TEXT') return 'text/plain';
+      return 'application/octet-stream';
+  }
+}
 
 class MacDropModule {
   constructor() {
@@ -35,6 +105,9 @@ class MacDropModule {
 
     // Pending transfer callbacks: transferId -> { resolve, reject, timer }
     this.pendingTransfers = new Map();
+
+    // Map of staged inbound transfers (68k -> Modern Web / PC): transferId -> transferObj
+    this.inboundTransfers = new Map();
 
     // Channel reconnection listeners for upload in-flight
     this.channelWaiters = new Map();
@@ -86,12 +159,48 @@ class MacDropModule {
   }
 
   /**
+   * Checks whether any file transfer (outbound or inbound) is currently active.
+   */
+  hasActiveTransfer() {
+    if (this.activeTransfer && (this.activeTransfer.status === 'STREAMING' || this.activeTransfer.status === 'WRITING_DISK')) {
+      return true;
+    }
+    for (const t of this.inboundTransfers.values()) {
+      if (t.status === 'STREAMING' || t.status === 'DOWNLOADING') {
+        return true;
+      }
+    }
+    for (const c of this.activeClients.values()) {
+      if (c.transferInProgress || c.writingDisk) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Sweeps active clients to purge dead or closed sockets immediately.
-   * Clients in active probing/scanning are protected until probe timeout.
+   * Clients in active probing/scanning or active transfers are protected.
    */
   sweepDeadClients() {
     const now = Date.now();
     for (const [id, c] of this.activeClients.entries()) {
+      // Never sweep or probe clients if a transfer is in progress for them or globally
+      if (c.transferInProgress || c.writingDisk) {
+        c.probing = false;
+        c.lastSeen = now;
+        continue;
+      }
+      for (const t of this.inboundTransfers.values()) {
+        if ((t.clientId === id || t.clientName === c.name) && (t.status === 'STREAMING' || t.status === 'DOWNLOADING')) {
+          c.transferInProgress = true;
+          c.probing = false;
+          c.lastSeen = now;
+          break;
+        }
+      }
+      if (c.transferInProgress) continue;
+
       // If client is currently in a probe/scan cycle, protect it until probe expires
       if (c.probing) {
         if (now - c.probeSentAt > 2500) {
@@ -129,6 +238,61 @@ class MacDropModule {
         continue;
       }
     }
+
+    // Sweep expired staged inbound transfers (30s timeout per user requirement) or stalled streams (>60s without data)
+    for (const [id, t] of this.inboundTransfers.entries()) {
+      if (t.expiresAt && now > t.expiresAt && t.status !== 'DOWNLOADING') {
+        this.cleanupInboundTransfer(id, 'TIMED_OUT_30S');
+      } else if (t.status === 'STREAMING' && (now - t.lastProgressAt > 60000)) {
+        this.cleanupInboundTransfer(id, 'STALLED_60S');
+      }
+    }
+  }
+
+  /**
+   * Cleans up and deletes a staged inbound transfer from memory and disk.
+   */
+  cleanupInboundTransfer(id, reason = 'TIMEOUT') {
+    if (!this.inboundTransfers.has(id)) return;
+    const transfer = this.inboundTransfers.get(id);
+    if (transfer.timer) {
+      clearTimeout(transfer.timer);
+      transfer.timer = null;
+    }
+
+    // Abort incoming upload from 68k Mac if active
+    if (transfer.req && !transfer.req.destroyed) {
+      try { transfer.req.destroy(); } catch (_) {}
+    }
+    if (transfer.res && !transfer.res.writableEnded && !transfer.res.destroyed) {
+      try { transfer.res.destroy(); } catch (_) {}
+    }
+
+    // Abort active browser download stream if currently streaming
+    if (transfer.activeDownloadRes && !transfer.activeDownloadRes.writableEnded && !transfer.activeDownloadRes.destroyed) {
+      try { transfer.activeDownloadRes.destroy(); } catch (_) {}
+      transfer.activeDownloadRes = null;
+    }
+
+    if (transfer.fd) {
+      try { fs.closeSync(transfer.fd); } catch (_) {}
+      transfer.fd = null;
+    }
+    if (transfer.filePath && fs.existsSync(transfer.filePath)) {
+      try {
+        fs.unlinkSync(transfer.filePath);
+      } catch (_) {}
+    }
+
+    // Clear client busy flag
+    if (transfer.clientId && this.activeClients.has(transfer.clientId)) {
+      const c = this.activeClients.get(transfer.clientId);
+      c.transferInProgress = false;
+      c.lastSeen = Date.now();
+    }
+
+    this.inboundTransfers.delete(id);
+    console.log(`[MacDrop] Cleaned up inbound transfer ${id} ("${transfer.fileName}") [Reason: ${reason}]`);
   }
 
   /**
@@ -166,6 +330,13 @@ class MacDropModule {
     if (pending) {
       if (status === 'OK') {
         pending.resolve({ ok: true, bytes });
+      } else if (status === 'CANCELLED') {
+        if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
+          this.activeTransfer.status = 'CANCELLED';
+          this.activeTransfer.error = 'Transfer cancelled by Macintosh client';
+          this.activeTransfer.speedFormatted = 'Cancelled';
+        }
+        pending.reject(new Error('Transfer cancelled by Macintosh client'));
       } else {
         pending.reject(new Error(`Macintosh reported write failure (${status})`));
       }
@@ -310,7 +481,7 @@ class MacDropModule {
       // Idle poll timer: cleanly end response after 8s with 204 No Content so client reconnects and proves liveness
       const pollTimer = setTimeout(() => {
         const curr = this.activeClients.get(clientId);
-        if (curr && curr.res === res && !curr.transferInProgress && !curr.writingDisk && !res.writableEnded) {
+        if (curr && curr.res === res && !curr.transferInProgress && !curr.writingDisk && !this.hasActiveTransfer() && !res.writableEnded) {
           try {
             curr.probing = true;
             curr.probeSentAt = Date.now();
@@ -341,7 +512,7 @@ class MacDropModule {
             // Socket closed unexpectedly; give 1500ms grace period for client reconnect
             setTimeout(() => {
               const check = this.activeClients.get(clientId);
-              if (check && !check.probing && (!check.res || check.res === res || check.res.writableEnded || check.res.destroyed)) {
+              if (check && !check.probing && !check.transferInProgress && !this.hasActiveTransfer() && (!check.res || check.res === res || check.res.writableEnded || check.res.destroyed)) {
                 this.activeClients.delete(clientId);
                 console.log(`[MacDrop] Cleaned up offline client (no reconnect after socket close): ${name} (${clientId})`);
               }
@@ -396,6 +567,439 @@ class MacDropModule {
     // 3. Service Status (Multi-client aware)
     this.router.get('/status', (req, res) => {
       res.json(this.getStatus());
+    });
+
+    // 3b. INBOUND TRANSFER ENDPOINTS (68k Vintage Mac -> Server & Modern Web UI)
+    // - 68k Mac uploads MacBinary payload (streaming & simultaneous pass-through)
+    this.router.post('/inbound/upload', (req, res) => {
+      const remoteIp = (req.socket.remoteAddress || '').replace(/^.*:/, '');
+      const clientId = (req.query.id || req.headers['x-client-id'] || '').trim();
+      const clientName = (req.query.name || req.headers['x-client-name'] || `Macintosh (${remoteIp})`).trim();
+      const transferId = 'in_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+
+      // Locate client in activeClients to protect it from probe sweeps while streaming
+      let client = null;
+      if (clientId && this.activeClients.has(clientId)) {
+        client = this.activeClients.get(clientId);
+      } else {
+        for (const c of this.activeClients.values()) {
+          if (c.ip === remoteIp || c.name === clientName) {
+            client = c;
+            break;
+          }
+        }
+      }
+
+      if (client) {
+        client.transferInProgress = true;
+        client.probing = false;
+        client.lastSeen = Date.now();
+      }
+
+      const stagingPath = path.join(INBOUND_DIR, `${transferId}.bin`);
+      let fd = null;
+      try {
+        fd = fs.openSync(stagingPath, 'w');
+      } catch (err) {
+        if (client) client.transferInProgress = false;
+        console.error(`[MacDrop] Failed to create staging file ${stagingPath}:`, err);
+        return res.status(500).json({ ok: false, error: 'Cannot create staging file' });
+      }
+
+      let totalReceived = 0;
+      let headerBuffer = Buffer.alloc(0);
+      let transferObj = null;
+
+      let lastSpeedSampleTime = Date.now();
+      let lastSpeedSampleBytes = 0;
+
+      req.on('data', chunk => {
+        const prevReceived = totalReceived;
+        totalReceived += chunk.length;
+
+        if (client) {
+          client.transferInProgress = true;
+          client.lastSeen = Date.now();
+        }
+
+        // Write directly to file descriptor for zero-delay disk caching
+        if (fd !== null) {
+          try {
+            fs.writeSync(fd, chunk, 0, chunk.length, prevReceived);
+          } catch (writeErr) {
+            console.error(`[MacDrop] Staging write error for ${transferId}:`, writeErr);
+          }
+        }
+
+        // Parse header as soon as first 128 bytes arrive so modern web UI gets alerted immediately!
+        if (!transferObj) {
+          headerBuffer = Buffer.concat([headerBuffer, chunk]);
+          if (headerBuffer.length >= 128) {
+            const parsedInfo = parseMacBinaryHeader(headerBuffer.subarray(0, 128));
+            const rawName = (parsedInfo && parsedInfo.fileName) ? parsedInfo.fileName : (req.headers['x-filename'] || 'MacintoshFile');
+            const cleanName = sanitizeMacFilename(rawName);
+            const fileType = (parsedInfo && parsedInfo.type) ? parsedInfo.type : '????';
+            const fileCreator = (parsedInfo && parsedInfo.creator) ? parsedInfo.creator : '????';
+            const dataLength = parsedInfo ? parsedInfo.dataLength : 0;
+            const rsrcLength = parsedInfo ? parsedInfo.rsrcLength : 0;
+
+            // Direct data fork extraction for documents / graphics / audio (e.g. .pict, .txt, .jpg, .aif)
+            const isDocType = ['PICT', 'TEXT', 'JPEG', 'GIFf', 'PNGf', 'BMP ', 'TIFF', 'Midi', 'AIFF', 'WAVE', 'Mp3 ', 'PDF '].includes(fileType);
+            const isRawData = (rsrcLength === 0 || isDocType) && fileType !== 'APPL' && !cleanName.toLowerCase().endsWith('.bin');
+
+            let downloadName = cleanName;
+            if (isRawData) {
+              if (!cleanName.includes('.') && TYPE_TO_EXT[fileType]) {
+                downloadName = `${cleanName}.${TYPE_TO_EXT[fileType]}`;
+              }
+            } else {
+              downloadName = cleanName.toLowerCase().endsWith('.bin') ? cleanName : `${cleanName}.bin`;
+            }
+
+            const downloadSize = isRawData ? dataLength : (128 + Math.ceil(dataLength / 128) * 128 + Math.ceil(rsrcLength / 128) * 128);
+            const mimeType = getMimeType(downloadName, fileType);
+            const expectedTotal = parseInt(req.headers['content-length'] || '0', 10) || downloadSize;
+
+            const ev = new EventEmitter();
+            ev.on('error', () => {}); // Prevent unhandled error throw if no active consumer
+
+            transferObj = {
+              id: transferId,
+              clientId,
+              clientName,
+              clientRef: client,
+              req,
+              res,
+              fileName: cleanName,
+              downloadName,
+              downloadSize,
+              isRawData,
+              mimeType,
+              type: fileType,
+              creator: fileCreator,
+              dataLength,
+              rsrcLength,
+              totalExpected: expectedTotal,
+              bytesReceived: totalReceived,
+              speedBps: 0,
+              speedFormatted: '0 kB/s',
+              status: 'STREAMING',
+              filePath: stagingPath,
+              fd,
+              events: ev,
+              createdAt: Date.now(),
+              lastProgressAt: Date.now(),
+              expiresAt: null,
+              timer: null,
+            };
+
+            this.inboundTransfers.set(transferId, transferObj);
+            console.log(`[MacDrop] Inbound STREAMING alert: "${downloadName}" (${downloadSize} B) from ${clientName} [isRawData: ${isRawData}]`);
+          }
+        } else {
+          transferObj.bytesReceived = totalReceived;
+          const now = Date.now();
+          const speedElapsed = (now - lastSpeedSampleTime) / 1000;
+          if (speedElapsed >= 0.35) {
+            const bytesDelta = totalReceived - lastSpeedSampleBytes;
+            const currentBps = Math.round(bytesDelta / speedElapsed);
+            transferObj.speedBps = currentBps;
+            transferObj.speedFormatted = currentBps >= 1048576
+              ? `${(currentBps / 1048576).toFixed(2)} MB/s`
+              : `${(currentBps / 1024).toFixed(1)} kB/s`;
+            lastSpeedSampleTime = now;
+            lastSpeedSampleBytes = totalReceived;
+          }
+        }
+
+        // Notify active downstream download stream in real time
+        if (transferObj) {
+          transferObj.events.emit('chunk', chunk, prevReceived, totalReceived);
+        }
+      });
+
+      req.on('end', () => {
+        if (client) {
+          client.transferInProgress = false;
+          client.lastSeen = Date.now();
+        }
+
+        if (fd !== null) {
+          try { fs.closeSync(fd); } catch (_) {}
+          fd = null;
+        }
+
+        if (!transferObj) {
+          return res.json({ ok: false, error: 'Empty payload' });
+        }
+
+        transferObj.fd = null;
+        transferObj.events.emit('end');
+
+        console.log(`[MacDrop] Inbound upload stream completed: "${transferObj.downloadName}" (${totalReceived} B)`);
+
+        if (transferObj.status === 'DOWNLOADING') {
+          console.log(`[MacDrop] Simultaneous download in progress for "${transferObj.downloadName}"; awaiting download completion.`);
+        } else {
+          transferObj.status = 'READY';
+          transferObj.expiresAt = Date.now() + 30000;
+          transferObj.timer = setTimeout(() => {
+            this.cleanupInboundTransfer(transferId, 'TIMED_OUT_30S');
+          }, 30000);
+        }
+
+        res.json({
+          ok: true,
+          message: 'File staged on server',
+          transferId,
+          fileName: transferObj.downloadName,
+          size: totalReceived,
+        });
+      });
+
+      req.on('close', () => {
+        if (!req.complete) {
+          console.log(`[MacDrop] Inbound upload aborted by client: "${transferObj ? transferObj.downloadName : transferId}"`);
+          if (client) {
+            client.transferInProgress = false;
+            client.lastSeen = Date.now();
+          }
+          this.cleanupInboundTransfer(transferId, 'ABORTED_BY_CLIENT');
+        }
+      });
+
+      req.on('error', err => {
+        if (client) {
+          client.transferInProgress = false;
+          client.lastSeen = Date.now();
+        }
+        if (fd !== null) {
+          try { fs.closeSync(fd); } catch (_) {}
+          fd = null;
+        }
+        if (transferObj && transferObj.events.listenerCount('error') > 1) {
+          try { transferObj.events.emit('error', err); } catch (_) {}
+        }
+        this.cleanupInboundTransfer(transferId, 'STREAM_ERROR');
+        if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+          try { res.status(500).json({ ok: false, error: err.message }); } catch (_) {}
+        }
+      });
+    });
+
+    // - Query pending/staged inbound transfers
+    this.router.get('/inbound/pending', (req, res) => {
+      this.sweepDeadClients();
+      const now = Date.now();
+      const pending = Array.from(this.inboundTransfers.values()).map(t => ({
+        id: t.id,
+        clientName: t.clientName,
+        clientId: t.clientId,
+        fileName: t.fileName,
+        downloadName: t.downloadName,
+        fileSize: t.totalExpected || t.bytesReceived,
+        downloadSize: t.downloadSize || t.dataLength || t.bytesReceived,
+        isRawData: Boolean(t.isRawData),
+        type: t.type,
+        creator: t.creator,
+        dataLength: t.dataLength,
+        rsrcLength: t.rsrcLength,
+        bytesReceived: t.bytesReceived,
+        percent: t.totalExpected > 0 ? Math.min(99, Math.round((t.bytesReceived / t.totalExpected) * 100)) : 0,
+        speedFormatted: t.speedFormatted,
+        status: t.status,
+        expiresAt: t.expiresAt,
+        remainingSec: t.expiresAt ? Math.max(0, Math.ceil((t.expiresAt - now) / 1000)) : null,
+      }));
+      res.json({ ok: true, inbound: pending });
+    });
+
+    // - Download staged file directly into modern browser (supports simultaneous pass-through streaming!)
+    this.router.get('/inbound/download/:transferId', (req, res) => {
+      const { transferId } = req.params;
+      const transfer = this.inboundTransfers.get(transferId);
+
+      if (!transfer || !transfer.filePath || !fs.existsSync(transfer.filePath)) {
+        return res.status(404).send('File not found or transfer expired.');
+      }
+
+      // Cancel 30s timeout so download stream is protected
+      if (transfer.timer) {
+        clearTimeout(transfer.timer);
+        transfer.timer = null;
+      }
+
+      res.setHeader('Content-Type', transfer.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(transfer.downloadName)}"`);
+      if (transfer.downloadSize > 0) {
+        res.setHeader('Content-Length', transfer.downloadSize);
+      }
+
+      // Helper to send slice (data fork only if raw data)
+      const sendChunk = (chunk, chunkStart, chunkEnd) => {
+        if (res.writableEnded || res.destroyed) return;
+        if (!transfer.isRawData) {
+          res.write(chunk);
+        } else {
+          const dataStart = 128;
+          const dataEnd = 128 + transfer.dataLength;
+          if (chunkEnd > dataStart && chunkStart < dataEnd) {
+            const sliceFrom = Math.max(0, dataStart - chunkStart);
+            const sliceTo = Math.min(chunk.length, dataEnd - chunkStart);
+            if (sliceTo > sliceFrom) {
+              res.write(chunk.subarray(sliceFrom, sliceTo));
+            }
+          }
+        }
+      };
+
+      // Mode A: File has ALREADY finished uploading to server
+      if (transfer.status === 'READY' || transfer.status === 'COMPLETED') {
+        transfer.status = 'DOWNLOADING';
+        let readStream;
+        if (transfer.isRawData) {
+          const endPos = 128 + transfer.dataLength - 1;
+          readStream = fs.createReadStream(transfer.filePath, { start: 128, end: endPos });
+        } else {
+          readStream = fs.createReadStream(transfer.filePath);
+        }
+
+        readStream.pipe(res);
+
+        readStream.on('end', () => {
+          transfer.status = 'COMPLETED';
+          setTimeout(() => {
+            this.cleanupInboundTransfer(transferId, 'DOWNLOAD_COMPLETED');
+          }, 10000);
+        });
+
+        readStream.on('error', (err) => {
+          console.error(`[MacDrop] Inbound download streaming error for ${transferId}:`, err);
+          this.cleanupInboundTransfer(transferId, 'STREAM_ERROR');
+        });
+        return;
+      }
+
+      // Mode B: File is CURRENTLY STREAMING from vintage Mac (Simultaneous Pipe!)
+      transfer.status = 'DOWNLOADING';
+      const snapshotReceived = transfer.bytesReceived;
+      let catchupQueue = [];
+      let isCatchingUp = true;
+
+      const onChunk = (chunk, start, end) => {
+        if (isCatchingUp) {
+          catchupQueue.push({ chunk: Buffer.from(chunk), start, end });
+        } else {
+          sendChunk(chunk, start, end);
+        }
+      };
+
+      const onEnd = () => {
+        if (!isCatchingUp) {
+          try { res.end(); } catch (_) {}
+          transfer.status = 'COMPLETED';
+          setTimeout(() => {
+            this.cleanupInboundTransfer(transferId, 'SIMULTANEOUS_DOWNLOAD_COMPLETED');
+          }, 10000);
+        }
+      };
+
+      transfer.events.on('chunk', onChunk);
+      transfer.events.on('end', onEnd);
+
+      res.on('close', () => {
+        transfer.events.off('chunk', onChunk);
+        transfer.events.off('end', onEnd);
+      });
+
+      // Stream catch-up data from disk in 64KB blocks (allocating fresh buffer per block to prevent async write corruption)
+      if (snapshotReceived > 0 && fs.existsSync(transfer.filePath)) {
+        try {
+          const readFd = fs.openSync(transfer.filePath, 'r');
+          const BLOCK_SIZE = 65536;
+          let pos = 0;
+          while (pos < snapshotReceived) {
+            const toRead = Math.min(BLOCK_SIZE, snapshotReceived - pos);
+            const blkBuf = Buffer.allocUnsafe(toRead);
+            const n = fs.readSync(readFd, blkBuf, 0, toRead, pos);
+            if (n <= 0) break;
+            sendChunk(blkBuf.subarray(0, n), pos, pos + n);
+            pos += n;
+          }
+          fs.closeSync(readFd);
+        } catch (readErr) {
+          console.error(`[MacDrop] Catch-up read error for ${transferId}:`, readErr);
+        }
+      }
+
+      // Flush queue accumulated during disk catch-up read
+      isCatchingUp = false;
+      for (const item of catchupQueue) {
+        sendChunk(item.chunk, item.start, item.end);
+      }
+      catchupQueue = [];
+
+      // If upload finished while reading catch-up buffer
+      if (transfer.bytesReceived >= transfer.totalExpected && (transfer.status === 'READY' || transfer.status === 'COMPLETED' || !transfer.fd)) {
+        try { res.end(); } catch (_) {}
+        transfer.status = 'COMPLETED';
+        setTimeout(() => {
+          this.cleanupInboundTransfer(transferId, 'SIMULTANEOUS_DOWNLOAD_COMPLETED');
+        }, 10000);
+      }
+    });
+
+    // - Decline staged inbound transfer & delete file immediately
+    this.router.post('/inbound/decline/:transferId', (req, res) => {
+      const { transferId } = req.params;
+      this.cleanupInboundTransfer(transferId, 'DECLINED_BY_USER');
+      res.json({ ok: true, message: 'Transfer declined and staged file deleted' });
+    });
+
+    // - Cancel staged/streaming inbound transfer & abort streams immediately
+    this.router.post('/inbound/cancel/:transferId', (req, res) => {
+      const { transferId } = req.params;
+      console.log(`[MacDrop] Inbound transfer cancel requested for ${transferId}`);
+      this.cleanupInboundTransfer(transferId, 'CANCELLED_BY_USER');
+      res.json({ ok: true, message: 'Transfer cancelled and staged file deleted' });
+    });
+
+    // - Cancel outbound transfer to 68k Mac & abort reverse stream immediately
+    this.router.post('/cancel', (req, res) => {
+      console.log('[MacDrop] Outbound transfer cancel requested by user');
+      if (this.activeTransfer) {
+        this.activeTransfer.status = 'CANCELLED';
+        this.activeTransfer.error = 'Transfer cancelled by user';
+        this.activeTransfer.speedFormatted = 'Cancelled';
+      }
+
+      for (const [xferId, pending] of this.pendingTransfers.entries()) {
+        try {
+          pending.reject(new Error('Transfer cancelled by user'));
+        } catch (_) {}
+      }
+      this.pendingTransfers.clear();
+
+      for (const c of this.activeClients.values()) {
+        if (c.transferInProgress || c.writingDisk) {
+          c.transferInProgress = false;
+          c.writingDisk = false;
+          c.lastSeen = Date.now();
+          if (c.res && !c.res.writableEnded && !c.res.destroyed) {
+            try {
+              c.res.destroy(new Error('Transfer cancelled by user'));
+            } catch (_) {}
+          }
+        }
+      }
+
+      setTimeout(() => {
+        if (this.activeTransfer && this.activeTransfer.status === 'CANCELLED') {
+          this.activeTransfer = null;
+        }
+      }, 3000);
+
+      res.json({ ok: true, message: 'Outbound transfer cancelled' });
     });
 
     // 4. Select Target Client ('auto', 'all', or specific clientId)
@@ -905,6 +1509,9 @@ class MacDropModule {
    * Scans and verifies all Macintosh clients immediately.
    */
   async refreshAllClients() {
+    if (this.hasActiveTransfer()) {
+      return;
+    }
     this.sweepDeadClients();
 
     const now = Date.now();
@@ -950,7 +1557,9 @@ class MacDropModule {
    * Returns current active target metadata. Returns null if no target is online.
    */
   getActiveTarget() {
-    this.sweepDeadClients();
+    if (!this.hasActiveTransfer()) {
+      this.sweepDeadClients();
+    }
     const targets = this.resolveTargets(this.selectedTargetId);
     if (targets.length === 0) return null;
 
@@ -974,7 +1583,9 @@ class MacDropModule {
    * Module status reporting for central registry and Web UI.
    */
   getStatus() {
-    this.sweepDeadClients();
+    if (!this.hasActiveTransfer()) {
+      this.sweepDeadClients();
+    }
 
     const activeClientsList = Array.from(this.activeClients.values()).map(c => ({
       id: c.id,
@@ -1009,6 +1620,28 @@ class MacDropModule {
     const activeTarget = this.getActiveTarget();
     const isOnline = Boolean(activeTarget && activeTarget.online);
 
+    const now = Date.now();
+    const inboundTransfers = Array.from(this.inboundTransfers.values()).map(t => ({
+      id: t.id,
+      clientName: t.clientName,
+      clientId: t.clientId,
+      fileName: t.fileName,
+      downloadName: t.downloadName,
+      fileSize: t.totalExpected || t.bytesReceived,
+      downloadSize: t.downloadSize || t.dataLength || t.bytesReceived,
+      isRawData: Boolean(t.isRawData),
+      type: t.type,
+      creator: t.creator,
+      dataLength: t.dataLength,
+      rsrcLength: t.rsrcLength,
+      bytesReceived: t.bytesReceived,
+      percent: t.totalExpected > 0 ? Math.min(99, Math.round((t.bytesReceived / t.totalExpected) * 100)) : 0,
+      speedFormatted: t.speedFormatted,
+      status: t.status,
+      expiresAt: t.expiresAt,
+      remainingSec: t.expiresAt ? Math.max(0, Math.ceil((t.expiresAt - now) / 1000)) : null,
+    }));
+
     return {
       id: this.id,
       name: this.name,
@@ -1021,6 +1654,7 @@ class MacDropModule {
       selectedTargetId: this.selectedTargetId,
       clients: activeClientsList,
       savedTargets,
+      inboundTransfers,
     };
   }
 }

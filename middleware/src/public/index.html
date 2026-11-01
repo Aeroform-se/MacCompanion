@@ -344,6 +344,88 @@
       text-align: center;
     }
 
+    /* MacDrop Inbound Prompt (68k -> Modern Browser) */
+    .macdrop-inbound-box {
+      width: 90%;
+      max-width: 320px;
+      margin: 8px 0;
+      padding: 14px;
+      border: 2px solid #000000;
+      background: #ffffff;
+      box-sizing: border-box;
+      box-shadow: 3px 3px 0 #000000;
+      position: relative;
+      z-index: 25;
+      text-align: left;
+    }
+
+    .macdrop-inbound-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px dotted #000000;
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+    }
+
+    .macdrop-inbound-title {
+      font-size: 12px;
+      font-weight: bold;
+      color: #000000;
+    }
+
+    .macdrop-inbound-timer {
+      font-size: 11px;
+      font-weight: bold;
+      background: #000000;
+      color: #ffffff;
+      padding: 1px 6px;
+      border-radius: 2px;
+    }
+
+    .macdrop-inbound-body {
+      margin-bottom: 12px;
+    }
+
+    .macdrop-inbound-filename {
+      font-size: 13px;
+      font-weight: bold;
+      word-break: break-all;
+      color: #000000;
+    }
+
+    .macdrop-inbound-meta {
+      font-size: 11px;
+      color: #555555;
+      margin-top: 3px;
+    }
+
+    .macdrop-inbound-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    /* Global Inbound Floating Toast */
+    .macdrop-global-toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      width: 320px;
+      background: #ffffff;
+      border: 2px solid #000000;
+      box-shadow: 4px 4px 0 #000000;
+      padding: 14px;
+      z-index: 9999;
+      box-sizing: border-box;
+      animation: inboundSlideUp 0.25s ease-out;
+    }
+
+    @keyframes inboundSlideUp {
+      0% { transform: translateY(20px); opacity: 0; }
+      100% { transform: translateY(0); opacity: 1; }
+    }
+
     .card-icon-wrap {
       height: 90px;
       display: flex;
@@ -1008,11 +1090,33 @@
             <!-- Dynamically populated connected devices (AirDrop style) -->
           </div>
 
+          <!-- Inbound Transfer Prompt Box (68k -> Modern Web UI) -->
+          <div class="macdrop-inbound-box hidden" id="macdrop-inbound-box">
+            <div class="macdrop-inbound-header">
+              <div class="macdrop-inbound-title-wrap" style="display:flex; align-items:center; gap:6px;">
+                <span>📥</span>
+                <span class="macdrop-inbound-title" id="macdrop-inbound-title">Incoming File</span>
+              </div>
+              <span class="macdrop-inbound-timer" id="macdrop-inbound-timer">30s</span>
+            </div>
+            <div class="macdrop-inbound-body">
+              <div class="macdrop-inbound-filename" id="macdrop-inbound-filename">Document.bin</div>
+              <div class="macdrop-inbound-meta" id="macdrop-inbound-meta">0 B • MacBinary II</div>
+            </div>
+            <div class="macdrop-inbound-actions">
+              <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-decline-btn" onclick="declineInboundTransfer(event)">Decline</button>
+              <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-accept-btn" style="background:#000; color:#fff;" onclick="acceptInboundTransfer(event)">Accept &amp; Download</button>
+            </div>
+          </div>
+
           <!-- Live Transfer Progress Box -->
           <div class="macdrop-progress-box hidden" id="macdrop-progress-box">
             <div class="macdrop-progress-header">
               <span class="macdrop-progress-name" id="macdrop-progress-name">File.sit</span>
-              <span class="macdrop-progress-pct" id="macdrop-progress-pct">0%</span>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="macdrop-progress-pct" id="macdrop-progress-pct">0%</span>
+                <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-cancel-outbound-btn" onclick="cancelOutboundTransfer(event)">Cancel</button>
+              </div>
             </div>
             <div class="macdrop-bar-wrap">
               <div class="macdrop-bar-fill" id="macdrop-bar-fill"></div>
@@ -2064,6 +2168,155 @@
       if (active && portInput && document.activeElement !== portInput) {
         portInput.value = active.port || 6803;
       }
+
+      // Check for incoming staged file from 68k Mac (AirDrop prompt)
+      const inboundBox = document.getElementById('macdrop-inbound-box');
+      const inbounds = macdrop.inboundTransfers || [];
+      const pendingInbound = inbounds.find(t => t.status === 'STREAMING' || t.status === 'READY' || t.status === 'PENDING');
+
+      if (pendingInbound) {
+        currentPendingInboundId = pendingInbound.id;
+        if (devicesWrap) devicesWrap.style.display = 'none';
+        if (inboundBox) {
+          inboundBox.classList.remove('hidden');
+          const titleEl = document.getElementById('macdrop-inbound-title');
+          const fileEl = document.getElementById('macdrop-inbound-filename');
+          const metaEl = document.getElementById('macdrop-inbound-meta');
+          const timerEl = document.getElementById('macdrop-inbound-timer');
+
+          const isStreaming = pendingInbound.status === 'STREAMING';
+          const formatDesc = pendingInbound.isRawData ? 'Direct Document' : 'MacBinary II (.bin)';
+          const totalSize = pendingInbound.downloadSize || pendingInbound.fileSize;
+
+          if (titleEl) {
+            titleEl.textContent = isStreaming
+              ? `Incoming: ${pendingInbound.clientName} (Streaming...)`
+              : `Incoming: ${pendingInbound.clientName}`;
+          }
+          if (fileEl) fileEl.textContent = pendingInbound.downloadName;
+          if (metaEl) {
+            if (isStreaming) {
+              const speedStr = pendingInbound.speedFormatted ? ` at ${pendingInbound.speedFormatted}` : '';
+              metaEl.textContent = `${formatBytes(pendingInbound.bytesReceived || 0)} / ${formatBytes(totalSize)} (${pendingInbound.percent || 0}%${speedStr}) • ${formatDesc}`;
+            } else {
+              metaEl.textContent = `${formatBytes(totalSize)} • ${formatDesc}`;
+            }
+          }
+          if (timerEl) {
+            if (isStreaming) {
+              timerEl.textContent = `${pendingInbound.percent || 0}%`;
+            } else {
+              timerEl.textContent = pendingInbound.remainingSec != null ? `${pendingInbound.remainingSec}s` : '30s';
+            }
+          }
+          const declineBtn = document.getElementById('macdrop-decline-btn');
+          if (declineBtn) {
+            declineBtn.textContent = isStreaming ? 'Cancel' : 'Decline';
+          }
+        }
+
+        renderGlobalInboundToast(pendingInbound);
+      } else {
+        currentPendingInboundId = null;
+        if (devicesWrap) devicesWrap.style.display = 'flex';
+        if (inboundBox) inboundBox.classList.add('hidden');
+        hideGlobalInboundToast();
+      }
+    }
+
+    let currentPendingInboundId = null;
+
+    async function acceptInboundTransfer(event, id = null) {
+      if (event) event.stopPropagation();
+      const targetId = id || currentPendingInboundId;
+      if (!targetId) return;
+
+      const downloadUrl = `/api/macdrop/inbound/download/${encodeURIComponent(targetId)}`;
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = '';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      hideGlobalInboundToast();
+      const inboundBox = document.getElementById('macdrop-inbound-box');
+      const devicesWrap = document.getElementById('macdrop-devices-wrap');
+      if (inboundBox) inboundBox.classList.add('hidden');
+      if (devicesWrap) devicesWrap.style.display = 'flex';
+      currentPendingInboundId = null;
+      pollStatus();
+    }
+
+    async function declineInboundTransfer(event, id = null) {
+      if (event) event.stopPropagation();
+      const targetId = id || currentPendingInboundId;
+      if (!targetId) return;
+
+      try {
+        await fetch(`/api/macdrop/inbound/cancel/${encodeURIComponent(targetId)}`, { method: 'POST' });
+      } catch (err) {
+        console.error('Failed to cancel/decline inbound transfer:', err);
+      }
+
+      hideGlobalInboundToast();
+      const inboundBox = document.getElementById('macdrop-inbound-box');
+      const devicesWrap = document.getElementById('macdrop-devices-wrap');
+      if (inboundBox) inboundBox.classList.add('hidden');
+      if (devicesWrap) devicesWrap.style.display = 'flex';
+      currentPendingInboundId = null;
+      pollStatus();
+    }
+
+    function renderGlobalInboundToast(transfer) {
+      const dashboard = document.getElementById('view-dashboard');
+      const isDashboardVisible = dashboard && !dashboard.classList.contains('hidden');
+
+      let toast = document.getElementById('macdrop-global-toast');
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'macdrop-global-toast';
+        toast.className = 'macdrop-global-toast';
+        document.body.appendChild(toast);
+      }
+
+      const isStreaming = transfer.status === 'STREAMING';
+      const formatDesc = transfer.isRawData ? 'Direct Document' : 'MacBinary II (.bin)';
+      const totalSize = transfer.downloadSize || transfer.fileSize;
+      const badgeText = isStreaming
+        ? `${transfer.percent || 0}% (${transfer.speedFormatted || '0 kB/s'})`
+        : (transfer.remainingSec != null ? `${transfer.remainingSec}s` : '30s');
+      const metaText = isStreaming
+        ? `${formatBytes(transfer.bytesReceived || 0)} / ${formatBytes(totalSize)} (${transfer.percent || 0}%) • ${formatDesc}`
+        : `${formatBytes(totalSize)} • ${formatDesc}`;
+
+      toast.innerHTML = `
+        <div style="display:flex; align-items:center; justify-content:space-between; border-bottom:1px dotted #000; padding-bottom:6px; margin-bottom:8px;">
+          <div style="display:flex; align-items:center; gap:6px; font-weight:bold; font-size:12px;">
+            <span>📥</span>
+            <span>${escapeHtml(transfer.clientName)} is ${isStreaming ? 'streaming' : 'sending'}:</span>
+          </div>
+          <span style="font-size:11px; background:#000; color:#fff; padding:1px 6px; font-weight:bold;">${badgeText}</span>
+        </div>
+        <div style="font-weight:bold; font-size:13px; margin-bottom:4px; word-break:break-all;">
+          ${escapeHtml(transfer.downloadName)}
+        </div>
+        <div style="font-size:11px; color:#555; margin-bottom:12px;">
+          ${metaText}
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:8px;">
+          <button type="button" class="action-btn-sm pixel-pill-clip" onclick="declineInboundTransfer(event, '${escapeHtml(transfer.id)}')">${isStreaming ? 'Cancel' : 'Decline'}</button>
+          <button type="button" class="action-btn-sm pixel-pill-clip" style="background:#000; color:#fff;" onclick="acceptInboundTransfer(event, '${escapeHtml(transfer.id)}')">Accept &amp; Download</button>
+        </div>
+      `;
+      toast.style.display = isDashboardVisible ? 'none' : 'block';
+    }
+
+    function hideGlobalInboundToast() {
+      const toast = document.getElementById('macdrop-global-toast');
+      if (toast) {
+        toast.style.display = 'none';
+      }
     }
 
     async function changeMacDropTarget(targetId) {
@@ -2191,9 +2444,38 @@
       return (bytes / 1048576).toFixed(1) + ' MB';
     }
 
+    let currentUploadXhr = null;
+    let currentUploadCancelled = false;
+
+    async function cancelOutboundTransfer(event) {
+      if (event) event.stopPropagation();
+      currentUploadCancelled = true;
+      if (currentUploadXhr) {
+        try { currentUploadXhr.abort(); } catch (_) {}
+        currentUploadXhr = null;
+      }
+      try {
+        await fetch('/api/macdrop/cancel', { method: 'POST' });
+      } catch (_) {}
+
+      const subEl = document.getElementById('macdrop-progress-sub');
+      const pctEl = document.getElementById('macdrop-progress-pct');
+      const barFill = document.getElementById('macdrop-bar-fill');
+      if (subEl) subEl.textContent = 'Transfer cancelled';
+      if (pctEl) pctEl.textContent = 'Cancelled';
+      if (barFill) barFill.style.background = '#888888';
+
+      setTimeout(() => {
+        const progressBox = document.getElementById('macdrop-progress-box');
+        if (progressBox) progressBox.classList.add('hidden');
+      }, 2500);
+      pollStatus();
+    }
+
     async function uploadFiles(files, targetId = null) {
       if (!files || files.length === 0) return;
 
+      currentUploadCancelled = false;
       const progressBox = document.getElementById('macdrop-progress-box');
       const nameEl = document.getElementById('macdrop-progress-name');
       const pctEl = document.getElementById('macdrop-progress-pct');
@@ -2203,6 +2485,7 @@
       if (progressBox) progressBox.classList.remove('hidden');
 
       for (let i = 0; i < files.length; i++) {
+        if (currentUploadCancelled) break;
         const file = files[i];
         if (nameEl) nameEl.textContent = file.name;
         if (pctEl) pctEl.textContent = '0%';
@@ -2251,6 +2534,7 @@
         try {
           const result = await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
+            currentUploadXhr = xhr;
             const uploadUrl = targetId ? `/api/macdrop/upload?target_id=${encodeURIComponent(targetId)}` : '/api/macdrop/upload';
             xhr.open('POST', uploadUrl, true);
             xhr.setRequestHeader('Content-Type', 'application/octet-stream');
@@ -2272,6 +2556,7 @@
             };
 
             xhr.onload = () => {
+              currentUploadXhr = null;
               if (progressPoller) clearInterval(progressPoller);
               if (xhr.status >= 200 && xhr.status < 300) {
                 try {
@@ -2295,8 +2580,15 @@
             };
 
             xhr.onerror = () => {
+              currentUploadXhr = null;
               if (progressPoller) clearInterval(progressPoller);
               reject(new Error('Network error uploading file'));
+            };
+
+            xhr.onabort = () => {
+              currentUploadXhr = null;
+              if (progressPoller) clearInterval(progressPoller);
+              reject(new Error('Upload aborted'));
             };
 
             startProgressTracking();
@@ -2309,18 +2601,24 @@
           if (subEl) subEl.textContent = `✓ Delivered "${file.name}"${sizeStr} to ${result.transfer?.targetName || 'Macintosh'}`;
         } catch (err) {
           if (progressPoller) clearInterval(progressPoller);
+          if (currentUploadCancelled) {
+            if (subEl) subEl.textContent = 'Transfer cancelled';
+            break;
+          }
           if (subEl) subEl.textContent = `✗ Transfer Failed: ${err.message}`;
           if (barFill) {
             barFill.style.background = '#cc0000';
             setTimeout(() => { if (barFill) barFill.style.background = '#000000'; }, 4000);
           }
           break;
+        } finally {
+          currentUploadXhr = null;
         }
       }
 
       await pollStatus();
       setTimeout(() => {
-        if (progressBox) progressBox.classList.add('hidden');
+        if (progressBox && !currentUploadCancelled) progressBox.classList.add('hidden');
       }, 5000);
     }
 

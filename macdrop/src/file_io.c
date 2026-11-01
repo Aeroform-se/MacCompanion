@@ -579,3 +579,257 @@ void MacBinaryRx_Finish(MacBinaryRx *rx)
         gRecentFileCount++;
     }
 }
+
+/* ========================================================================= */
+/* MacBinary II Transmitter (68k File -> Server Stream)                     */
+/* ========================================================================= */
+
+static unsigned short CalcMacBinaryCRC(const unsigned char *buf, short length)
+{
+    unsigned short crc = 0;
+    short i, j;
+    for (i = 0; i < length; i++) {
+        crc ^= ((unsigned short)buf[i] << 8);
+        for (j = 0; j < 8; j++) {
+            if (crc & 0x8000) {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc = (crc << 1);
+            }
+        }
+    }
+    return crc;
+}
+
+static void WriteUInt32(unsigned char *p, unsigned long val)
+{
+    p[0] = (unsigned char)((val >> 24) & 0xFF);
+    p[1] = (unsigned char)((val >> 16) & 0xFF);
+    p[2] = (unsigned char)((val >> 8) & 0xFF);
+    p[3] = (unsigned char)(val & 0xFF);
+}
+
+static void WriteOSType(unsigned char *p, OSType val)
+{
+    p[0] = (unsigned char)((val >> 24) & 0xFF);
+    p[1] = (unsigned char)((val >> 16) & 0xFF);
+    p[2] = (unsigned char)((val >> 8) & 0xFF);
+    p[3] = (unsigned char)(val & 0xFF);
+}
+
+OSErr MacBinaryTx_Init(MacBinaryTx *tx, const FSSpec *spec)
+{
+    CInfoPBRec cinfo;
+    OSErr err;
+    short nameLen;
+    unsigned short crc;
+
+    if (!tx || !spec) return paramErr;
+    memset(tx, 0, sizeof(MacBinaryTx));
+    tx->fileSpec = *spec;
+
+    /* Query file catalog info (dates, lengths, Finder info) */
+    memset(&cinfo, 0, sizeof(cinfo));
+    cinfo.hFileInfo.ioVRefNum   = spec->vRefNum;
+    cinfo.hFileInfo.ioDirID     = spec->parID;
+    cinfo.hFileInfo.ioNamePtr   = (StringPtr)spec->name;
+    cinfo.hFileInfo.ioFDirIndex = 0;
+
+    err = PBGetCatInfoSync(&cinfo);
+    if (err != noErr) {
+        tx->lastError = err;
+        tx->state = TX_ERROR;
+        return err;
+    }
+
+    nameLen = spec->name[0];
+    if (nameLen > 31) nameLen = 31;
+    memcpy(tx->fileName, &spec->name[1], nameLen);
+    tx->fileName[nameLen] = '\0';
+
+    tx->fileType     = cinfo.hFileInfo.ioFlFndrInfo.fdType;
+    tx->fileCreator  = cinfo.hFileInfo.ioFlFndrInfo.fdCreator;
+    tx->finderFlags  = cinfo.hFileInfo.ioFlFndrInfo.fdFlags;
+    tx->dataLen      = cinfo.hFileInfo.ioFlLgLen;
+    tx->rsrcLen      = cinfo.hFileInfo.ioFlRLgLen;
+    tx->creationDate = cinfo.hFileInfo.ioFlCrDat;
+    tx->modDate      = cinfo.hFileInfo.ioFlMdDat;
+
+    tx->dataBytesTarget = ((tx->dataLen + 127) / 128) * 128;
+    tx->rsrcBytesTarget = ((tx->rsrcLen + 127) / 128) * 128;
+
+    /* Build standard 128-byte MacBinary II header */
+    memset(tx->headerBuf, 0, 128);
+    tx->headerBuf[0] = 0x00;
+    tx->headerBuf[1] = (unsigned char)nameLen;
+    memcpy(&tx->headerBuf[2], &spec->name[1], nameLen);
+
+    WriteOSType(&tx->headerBuf[65], tx->fileType);
+    WriteOSType(&tx->headerBuf[69], tx->fileCreator);
+
+    tx->headerBuf[73] = (unsigned char)((tx->finderFlags >> 8) & 0xFF);
+    tx->headerBuf[74] = 0x00;
+
+    WriteUInt32(&tx->headerBuf[83], tx->dataLen);
+    WriteUInt32(&tx->headerBuf[87], tx->rsrcLen);
+    WriteUInt32(&tx->headerBuf[91], tx->creationDate);
+    WriteUInt32(&tx->headerBuf[95], tx->modDate);
+
+    tx->headerBuf[101] = (unsigned char)(tx->finderFlags & 0xFF);
+
+    tx->headerBuf[122] = 0x81; /* MacBinary II */
+    tx->headerBuf[123] = 0x81;
+
+    crc = CalcMacBinaryCRC(tx->headerBuf, 124);
+    tx->headerBuf[124] = (unsigned char)((crc >> 8) & 0xFF);
+    tx->headerBuf[125] = (unsigned char)(crc & 0xFF);
+
+    /* Open Data Fork */
+    if (tx->dataLen > 0) {
+        err = FSpOpenDF(spec, fsRdPerm, &tx->dataRefNum);
+        if (err != noErr) {
+            tx->lastError = err;
+            tx->state = TX_ERROR;
+            return err;
+        }
+    }
+
+    /* Open Resource Fork */
+    if (tx->rsrcLen > 0) {
+        err = FSpOpenRF(spec, fsRdPerm, &tx->rsrcRefNum);
+        if (err != noErr) {
+            if (tx->dataRefNum) {
+                FSClose(tx->dataRefNum);
+                tx->dataRefNum = 0;
+            }
+            tx->lastError = err;
+            tx->state = TX_ERROR;
+            return err;
+        }
+    }
+
+    tx->state = TX_HEADER;
+    return noErr;
+}
+
+long MacBinaryTx_ReadBytes(MacBinaryTx *tx, unsigned char *outBuf, long maxCount)
+{
+    long totalRead = 0;
+    OSErr err;
+
+    if (!tx || !outBuf || maxCount <= 0) return 0;
+
+    while (totalRead < maxCount && tx->state != TX_COMPLETE && tx->state != TX_ERROR) {
+        if (tx->state == TX_HEADER) {
+            short needed = 128 - tx->headerBytesSent;
+            short take = (short)(maxCount - totalRead);
+            if (take > needed) take = needed;
+
+            memcpy(outBuf + totalRead, &tx->headerBuf[tx->headerBytesSent], take);
+            tx->headerBytesSent += take;
+            totalRead += take;
+
+            if (tx->headerBytesSent >= 128) {
+                if (tx->dataBytesTarget > 0) {
+                    tx->state = TX_DATA;
+                } else if (tx->rsrcBytesTarget > 0) {
+                    tx->state = TX_RSRC;
+                } else {
+                    tx->state = TX_COMPLETE;
+                }
+            }
+        } else if (tx->state == TX_DATA) {
+            long remainingTarget = (long)(tx->dataBytesTarget - tx->dataBytesPadded);
+            long space = maxCount - totalRead;
+            long take = (space < remainingTarget) ? space : remainingTarget;
+
+            long dataLeft = (long)(tx->dataLen - tx->dataBytesSent);
+            long readAmount = (take < dataLeft) ? take : dataLeft;
+
+            if (readAmount > 0) {
+                long actRead = readAmount;
+                err = FSRead(tx->dataRefNum, &actRead, outBuf + totalRead);
+                if (err != noErr && err != eofErr) {
+                    tx->lastError = err;
+                    tx->state = TX_ERROR;
+                    return totalRead > 0 ? totalRead : -1;
+                }
+                tx->dataBytesSent += actRead;
+                tx->dataBytesPadded += actRead;
+                totalRead += actRead;
+            } else {
+                long padAmount = take;
+                memset(outBuf + totalRead, 0, padAmount);
+                tx->dataBytesPadded += padAmount;
+                totalRead += padAmount;
+            }
+
+            if (tx->dataBytesPadded >= tx->dataBytesTarget) {
+                if (tx->dataRefNum) {
+                    FSClose(tx->dataRefNum);
+                    tx->dataRefNum = 0;
+                }
+                if (tx->rsrcBytesTarget > 0) {
+                    tx->state = TX_RSRC;
+                } else {
+                    tx->state = TX_COMPLETE;
+                }
+            }
+        } else if (tx->state == TX_RSRC) {
+            long remainingTarget = (long)(tx->rsrcBytesTarget - tx->rsrcBytesPadded);
+            long space = maxCount - totalRead;
+            long take = (space < remainingTarget) ? space : remainingTarget;
+
+            long rsrcLeft = (long)(tx->rsrcLen - tx->rsrcBytesSent);
+            long readAmount = (take < rsrcLeft) ? take : rsrcLeft;
+
+            if (readAmount > 0) {
+                long actRead = readAmount;
+                err = FSRead(tx->rsrcRefNum, &actRead, outBuf + totalRead);
+                if (err != noErr && err != eofErr) {
+                    tx->lastError = err;
+                    tx->state = TX_ERROR;
+                    return totalRead > 0 ? totalRead : -1;
+                }
+                tx->rsrcBytesSent += actRead;
+                tx->rsrcBytesPadded += actRead;
+                totalRead += actRead;
+            } else {
+                long padAmount = take;
+                memset(outBuf + totalRead, 0, padAmount);
+                tx->rsrcBytesPadded += padAmount;
+                totalRead += padAmount;
+            }
+
+            if (tx->rsrcBytesPadded >= tx->rsrcBytesTarget) {
+                if (tx->rsrcRefNum) {
+                    FSClose(tx->rsrcRefNum);
+                    tx->rsrcRefNum = 0;
+                }
+                tx->state = TX_COMPLETE;
+            }
+        }
+    }
+
+    return totalRead;
+}
+
+void MacBinaryTx_Finish(MacBinaryTx *tx)
+{
+    if (!tx) return;
+    if (tx->dataRefNum) {
+        FSClose(tx->dataRefNum);
+        tx->dataRefNum = 0;
+    }
+    if (tx->rsrcRefNum) {
+        FSClose(tx->rsrcRefNum);
+        tx->rsrcRefNum = 0;
+    }
+}
+
+void MacBinaryTx_Abort(MacBinaryTx *tx)
+{
+    if (!tx) return;
+    MacBinaryTx_Finish(tx);
+    tx->state = TX_ERROR;
+}

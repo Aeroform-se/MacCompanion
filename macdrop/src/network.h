@@ -17,13 +17,22 @@ extern Boolean          gServerConnected;
 extern Boolean          gChannelConnected;
 
 extern Boolean          gTransferActive;
+extern Boolean          gTransferIsUpload;
 extern char             gActiveTransferName[64];
 extern unsigned long    gActiveTransferBytes;
 extern unsigned long    gActiveTransferTotal;
+extern unsigned long    gTransferSpeedBps;
 extern char             gCurrentTransferId[64];
+extern Rect             gBtnCancelTransferRect;
+
+/* Cancels active inbound or outbound file transfer */
+void NetCancelActiveTransfer(void);
 
 /* Initializes MacTCP driver and retrieves local IP address */
 Boolean NetInit(void);
+
+/* Sends a file to MacCompanion server / modern Mac via HTTP POST MacBinary */
+Boolean NetSendFile(const FSSpec *spec);
 
 /* Attempts UDP discovery of MacCompanion middleware */
 Boolean NetDiscoverServer(void);

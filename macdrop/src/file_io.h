@@ -87,4 +87,46 @@ OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long c
 void MacBinaryRx_Finish(MacBinaryRx *rx);
 void MacBinaryRx_Abort(MacBinaryRx *rx);
 
+/* Stream Transmitter State Machine (68k -> Server / Modern Mac) */
+typedef enum {
+    TX_IDLE = 0,
+    TX_HEADER,
+    TX_DATA,
+    TX_RSRC,
+    TX_COMPLETE,
+    TX_ERROR
+} TxState;
+
+typedef struct {
+    TxState         state;
+    FSSpec          fileSpec;
+    char            fileName[64];
+    OSType          fileType;
+    OSType          fileCreator;
+    unsigned short  finderFlags;
+    unsigned long   dataLen;
+    unsigned long   rsrcLen;
+    unsigned long   creationDate;
+    unsigned long   modDate;
+
+    unsigned long   dataBytesSent;
+    unsigned long   dataBytesPadded;
+    unsigned long   dataBytesTarget;
+    unsigned long   rsrcBytesSent;
+    unsigned long   rsrcBytesPadded;
+    unsigned long   rsrcBytesTarget;
+
+    short           headerBytesSent;
+    unsigned char   headerBuf[128];
+
+    short           dataRefNum;
+    short           rsrcRefNum;
+    OSErr           lastError;
+} MacBinaryTx;
+
+OSErr MacBinaryTx_Init(MacBinaryTx *tx, const FSSpec *spec);
+long  MacBinaryTx_ReadBytes(MacBinaryTx *tx, unsigned char *outBuf, long maxCount);
+void  MacBinaryTx_Finish(MacBinaryTx *tx);
+void  MacBinaryTx_Abort(MacBinaryTx *tx);
+
 #endif /* MACDROP_FILE_IO_H */
