@@ -312,6 +312,8 @@ static void BlitBitmap(const unsigned char *bits, short rowBytes,
     CopyBits(&srcBM, &curPort->portBits, &srcR, &dstR, mode, NULL);
 }
 
+static Boolean gInternalSwitch = false;
+
 static void EnsureFrontProcess(void)
 {
     ProcessSerialNumber frontPSN;
@@ -321,6 +323,7 @@ static void EnsureFrontProcess(void)
     SameProcess(&gMacDropPSN, &frontPSN, &isFront);
     if (!isFront) {
         short i;
+        gInternalSwitch = true;
         SetFrontProcess(&gMacDropPSN);
         for (i = 0; i < 30; i++) {
             EventRecord ev;
@@ -329,6 +332,7 @@ static void EnsureFrontProcess(void)
             SameProcess(&gMacDropPSN, &frontPSN, &isFront);
             if (isFront) break;
         }
+        gInternalSwitch = false;
     }
 }
 
@@ -1016,9 +1020,9 @@ static void ProcessSharedCommand(void)
             break;
 
         case CMD_ABOUT:
+            gWasHiddenBeforeAbout = (!gWindow || !IsWindowVisible(gWindow));
             EnsureFrontProcess();
             DrawMenuBar();
-            gWasHiddenBeforeAbout = (!gWindow || !IsWindowVisible(gWindow));
             OpenAboutWindow();
             SyncSharedData();
             UpdateMenuStates();
@@ -1499,8 +1503,24 @@ int main(void)
                         Boolean resuming = (event.message & resumeFlag) != 0;
                         if (resuming) {
                             DrawMenuBar();
-                            if (gWindow && IsWindowVisible(gWindow)) {
-                                DrawWindow();
+                            if (!gInternalSwitch && !gAboutWindow && !gWasHiddenBeforeAbout) {
+                                if (gWindow) {
+                                    if (!IsWindowVisible(gWindow)) {
+                                        ShowWindow(gWindow);
+                                        SelectWindow(gWindow);
+                                        SetPortWindowPort(gWindow);
+                                    }
+                                    DrawWindow();
+                                    SyncSharedData();
+                                    UpdateMenuStates();
+                                }
+                            } else {
+                                if (gWindow && IsWindowVisible(gWindow)) {
+                                    DrawWindow();
+                                }
+                                if (gAboutWindow && IsWindowVisible(gAboutWindow)) {
+                                    DrawAboutWindow();
+                                }
                             }
                         }
                     }
