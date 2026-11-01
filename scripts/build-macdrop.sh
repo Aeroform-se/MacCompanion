@@ -56,6 +56,7 @@ deploy_appl_to_folder() {
     local dst_dir="$2"
     local dst_name="$3"
     local creator="$4"
+    local type="${5:-appe}"
 
     mkdir -p "$dst_dir/.rsrc" "$dst_dir/.finf"
     local target_appl="$dst_dir/$dst_name"
@@ -66,10 +67,10 @@ deploy_appl_to_folder() {
         cat "$src_appl/..namedfork/rsrc" > "$dst_dir/.rsrc/$dst_name"
     fi
 
-    python3 - "$target_appl" "$dst_dir/.finf/$dst_name" "$creator" <<'PYEOF'
+    python3 - "$target_appl" "$dst_dir/.finf/$dst_name" "$creator" "$type" <<'PYEOF'
 import subprocess, sys
-target_appl, finf_file, creator = sys.argv[1], sys.argv[2], sys.argv[3]
-finfo = ("APPL" + creator[:4]).encode("ascii") + b"\x24\x00" + (b"\x00" * 22)
+target_appl, finf_file, creator, ftype = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+finfo = (ftype[:4] + creator[:4]).encode("ascii") + b"\x24\x00" + (b"\x00" * 22)
 hex_finfo = finfo.hex()
 with open(finf_file, "wb") as f:
     f.write(finfo)
@@ -88,7 +89,7 @@ if [ -d "/Applications/Basillisk/driveshare" ]; then
     cp "$BUILD_DIR/$APP_NAME.dsk" "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.dsk"
     cp "$BUILD_DIR/$APP_NAME.bin" "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.bin"
 
-    deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$DRIVESHARE_DIR" "$APP_NAME" "MCDP"
+    deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$DRIVESHARE_DIR" "$APP_NAME" "MDRO" "appe"
 
     VERSIONED_APP_NAME="$APP_NAME $VERSION_SHORT"
     if [ -e "$OLDER_RELEASES_DIR/$VERSIONED_APP_NAME" ] || [ -e "$OLDER_RELEASES_DIR/.rsrc/$VERSIONED_APP_NAME" ]; then
@@ -100,7 +101,7 @@ if [ -d "/Applications/Basillisk/driveshare" ]; then
             fi
         done
     fi
-    deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$OLDER_RELEASES_DIR" "$VERSIONED_APP_NAME" "MCDP"
+    deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$OLDER_RELEASES_DIR" "$VERSIONED_APP_NAME" "MDRO" "appe"
 
     echo "==> Deployed $APP_NAME to Basilisk II:"
     echo "    - Latest build:           $DRIVESHARE_DIR/$APP_NAME"

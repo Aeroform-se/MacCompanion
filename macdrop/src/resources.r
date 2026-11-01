@@ -1,3 +1,6 @@
+#include "Retro68.r"
+#include "MacTypes.r"
+#include "Processes.r"
 #include "Types.r"
 #include "SysTypes.r"
 #include "Icons.r"
@@ -27,21 +30,21 @@ resource 'vers' (2) {
     "MacCompanion Suite"
 };
 
-/* Owner Signature Resource ('MCDP' ID 0) */
-type 'MCDP' as 'STR ';
-resource 'MCDP' (0, "Owner Resource") {
+/* Owner Signature Resource ('MDRO' ID 0) */
+type 'MDRO' as 'STR ';
+resource 'MDRO' (0, "Owner Resource") {
     "MacDrop " APP_VERSION_SHORT " (" APP_CODENAME ")"
 };
 
-/* File Reference ('FREF' 128) & Bundle ('BNDL' 128) */
-resource 'FREF' (128) {
-    'APPL',
+/* File Reference ('FREF' 128) & Bundle ('BNDL' 128) for appe */
+resource 'FREF' (128, purgeable) {
+    'appe',
     0,
     ""
 };
 
-resource 'BNDL' (128) {
-    'MCDP',
+resource 'BNDL' (128, purgeable) {
+    'MDRO',
     0,
     {
         'ICN#', { 0, 128 },
@@ -121,65 +124,177 @@ resource 'ICN#' (128, "MacDrop", purgeable) {
     }
 };
 
-/* 16x16 Small Application Icon & Mask ('ics#' 128) from ui/MacDrop/MacDrop-icon_16x16.png */
+/* 16x16 Small Application Icon & Mask ('ics#' 128) from ui/MacDrop/MacDrop-16x16.png */
 resource 'ics#' (128, "MacDrop Small", purgeable) {
     {
         /* Small Icon Bits */
-        $"3FF8"
-        $"4004"
-        $"1FF0"
-        $"2008"
-        $"27C8"
-        $"2828"
-        $"2AA8"
-        $"2008"
-        $"2828"
-        $"27C8"
-        $"2008"
-        $"29E8"
-        $"2008"
-        $"3FF8"
+        $"07C0"
+        $"1830"
+        $"2388"
+        $"4C64"
+        $"5014"
+        $"0FE0"
         $"1010"
-        $"1FF0",
+        $"17D0"
+        $"1450"
+        $"1450"
+        $"17D0"
+        $"1010"
+        $"15D0"
+        $"1010"
+        $"1FF0"
+        $"0FE0",
         /* Small Mask Bits */
-        $"3FF8"
-        $"4004"
-        $"1FF0"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
+        $"07C0"
+        $"1830"
+        $"2388"
+        $"4C64"
+        $"5014"
+        $"0FE0"
         $"1FF0"
         $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"0FE0"
+    }
+};
+
+/* 16x16 Menu Bar Icon Suite ('ICN#' 129 & 'ics#' 129) */
+resource 'ICN#' (129, "Menu Bar Icon Suite Large", purgeable) {
+    {
+        /* Icon Bits */
+        $"000FF000"
+        $"00700E00"
+        $"01800180"
+        $"02000040"
+        $"0407E020"
+        $"08381C10"
+        $"10C00308"
+        $"21000084"
+        $"2207E044"
+        $"42181842"
+        $"44000022"
+        $"447FFE22"
+        $"84800121"
+        $"889FF911"
+        $"88A00511"
+        $"88A42511"
+        $"88A4A511"
+        $"84A08521"
+        $"44A18522"
+        $"44A42522"
+        $"40A3C502"
+        $"20A00504"
+        $"209FF904"
+        $"00800100"
+        $"00800100"
+        $"0093F900"
+        $"00800100"
+        $"00800100"
+        $"00800100"
+        $"00FFFF00"
+        $"00400200"
+        $"007FFE00",
+        /* Mask Bits */
+        $"000FF000"
+        $"007FFE00"
+        $"01FFFF80"
+        $"03FFFFC0"
+        $"07FFFFE0"
+        $"0FFFFFF0"
+        $"1FFFFFF8"
+        $"3FFFFFFC"
+        $"3FFFFFFC"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"FFFFFFFF"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"3FFFFFFC"
+        $"3FFFFFFC"
+        $"0FFFFFF0"
+        $"07FFFFE0"
+        $"03FFFFC0"
+        $"01FFFF80"
+        $"00FFFF00"
+        $"00FFFF00"
+        $"00FFFF00"
+        $"007FFE00"
+        $"007FFE00"
+    }
+};
+
+/* 16x16 Menu Bar Icon Suite ('ics#' 129) */
+resource 'ics#' (129, "Menu Bar Icon", purgeable) {
+    {
+        /* Small Icon Bits */
+        $"07C0"
+        $"1830"
+        $"2388"
+        $"4C64"
+        $"5014"
+        $"0FE0"
+        $"1010"
+        $"17D0"
+        $"1450"
+        $"1450"
+        $"17D0"
+        $"1010"
+        $"15D0"
+        $"1010"
+        $"1FF0"
+        $"0FE0",
+        /* Small Mask Bits */
+        $"07C0"
+        $"1830"
+        $"2388"
+        $"4C64"
+        $"5014"
+        $"0FE0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"0FE0"
     }
 };
 
 /* 16x16 Small Icon List ('SICN' 128) for Menu Bar & MultiFinder Switcher */
 resource 'SICN' (128, "MacDrop", purgeable) {
     {
-        $"3FF8"
-        $"4004"
-        $"1FF0"
-        $"2008"
-        $"27C8"
-        $"2828"
-        $"2AA8"
-        $"2008"
-        $"2828"
-        $"27C8"
-        $"2008"
-        $"29E8"
-        $"2008"
-        $"3FF8"
+        $"07C0"
+        $"1830"
+        $"2388"
+        $"4C64"
+        $"5014"
+        $"0FE0"
+        $"1010"
+        $"17D0"
+        $"1450"
+        $"1450"
+        $"17D0"
+        $"1010"
+        $"15D0"
         $"1010"
         $"1FF0"
+        $"0FE0"
     }
 };
 
@@ -258,39 +373,39 @@ resource 'ICN#' (-16455, "Custom Icon", purgeable) {
 resource 'ics#' (-16455, "Custom Small Icon", purgeable) {
     {
         /* Small Icon Bits */
-        $"3FF8"
-        $"4004"
-        $"1FF0"
-        $"2008"
-        $"27C8"
-        $"2828"
-        $"2AA8"
-        $"2008"
-        $"2828"
-        $"27C8"
-        $"2008"
-        $"29E8"
-        $"2008"
-        $"3FF8"
+        $"07C0"
+        $"1830"
+        $"2388"
+        $"4C64"
+        $"5014"
+        $"0FE0"
         $"1010"
-        $"1FF0",
+        $"17D0"
+        $"1450"
+        $"1450"
+        $"17D0"
+        $"1010"
+        $"15D0"
+        $"1010"
+        $"1FF0"
+        $"0FE0",
         /* Small Mask Bits */
-        $"3FF8"
-        $"4004"
-        $"1FF0"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
-        $"3FF8"
+        $"07C0"
+        $"1830"
+        $"2388"
+        $"4C64"
+        $"5014"
+        $"0FE0"
         $"1FF0"
         $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"1FF0"
+        $"0FE0"
     }
 };
 
@@ -305,37 +420,16 @@ resource 'SIZE' (-1) {
     acceptSuspendResumeEvents,
     reserved,
     canBackground,
-    multiFinderAware,
+    doesActivateOnFGSwitch,
     backgroundAndForeground,
     dontGetFrontClicks,
-    ignoreChildDiedEvents,
+    ignoreAppDiedEvents,
     is32BitCompatible,
-    notHighLevelEventAware,
-    onlyLocalHLEvents,
+    isHighLevelEventAware,
+    localAndRemoteHLEvents,
     notStationeryAware,
     dontUseTextEditServices,
-    reserved,
-    reserved,
-    reserved,
-    1024 * 1024,   /* Preferred size: 1024 KB (1 MB) */
-    512 * 1024     /* Minimum size: 512 KB */
-};
-
-resource 'SIZE' (0) {
-    reserved,
-    acceptSuspendResumeEvents,
-    reserved,
-    canBackground,
-    multiFinderAware,
-    backgroundAndForeground,
-    dontGetFrontClicks,
-    ignoreChildDiedEvents,
-    is32BitCompatible,
-    notHighLevelEventAware,
-    onlyLocalHLEvents,
-    notStationeryAware,
-    dontUseTextEditServices,
-    reserved,
+    notDisplayManagerAware,
     reserved,
     reserved,
     1024 * 1024,
