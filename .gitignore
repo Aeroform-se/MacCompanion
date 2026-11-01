@@ -36,6 +36,7 @@ releases/
 middleware/src/public/test.html
 middleware/scripts/
 scripts/deploy-basilisk.sh
+macwifi/
 
 # Logs & Temporary Files
 logs/
