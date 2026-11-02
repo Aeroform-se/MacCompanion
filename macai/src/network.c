@@ -41,6 +41,8 @@ static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0 };
 static short          gNextFillBuf       = 0;
 static Boolean        gPrebuffering      = true;
 static unsigned long  gLastEmptyStatusTick = 0;
+static Boolean        gTtsReceivedData   = false;
+static unsigned long  gTtsIdleSinceTick  = 0;
 
 /* ============================================================================
  * Sound Input Manager (Microphone) State
@@ -809,30 +811,14 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     short i;
 
     AudioStreamInit();
-    if (gAudioRunning) {
-        /* Verify that existing TCP stream is still actually alive and in ESTABLISHED state */
-        if (gAudioStream != 0) {
-            memset(&pb, 0, sizeof(pb));
-            pb.ioCRefNum = gMacTCPRef;
-            pb.csCode    = TCPStatus;
-            pb.tcpStream = gAudioStream;
-            if (PBControlSync((ParmBlkPtr)&pb) != noErr || pb.csParam.status.connectionState != 8) {
-                AudioStreamStop();
-            } else {
-                if (sampleRateHz > 0 && sampleRateHz != gAudioSampleRateHz) {
-                    gAudioSampleRateHz = sampleRateHz;
-                }
-                return true;
-            }
-        } else {
-            AudioStreamStop();
-        }
+    if (gAudioRunning || gAudioStream != 0 || gSndChan) {
+        AudioStreamStop();
     }
 
     if (!NetInit() || gServerIP == 0) return false;
     if (sampleRateHz > 0) gAudioSampleRateHz = sampleRateHz;
 
-    /* Always allocate a clean Sound Manager channel for the stream */
+    /* Always allocate a clean Sound Manager channel for the TTS stream */
     gSndChan = NULL;
     if (SndNewChannel(&gSndChan, sampledSynth, initMono, gSndCallBackUPP) != noErr || !gSndChan) {
         gSndChan = NULL;
@@ -885,9 +871,12 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
         gBufferBusy[i] = 0;
         gPcmFilled[i]  = 0;
     }
-    gNextFillBuf  = 0;
-    gPrebuffering = true;
-    gAudioRunning = true;
+    gNextFillBuf         = 0;
+    gPrebuffering        = true;
+    gLastEmptyStatusTick = 0;
+    gTtsReceivedData     = false;
+    gTtsIdleSinceTick    = 0;
+    gAudioRunning        = true;
     return true;
 }
 
@@ -897,8 +886,10 @@ void AudioStreamStop(void)
     short i;
 
     if (!gAudioRunning && gAudioStream == 0 && !gSndChan) return;
-    gAudioRunning = false;
-    gPrebuffering = true;
+    gAudioRunning     = false;
+    gPrebuffering     = true;
+    gTtsReceivedData  = false;
+    gTtsIdleSinceTick = 0;
 
     if (gSndChan) {
         SndCommand cmd;
@@ -959,12 +950,9 @@ void AudioStreamPump(void)
         pb.csCode    = TCPStatus;
         pb.tcpStream = gAudioStream;
         if (PBControlSync((ParmBlkPtr)&pb) != noErr) {
-            AudioStreamStop();
-            return;
-        }
-
-        if (pb.csParam.status.connectionState != 8) {
-            AudioStreamStop();
+            if (!gBufferBusy[0] && !gBufferBusy[1]) {
+                AudioStreamStop();
+            }
             return;
         }
 
@@ -975,9 +963,28 @@ void AudioStreamPump(void)
             if (gPcmFilled[target] > 0 && !gBufferBusy[0] && !gBufferBusy[1]) {
                 QueueSoundBuffer(target);
                 gNextFillBuf = (target + 1) % NUM_AUDIO_BUFFERS;
+                break;
+            }
+            /* Once both Sound Manager buffers finish playing, release the audio pipe & channel! */
+            if (!gBufferBusy[0] && !gBufferBusy[1] && gPcmFilled[0] == 0 && gPcmFilled[1] == 0) {
+                if (pb.csParam.status.connectionState != 8) {
+                    AudioStreamStop();
+                    return;
+                }
+                if (gTtsReceivedData) {
+                    if (gTtsIdleSinceTick == 0) {
+                        gTtsIdleSinceTick = TickCount();
+                    } else if ((TickCount() - gTtsIdleSinceTick) >= 45) {
+                        AudioStreamStop();
+                        return;
+                    }
+                }
             }
             break;
         }
+
+        gTtsIdleSinceTick = 0;
+        gTtsReceivedData  = true;
 
         spaceLeft = (unsigned short)(AUDIO_CHUNK_SIZE - gPcmFilled[target]);
         toRead    = (avail < spaceLeft) ? avail : spaceLeft;

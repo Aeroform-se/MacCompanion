@@ -42,12 +42,11 @@
 
 #define kMenuBarID          128
 #define mApple              128
-#define iAbout              1
-
 #define mFile               129
-#define iServerIP           1
-#define iFindSearch         2
-#define iQuit               4
+#define iAbout              1
+#define iServerIP           3
+#define iFindSearch         4
+#define iQuit               6
 
 #define mPlayback           130
 #define iPlayPause          1
@@ -4610,6 +4609,7 @@ static void HandleCanvasClick(Point pt)
                 UrlEncode(gDevices[row].name, encName, sizeof(encName));
                 sprintf(path, "/api/spotify/transfer?device_id=%s&device_name=%s", encId, encName);
                 NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+                gNowPlaying.isPlaying = true;
                 ResetPollTimersAfterAction();
                 SyncLocalAudioWithSpeaker();
                 RenderCanvas();
@@ -5381,18 +5381,16 @@ static void HandleMenuChoice(long menuChoice)
 
     switch (menuID) {
         case mApple:
+            GetMenuItemText(GetMenuHandle(mApple), itemID, daName);
+            OpenDeskAcc(daName);
+            break;
+
+        case mFile:
             if (itemID == iAbout) {
                 if (gMiniPlayerMode) ExitMiniPlayerMode();
                 gAboutModalOpen = true;
                 RenderCanvas();
-            } else {
-                GetMenuItemText(GetMenuHandle(mApple), itemID, daName);
-                OpenDeskAcc(daName);
-            }
-            break;
-
-        case mFile:
-            if (itemID == iServerIP) {
+            } else if (itemID == iServerIP) {
                 if (gMiniPlayerMode) ExitMiniPlayerMode();
                 if (NetHasServer()) {
                     FormatIPAddress(NetGetServerIP(), gIpInput);
@@ -5810,6 +5808,10 @@ int main(void)
                     if (((ev.message >> 24) & 0xFF) == suspendResumeMessage) {
                         gInBackground = ((ev.message & resumeFlag) == 0);
                         gLastHoverMouse.h = -32000;
+                        if (!gInBackground) {
+                            /* Poll immediately when returning to foreground (e.g. after MacAI TTS paused playback) */
+                            gLastPollTicks = 0;
+                        }
                     }
                     break;
             }

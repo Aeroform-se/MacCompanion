@@ -257,18 +257,22 @@ const FRAME_BYTES = 3528; // Exact 20ms frame (882 stereo samples * 4 bytes)
 
 class RealTimePacer extends Transform {
   constructor() {
-    super({ highWaterMark: 7056 });
+    super({ highWaterMark: 65536 });
     this.nextFrameTimeMs = 0;
     this.timer = null;
     this.activeDoneCallback = null;
     this.stopped = false;
     this.alignRemainder = Buffer.alloc(0);
     this.flushEpoch = 0;
+    this.discardUntilMs = 0;
   }
 
-  flush() {
+  flush({ discardMs = 250 } = {}) {
     this.flushEpoch++;
     this.nextFrameTimeMs = 0;
+    if (discardMs > 0) {
+      this.discardUntilMs = performance.now() + discardMs;
+    }
     // NOTE: Never clear `this.alignRemainder` here — it holds the 1..3 byte sub-frame
     // remainder from the last OS pipe read on `librespot.stdout` and is required to
     // keep 4-byte S16_LE stereo sample alignment intact across pause/resume.
@@ -280,7 +284,12 @@ class RealTimePacer extends Transform {
       const cb = this.activeDoneCallback;
       this.activeDoneCallback = null;
       cb();
+      this.flushEpoch++;
     }
+  }
+
+  clearDiscardWindow() {
+    this.discardUntilMs = 0;
   }
 
   _transform(chunk, encoding, callback) {
@@ -305,9 +314,22 @@ class RealTimePacer extends Transform {
     const myEpoch = this.flushEpoch;
     this.activeDoneCallback = callback;
 
+    const emitOrDiscardSlice = (slice) => {
+      const isDiscarding =
+        audioHub.isVoiceGateBlockingSpotify() ||
+        (this.discardUntilMs > 0 && performance.now() < this.discardUntilMs);
+      if (!isDiscarding) {
+        this.push(slice);
+      }
+    };
+
     const pumpNextFrame = () => {
       if (this.stopped || myEpoch !== this.flushEpoch) {
         this.timer = null;
+        if (this.activeDoneCallback === callback) {
+          this.activeDoneCallback = null;
+          callback();
+        }
         return;
       }
       if (offset >= alignedLen) {
@@ -336,13 +358,17 @@ class RealTimePacer extends Transform {
       this.nextFrameTimeMs += durationMs;
 
       if (delayMs <= 1) {
-        this.push(slice);
+        emitOrDiscardSlice(slice);
         setImmediate(pumpNextFrame);
       } else {
         this.timer = setTimeout(() => {
           if (!this.stopped && myEpoch === this.flushEpoch) {
-            this.push(slice);
+            emitOrDiscardSlice(slice);
             pumpNextFrame();
+          } else if (this.activeDoneCallback === callback) {
+            this.timer = null;
+            this.activeDoneCallback = null;
+            callback();
           }
         }, delayMs);
       }
@@ -387,11 +413,19 @@ class AudioStreamEngine extends EventEmitter {
     this.state = 'STOPPED'; // STOPPED | AWAITING_SPEAKER_AUTH | STARTING | READY | PLAYING | UNAVAILABLE
     this.lastError = null;
     this.bytesBroadcast = 0;
+    this.lastMusicChunkAt = 0;
+    this.librespotStartedToken = null;
     this.hasBinaries = this.checkBinaries();
 
     // Multi-Mac network speaker registry: Map<clientId, { id, ip, baseName, lastSeen }>
     this.macClients = new Map();
     this.activeMacClientId = null;
+  }
+
+  isActivelyStreamingMusic() {
+    if (!this.tcpClients || this.tcpClients.size === 0) return false;
+    const hasMusicClient = Array.from(this.tcpClients).some((s) => !s.destroyed && s.writable && !s._isTemporaryTtsSocket);
+    return Boolean(hasMusicClient && (Date.now() - this.lastMusicChunkAt) < 1500);
   }
 
   checkBinaries() {
@@ -535,6 +569,11 @@ class AudioStreamEngine extends EventEmitter {
       clearTimeout(this.tcpFlushTimer);
       this.tcpFlushTimer = null;
     }
+    if (audioHub.isVoiceGateBlockingSpotify()) {
+      this.tcpPendingChunks = [];
+      this.tcpPendingBytes = 0;
+      return;
+    }
     if (this.tcpPendingBytes <= 0 || this.tcpPendingChunks.length === 0) {
       return;
     }
@@ -547,14 +586,15 @@ class AudioStreamEngine extends EventEmitter {
     const activeMac = this.getActiveMacClient();
     const targetIp = activeMac && activeMac.ip ? activeMac.ip : null;
     const hasMatchingSocket = targetIp
-      ? Array.from(this.tcpClients).some((s) => !s.destroyed && cleanIpAddress(s.remoteAddress) === targetIp)
+      ? Array.from(this.tcpClients).some((s) => !s.destroyed && !s._isTemporaryTtsSocket && cleanIpAddress(s.remoteAddress) === targetIp)
       : false;
 
     for (const sock of this.tcpClients) {
-      if (!sock.destroyed && sock.writable) {
+      if (!sock.destroyed && sock.writable && !sock._isTemporaryTtsSocket) {
         if (hasMatchingSocket && cleanIpAddress(sock.remoteAddress) !== targetIp) {
           continue;
         }
+        sock._receivedSpotifyBytes = (sock._receivedSpotifyBytes || 0) + payload.length;
         sock.write(payload);
       }
     }
@@ -563,7 +603,14 @@ class AudioStreamEngine extends EventEmitter {
   onPause() {
     this.clearTcpPending();
     if (this.pacer && typeof this.pacer.flush === 'function') {
-      this.pacer.flush();
+      this.pacer.flush({ discardMs: 250 });
+    }
+  }
+
+  onResume() {
+    this.clearTcpPending();
+    if (this.pacer && typeof this.pacer.clearDiscardWindow === 'function') {
+      this.pacer.clearDiscardWindow();
     }
   }
 
@@ -684,15 +731,19 @@ class AudioStreamEngine extends EventEmitter {
    */
   spawnFfmpegTranscoder(hz) {
     if (this.ffmpegProc) {
-      if (this.pacer && this.ffmpegProc.stdin) {
+      const oldFfmpeg = this.ffmpegProc;
+      this.ffmpegProc = null;
+      if (this.pacer && oldFfmpeg.stdin) {
         try {
-          this.pacer.unpipe(this.ffmpegProc.stdin);
+          this.pacer.unpipe(oldFfmpeg.stdin);
         } catch {}
       }
       try {
-        this.ffmpegProc.kill('SIGTERM');
+        if (oldFfmpeg.stdin) oldFfmpeg.stdin.destroy();
       } catch {}
-      this.ffmpegProc = null;
+      try {
+        oldFfmpeg.kill('SIGKILL');
+      } catch {}
     }
 
     const { profile, dsp } = this.getDspConfig();
@@ -732,10 +783,12 @@ class AudioStreamEngine extends EventEmitter {
     proc.stdin.on('error', () => {});
 
     proc.stdout.on('data', (u8Chunk) => {
-      if (audioHub.isTtsActive()) {
+      if (audioHub.isVoiceGateBlockingSpotify()) {
         return;
       }
-      this.bytesBroadcast += u8Chunk.length;
+      this.lastMusicChunkAt = Date.now();
+      const mixedChunk = audioHub.mixSpotifyChunk(u8Chunk);
+      this.bytesBroadcast += mixedChunk.length;
       if (this.state !== 'PLAYING') {
         this.state = 'PLAYING';
       }
@@ -743,8 +796,8 @@ class AudioStreamEngine extends EventEmitter {
       // Coalesce outgoing TCP chunks to ~1460 bytes (1 Ethernet MSS) or 60ms max delay
       // to cut MacTCP / Ethernet receive interrupt overhead on the 68k Mac by 3-4x
       if (this.tcpClients.size > 0) {
-        this.tcpPendingChunks.push(u8Chunk);
-        this.tcpPendingBytes += u8Chunk.length;
+        this.tcpPendingChunks.push(mixedChunk);
+        this.tcpPendingBytes += mixedChunk.length;
         if (this.tcpPendingBytes >= 1460) {
           this.flushTcpPending();
         } else if (!this.tcpFlushTimer) {
@@ -754,7 +807,7 @@ class AudioStreamEngine extends EventEmitter {
 
       for (const res of this.httpClients) {
         if (!res.writableEnded) {
-          res.write(u8Chunk);
+          res.write(mixedChunk);
         }
       }
     });
@@ -779,6 +832,21 @@ class AudioStreamEngine extends EventEmitter {
    * Starts or restarts the `librespot` -> `RealTimePacer` -> `ffmpeg` pipeline.
    */
   async ensureStarted({ forceRestart = false } = {}) {
+    if (!forceRestart && this.ensureStartedPromise) {
+      return this.ensureStartedPromise;
+    }
+    const run = this._ensureStartedImpl({ forceRestart });
+    this.ensureStartedPromise = run;
+    try {
+      return await run;
+    } finally {
+      if (this.ensureStartedPromise === run) {
+        this.ensureStartedPromise = null;
+      }
+    }
+  }
+
+  async _ensureStartedImpl({ forceRestart = false } = {}) {
     if (!this.hasBinaries) {
       this.state = 'UNAVAILABLE';
       return false;
@@ -801,7 +869,7 @@ class AudioStreamEngine extends EventEmitter {
       return false;
     }
 
-    if (!forceRestart && this.librespotProc && this.pacer) {
+    if (!forceRestart && this.librespotProc && this.pacer && this.librespotStartedToken === speakerToken) {
       if (!this.ffmpegProc || this.currentRateHz !== hz || this.currentFilterChain !== filterChain) {
         this.spawnFfmpegTranscoder(hz);
       }
@@ -810,6 +878,7 @@ class AudioStreamEngine extends EventEmitter {
 
     this.stopProcesses();
     this.state = 'STARTING';
+    this.librespotStartedToken = speakerToken;
 
     const cacheDir = path.join(DATA_DIR, 'librespot');
     if (!fs.existsSync(cacheDir)) {
@@ -843,16 +912,41 @@ class AudioStreamEngine extends EventEmitter {
 
     this.spawnFfmpegTranscoder(hz);
 
+    let authResolved = false;
+    let resolveAuthWait = null;
+    const authWaitPromise = new Promise((resolve) => {
+      resolveAuthWait = resolve;
+      const t = setTimeout(() => {
+        if (!authResolved) {
+          authResolved = true;
+          resolve();
+        }
+      }, 1500);
+      if (typeof t.unref === 'function') t.unref();
+    });
+
     lsProc.stderr.on('data', (data) => {
       const line = data.toString().trim();
       if (line.includes('Authenticated as') || line.includes('Country:')) {
         this.state = 'READY';
         this.lastError = null;
+        if (!authResolved && resolveAuthWait) {
+          authResolved = true;
+          resolveAuthWait();
+        }
       }
       if (line.includes('INVALID_CREDENTIALS') || line.includes('Bad credentials')) {
-        console.warn('[AudioEngine:librespot] Credentials rejected; clearing cache:', line);
-        this.clearCachedCredentials();
-        this.lastError = 'Speaker credentials rejected by Spotify';
+        const stored = this.store.load();
+        if (stored && stored.librespotRefreshToken) {
+          console.warn('[AudioEngine:librespot] Access token expired; forcing OAuth token refresh on restart...');
+          this.store.save({ librespotExpiresAt: 0 });
+          this.librespotStartedToken = null;
+          this.lastError = null;
+        } else {
+          console.warn('[AudioEngine:librespot] Credentials rejected; clearing cache:', line);
+          this.clearCachedCredentials();
+          this.lastError = 'Speaker credentials rejected by Spotify';
+        }
       } else if (line.includes('ERROR') || line.includes('error')) {
         console.warn('[AudioEngine:librespot]', line);
       }
@@ -860,22 +954,28 @@ class AudioStreamEngine extends EventEmitter {
 
     lsProc.on('exit', (code) => {
       console.log(`[AudioEngine] librespot exited with code ${code}`);
+      if (!authResolved && resolveAuthWait) {
+        authResolved = true;
+        resolveAuthWait();
+      }
       if (this.librespotProc === lsProc) {
         this.librespotProc = null;
+        this.librespotStartedToken = null;
         if (code !== 0 && this.lastError) {
           this.state = 'AWAITING_SPEAKER_AUTH';
         } else if (this.state !== 'STOPPED') {
-          // Auto-restart librespot if it exited unexpectedly
+          // Auto-restart librespot immediately with refreshed OAuth token if it exited
           setTimeout(() => {
             if (this.state !== 'STOPPED') {
               this.ensureStarted({ forceRestart: true }).catch(() => {});
             }
-          }, 1500);
+          }, 500);
         }
       }
     });
 
     this.state = 'READY';
+    await authWaitPromise;
     return true;
   }
 
@@ -937,6 +1037,43 @@ class AudioStreamEngine extends EventEmitter {
 
     this.tcpServer = net.createServer((socket) => {
       socket.setNoDelay(true);
+      const remoteIp = cleanIpAddress(socket.remoteAddress);
+      const hasPendingStandaloneTts = Boolean(
+        audioHub.pendingTts &&
+        Date.now() < audioHub.pendingTts.expiresAt &&
+        audioHub.pendingTts.buffer &&
+        audioHub.pendingTts.buffer.length > 0
+      );
+
+      // If no standalone TTS is pending and SpotiMac is ALREADY actively streaming ducked audio
+      // to an existing socket from this IP, close any redundant second socket immediately so
+      // two Sound Manager channels can never play simultaneously!
+      if (!hasPendingStandaloneTts && remoteIp && audioHub.hasActiveDuckMix()) {
+        const hasActiveMusicSocket = Array.from(this.tcpClients).some(
+          (s) => s !== socket && !s.destroyed && s._receivedSpotifyBytes > 0 && cleanIpAddress(s.remoteAddress) === remoteIp
+        );
+        if (hasActiveMusicSocket) {
+          try {
+            socket.end();
+            socket.destroy();
+          } catch {}
+          return;
+        }
+      }
+
+      // Enforce a single active TCP 6802 audio pipe per 68k Mac IP address
+      if (remoteIp) {
+        for (const existing of Array.from(this.tcpClients)) {
+          if (existing !== socket && cleanIpAddress(existing.remoteAddress) === remoteIp) {
+            this.tcpClients.delete(existing);
+            try {
+              existing.end();
+              existing.destroy();
+            } catch {}
+          }
+        }
+      }
+
       this.tcpClients.add(socket);
       console.log(`[AudioEngine] 68k TCP client connected (${socket.remoteAddress}:${socket.remotePort}) — active clients: ${this.tcpClients.size}`);
 
@@ -1001,16 +1138,21 @@ class AudioStreamEngine extends EventEmitter {
       this.pacer = null;
     }
     if (this.ffmpegProc) {
-      try {
-        this.ffmpegProc.kill('SIGTERM');
-      } catch {}
+      const oldFfmpeg = this.ffmpegProc;
       this.ffmpegProc = null;
+      try {
+        if (oldFfmpeg.stdin) oldFfmpeg.stdin.destroy();
+      } catch {}
+      try {
+        oldFfmpeg.kill('SIGKILL');
+      } catch {}
     }
     if (this.librespotProc) {
-      try {
-        this.librespotProc.kill('SIGTERM');
-      } catch {}
+      const oldLs = this.librespotProc;
       this.librespotProc = null;
+      try {
+        oldLs.kill('SIGKILL');
+      } catch {}
     }
   }
 

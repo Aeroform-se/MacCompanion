@@ -82,10 +82,14 @@ function httpRequest(port, method, reqPath, bodyObj = null) {
     assert.strictEqual(selRes.body.trim(), 'OK|SELECT|groq|Groq|Thinking');
     console.log('[PASS] /api/macai/select ->', selRes.body.trim());
 
-    // 6. Verify /api/macai/voice-settings updates voice
+    // 6. Verify /api/macai/voice-settings updates voice & pause_spotify
     const vsRes = await httpRequest(16810, 'GET', '/api/macai/voice-settings?voice=echo&tts=1');
-    assert.strictEqual(vsRes.body.trim(), 'OK|VOICE_SETTINGS|echo|1');
+    assert.strictEqual(vsRes.body.trim(), 'OK|VOICE_SETTINGS|echo|1|0');
     console.log('[PASS] /api/macai/voice-settings ->', vsRes.body.trim());
+
+    const vsPauseRes = await httpRequest(16810, 'GET', '/api/macai/voice-settings?pause_spotify=1');
+    assert.strictEqual(vsPauseRes.body.trim(), 'OK|VOICE_SETTINGS|echo|1|1');
+    console.log('[PASS] /api/macai/voice-settings (pause_spotify=1) ->', vsPauseRes.body.trim());
 
     // 6. Verify deleting all AI chats via DELETE /api/macai/chats
     const delRes = await httpRequest(16810, 'DELETE', '/api/macai/chats');

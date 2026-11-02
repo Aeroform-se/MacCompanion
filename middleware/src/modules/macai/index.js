@@ -148,9 +148,14 @@ const store = createModuleStore('macai', {
   groqApiKey: null,
   ttsEnabled: true,
   ttsVoice: 'alloy',
+  pauseSpotifyOnSpeech: false,
   chats: [],
   lastError: null,
 });
+
+try {
+  audioHub.setPauseSpotifyOnSpeech(Boolean(store.load().pauseSpotifyOnSpeech));
+} catch {}
 
 let customFetch = null;
 function setFetchImpl(fn) {
@@ -876,19 +881,285 @@ async function transcribeWavBuffer(wavBuffer, data = store.load(), activeProvide
 }
 
 /**
- * Synthesizes spoken TTS audio into unsigned 8-bit 22,255 Hz mono PCM (`pcm_u8`)
- * using OpenAI TTS (with selectable voice) or local OS speech synthesis (`say` / `espeak-ng`) + FFmpeg.
+ * Local eSpeak NG (Linux/Docker) + macOS `say` + FFmpeg DSP Voice Profiles.
+ * Gives every selectable voice a distinct formant/pitch/cadence character when using
+ * local open-source TTS (Gemini, Claude, Groq, or synthetic computer voices), and
+ * provides dedicated ominous computer voices (`hal` = HAL 9000, `glados` = GLaDOS, `retro` = 1984 MacinTalk).
  */
-async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() } = {}) {
+const LOCAL_TTS_PROFILES = {
+  alloy: {
+    espeakArgs: ['-v', 'en-us', '-p', '50', '-P', '50', '-s', '165'],
+    sayVoice: null,
+    extraFilter: null,
+    forceLocal: false,
+  },
+  echo: {
+    espeakArgs: ['-v', 'en-us+m2', '-p', '42', '-P', '45', '-s', '155'],
+    sayVoice: 'Daniel',
+    extraFilter: 'highpass=f=110,lowpass=f=4500',
+    forceLocal: false,
+  },
+  fable: {
+    espeakArgs: ['-v', 'en-gb-x-rp+m3', '-p', '54', '-P', '68', '-s', '162'],
+    sayVoice: 'Daniel',
+    extraFilter: null,
+    forceLocal: false,
+  },
+  onyx: {
+    espeakArgs: ['-v', 'en-us+m3', '-p', '32', '-P', '40', '-s', '150'],
+    sayVoice: 'Fred',
+    extraFilter: 'highpass=f=85,lowpass=f=4200',
+    forceLocal: false,
+  },
+  nova: {
+    espeakArgs: ['-v', 'en-us+f3', '-p', '65', '-P', '60', '-s', '168'],
+    sayVoice: 'Samantha',
+    extraFilter: null,
+    forceLocal: false,
+  },
+  shimmer: {
+    espeakArgs: ['-v', 'en-us+f2', '-p', '58', '-P', '45', '-s', '152'],
+    sayVoice: 'Victoria',
+    extraFilter: 'highpass=f=130,lowpass=f=4800',
+    forceLocal: false,
+  },
+  retro: {
+    espeakArgs: ['-v', 'en-us+klatt', '-p', '48', '-P', '35', '-s', '158'],
+    sayVoice: 'Fred',
+    extraFilter: 'highpass=f=220,lowpass=f=3800',
+    forceLocal: true,
+  },
+  hal: {
+    // HAL 9000: Unnervingly calm, slow, deep, nearly flat inflection (-P 10) with dark mainframe chamber resonance
+    espeakArgs: ['-v', 'en-us+m3', '-p', '26', '-P', '10', '-s', '132', '-g', '4'],
+    sayVoice: 'Alex',
+    extraFilter: 'highpass=f=90,lowpass=f=3500,aecho=0.8:0.85:18:0.16',
+    forceLocal: true,
+  },
+  glados: {
+    // GLaDOS: Cold, clinical synthetic female AI voice with subtle pitch modulation & metallic chamber reflection
+    espeakArgs: ['-v', 'en-us+anikaRobot', '-p', '64', '-P', '16', '-s', '148', '-g', '2'],
+    sayVoice: 'Zarvox',
+    extraFilter: 'highpass=f=180,lowpass=f=5200,vibrato=f=6.5:d=0.14,aecho=0.8:0.88:12:0.24',
+    forceLocal: true,
+  },
+};
+
+const OPENAI_SUPPORTED_VOICES = new Set(['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']);
+
+const GLADOS_VARIANT_CONTENT = `name glados
+language variant
+gender female 30
+pitch 178 215
+formant 0 100 100 100
+formant 1 100 100 100
+formant 2 106 100  90
+formant 3 110 110  75
+formant 4 106 120  65
+formant 5 108 120  65
+formant 6 110 100  80
+formant 7 110 100  80
+formant 8 110 100  80
+echo 14 22
+flutter 4
+roughness 0
+voicing 90
+consonants 100 115
+words 1 0
+`;
+
+function ensureGladosEspeakVariantInstalled() {
+  try {
+    const dataDirs = [
+      '/usr/share/espeak-ng-data/voices/!v',
+      '/usr/lib/x86_64-linux-gnu/espeak-ng-data/voices/!v',
+      '/usr/lib/aarch64-linux-gnu/espeak-ng-data/voices/!v',
+    ];
+    for (const dir of dataDirs) {
+      const parent = path.dirname(dir);
+      if (fs.existsSync(parent)) {
+        fs.mkdirSync(dir, { recursive: true });
+        const target = path.join(dir, 'glados');
+        if (!fs.existsSync(target)) {
+          fs.writeFileSync(target, GLADOS_VARIANT_CONTENT, 'utf8');
+        }
+      }
+    }
+  } catch {}
+}
+ensureGladosEspeakVariantInstalled();
+
+function escapeXmlForSsml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildGladosSsml(text) {
+  const words = String(text || '').match(/\S+/g) || [];
+  let pitch = 0;
+  const parts = [];
+  const rates = ['medium', 'medium', 'medium', 'slow'];
+  for (const w of words) {
+    const delta = Math.floor(Math.random() * 21) - 10; // [-10, 10]
+    pitch = Math.max(-20, Math.min(25, pitch + delta));
+    let p = pitch;
+    if (w.endsWith('?')) {
+      p += 25; // rising inflection at end of questions
+    } else if (w.endsWith('.') || w.endsWith('!')) {
+      p -= 20; // falling inflection at end of statements
+    } else if (w.endsWith(',')) {
+      p += 8;
+    }
+    const rate = rates[Math.floor(Math.random() * rates.length)];
+    const signStr = p >= 0 ? `+${p}` : `${p}`;
+    parts.push(`<prosody pitch="${signStr}%" rate="${rate}">${escapeXmlForSsml(w)}</prosody>`);
+  }
+  return `<speak>${parts.join(' ')}</speak>`;
+}
+
+/**
+ * Synthesizes GLaDOS voice using per-word SSML pitch/rate walk + custom `en-us+glados`
+ * eSpeak NG formant variant + SoX chorus/overdrive/reverb post-processing.
+ */
+function synthesizeGladosPcmU8(cleanText, { hz = 22255, profile }) {
+  return new Promise((resolve) => {
+    if (process.platform === 'darwin') {
+      // Fallback on macOS dev host if espeak-ng is not installed
+      try {
+        const proc = spawn('say', ['-v', profile.sayVoice || 'Kathy', '--data-format=LEI16@22050', '-o', '-', cleanText], {
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        const chunks = [];
+        proc.stdout.on('data', (c) => chunks.push(c));
+        proc.on('error', () => resolve(Buffer.alloc(0)));
+        proc.on('close', async (code) => {
+          if (code === 0 && chunks.length > 0) {
+            try {
+              const u8 = await audioHub.transcodeToPcmU8(Buffer.concat(chunks), { hz, extraFilter: profile.extraFilter });
+              resolve(u8);
+            } catch {
+              resolve(Buffer.alloc(0));
+            }
+          } else {
+            resolve(Buffer.alloc(0));
+          }
+        });
+      } catch {
+        resolve(Buffer.alloc(0));
+      }
+      return;
+    }
+
+    ensureGladosEspeakVariantInstalled();
+    const ssml = buildGladosSsml(cleanText);
+    try {
+      const espeakProc = spawn(
+        'espeak-ng',
+        ['-m', '--stdin', '-v', 'en-us+glados', '-s', '135', '-g', '2', '-p', '55', '--stdout'],
+        { stdio: ['pipe', 'pipe', 'ignore'] }
+      );
+      const wavChunks = [];
+      espeakProc.stdout.on('data', (c) => wavChunks.push(c));
+      espeakProc.on('error', () => resolve(Buffer.alloc(0)));
+      espeakProc.on('close', (code) => {
+        const rawWav = Buffer.concat(wavChunks);
+        if (code !== 0 || rawWav.length === 0) {
+          return resolve(Buffer.alloc(0));
+        }
+
+        // Pipe through SoX for GLaDOS metallic chorus + overdrive + reverb
+        try {
+          const soxProc = spawn(
+            'sox',
+            [
+              '-t', 'wav', '-',
+              '-t', 'wav', '-',
+              'highpass', '140',
+              'lowpass', '7500',
+              'chorus', '0.7', '0.9', '55', '0.4', '0.25', '2', '-t',
+              'overdrive', '2', '4',
+              'reverb', '15', '50', '40',
+            ],
+            { stdio: ['pipe', 'pipe', 'ignore'] }
+          );
+          const soxChunks = [];
+          soxProc.stdout.on('data', (c) => soxChunks.push(c));
+          soxProc.on('error', async () => {
+            // Fallback to FFmpeg filter if sox is unavailable
+            try {
+              const u8 = await audioHub.transcodeToPcmU8(rawWav, { hz, extraFilter: profile.extraFilter });
+              resolve(u8);
+            } catch {
+              resolve(Buffer.alloc(0));
+            }
+          });
+          soxProc.on('close', async (soxCode) => {
+            const soxWav = Buffer.concat(soxChunks);
+            if (soxCode === 0 && soxWav.length > 0) {
+              try {
+                const u8 = await audioHub.transcodeToPcmU8(soxWav, { hz });
+                resolve(u8);
+              } catch {
+                resolve(Buffer.alloc(0));
+              }
+            } else {
+              try {
+                const u8 = await audioHub.transcodeToPcmU8(rawWav, { hz, extraFilter: profile.extraFilter });
+                resolve(u8);
+              } catch {
+                resolve(Buffer.alloc(0));
+              }
+            }
+          });
+          soxProc.stdin.on('error', () => {});
+          soxProc.stdin.end(rawWav);
+        } catch {
+          audioHub.transcodeToPcmU8(rawWav, { hz, extraFilter: profile.extraFilter })
+            .then(resolve)
+            .catch(() => resolve(Buffer.alloc(0)));
+        }
+      });
+      espeakProc.stdin.on('error', () => {});
+      espeakProc.stdin.end(Buffer.from(ssml, 'utf8'));
+    } catch {
+      resolve(Buffer.alloc(0));
+    }
+  });
+}
+
+/**
+ * Synthesizes spoken TTS audio into unsigned 8-bit 22,255 Hz mono PCM (`pcm_u8`)
+ * using OpenAI TTS (for natural voices when OpenAI is configured and active) or local open-source
+ * eSpeak NG (`espeak-ng`) / macOS `say` + SoX / FFmpeg DSP voice filtering.
+ */
+async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load(), isScifi = false, voiceOverride = null, providerOverride = null } = {}) {
   const cleanText = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 600);
   if (!cleanText) return Buffer.alloc(0);
 
   const auth = getProviderAuth(data);
   const fetchFn = getFetchImpl();
-  const selectedVoice = (data.ttsVoice || 'alloy').toLowerCase();
+  const activeProv = providerOverride || data.activeProvider || 'gemini';
+  let selectedVoice = String(voiceOverride || data.ttsVoice || 'alloy').toLowerCase();
 
-  // 1. If OpenAI key is configured and user hasn't forced 'retro', use OpenAI's natural TTS
-  if (auth.chatgpt.enabled && !customFetch && selectedVoice !== 'retro') {
+  // In Sci-Fi Mode, automatically use the ominous HAL 9000 mainframe voice unless
+  // the user explicitly selected GLaDOS, Retro Synth, or HAL 9000.
+  if (isScifi && !['hal', 'glados', 'retro'].includes(selectedVoice)) {
+    selectedVoice = 'hal';
+  }
+
+  const profile = LOCAL_TTS_PROFILES[selectedVoice] || LOCAL_TTS_PROFILES.alloy;
+
+  // Use custom GLaDOS SSML + en-us+glados variant + SoX pipeline when GLaDOS is selected
+  if (selectedVoice === 'glados') {
+    return await synthesizeGladosPcmU8(cleanText, { hz, profile });
+  }
+
+  // 1. If ChatGPT/OpenAI is the active provider (and key is configured) and the selected voice is a natural human voice
+  if (activeProv === 'chatgpt' && auth.chatgpt.enabled && !customFetch && !profile.forceLocal && OPENAI_SUPPORTED_VOICES.has(selectedVoice)) {
     try {
       const res = await fetchFn('https://api.openai.com/v1/audio/speech', {
         method: 'POST',
@@ -912,7 +1183,7 @@ async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() }
     }
   }
 
-  // 2. Fallback: local `espeak-ng` / `espeak` (Linux/Alpine Docker) or `say` (macOS) -> stdout WAV -> FFmpeg
+  // 2. Local open-source `espeak-ng` (Linux/Alpine Docker) or `say` (macOS) -> stdout WAV -> FFmpeg DSP
   return new Promise((resolve) => {
     const tryCommand = (cmd, args) => {
       try {
@@ -923,7 +1194,10 @@ async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() }
         proc.on('close', async (code) => {
           if (code === 0 && chunks.length > 0) {
             try {
-              const u8 = await audioHub.transcodeToPcmU8(Buffer.concat(chunks), { hz });
+              const u8 = await audioHub.transcodeToPcmU8(Buffer.concat(chunks), {
+                hz,
+                extraFilter: profile.extraFilter,
+              });
               resolve(u8);
             } catch {
               resolve(Buffer.alloc(0));
@@ -938,9 +1212,14 @@ async function synthesizeSpeechToPcmU8(text, { hz = 22255, data = store.load() }
     };
 
     if (process.platform === 'darwin') {
-      tryCommand('say', ['--data-format=LEI16@22050', '-o', '-', cleanText]);
+      const sayArgs = [];
+      if (profile.sayVoice) {
+        sayArgs.push('-v', profile.sayVoice);
+      }
+      sayArgs.push('--data-format=LEI16@22050', '-o', '-', cleanText);
+      tryCommand('say', sayArgs);
     } else {
-      tryCommand('espeak-ng', ['--stdout', cleanText]);
+      tryCommand('espeak-ng', [...profile.espeakArgs, '--stdout', cleanText]);
     }
   });
 }
@@ -988,6 +1267,10 @@ router.post('/config', (req, res) => {
     updates.activeThinking = updates.activeTier;
   }
   if (body.ttsEnabled !== undefined) updates.ttsEnabled = Boolean(body.ttsEnabled);
+  if (body.pauseSpotifyOnSpeech !== undefined) {
+    updates.pauseSpotifyOnSpeech = Boolean(body.pauseSpotifyOnSpeech);
+    audioHub.setPauseSpotifyOnSpeech(updates.pauseSpotifyOnSpeech);
+  }
 
   if (body.disconnectProvider === 'gemini') {
     updates.geminiApiKey = null;
@@ -1212,6 +1495,7 @@ router.get('/providers', (req, res) => {
     data.ttsEnabled ? '1' : '0',
     data.ttsVoice || 'alloy',
     auth.chatgpt && auth.chatgpt.enabled ? '1' : '0',
+    data.pauseSpotifyOnSpeech ? '1' : '0',
   ]);
   return sendPipeResponse(req, res, formatPipeTable(rows));
 });
@@ -1242,6 +1526,8 @@ router.all('/voice-settings', (req, res) => {
             : (req.query.enabled !== undefined ? req.query.enabled
             : (req.body && (req.body.tts !== undefined ? req.body.tts
             : (req.body.enabled !== undefined ? req.body.enabled : req.body.ttsEnabled))));
+  const pauseSpotify = req.query.pause_spotify !== undefined ? req.query.pause_spotify
+            : (req.body && req.body.pauseSpotifyOnSpeech !== undefined ? req.body.pauseSpotifyOnSpeech : undefined);
   const updates = {};
   if (voice) {
     updates.ttsVoice = String(voice).trim().toLowerCase();
@@ -1249,11 +1535,21 @@ router.all('/voice-settings', (req, res) => {
   if (tts !== undefined) {
     updates.ttsEnabled = (tts === '1' || tts === 1 || tts === true || tts === 'true');
   }
+  if (pauseSpotify !== undefined) {
+    updates.pauseSpotifyOnSpeech = (pauseSpotify === '1' || pauseSpotify === 1 || pauseSpotify === true || pauseSpotify === 'true');
+    audioHub.setPauseSpotifyOnSpeech(updates.pauseSpotifyOnSpeech);
+  }
   const saved = store.save(updates);
   return sendPipeResponse(
     req,
     res,
-    formatPipeRow(['OK', 'VOICE_SETTINGS', saved.ttsVoice || 'alloy', saved.ttsEnabled ? '1' : '0']) + '\n'
+    formatPipeRow([
+      'OK',
+      'VOICE_SETTINGS',
+      saved.ttsVoice || 'alloy',
+      saved.ttsEnabled ? '1' : '0',
+      saved.pauseSpotifyOnSpeech ? '1' : '0',
+    ]) + '\n'
   );
 });
 
@@ -1510,12 +1806,14 @@ CRITICAL: NEVER use the word "ASCII" or "ASCII art" in your conversational text 
       chats: chats.slice(0, 60),
     });
 
+    let ttsModeFlag = '0';
     if (wantTts) {
       await audioHub.pauseSpotifyForVoice();
       try {
-        const u8 = await synthesizeSpeechToPcmU8(cleanReply, { hz: 22255, data });
+        const u8 = await synthesizeSpeechToPcmU8(cleanReply, { hz: 22255, data, isScifi: true, providerOverride: provider });
         if (u8 && u8.length > 0) {
-          audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
+          const streamed = audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
+          ttsModeFlag = streamed && streamed.mixedIntoSpotify ? '2' : '1';
         }
       } catch (ttsErr) {
         console.warn('[MacAI:SciFi:TTS] Speech synthesis error:', ttsErr.message);
@@ -1523,6 +1821,7 @@ CRITICAL: NEVER use the word "ASCII" or "ASCII art" in your conversational text 
     }
 
     const pipeCols = ['REPLY', chat.id, chat.title, provider, thinking, cleanReply];
+    if (ttsModeFlag !== '0') pipeCols.push(ttsModeFlag);
     return sendPipeResponse(req, res, formatMacAIPipeRow(pipeCols) + '\n');
   } catch (err) {
     if (timeoutId) clearTimeout(timeoutId);
@@ -1740,12 +2039,14 @@ router.all('/ask', async (req, res) => {
       lastError: null,
     });
 
+    let ttsModeFlag = '0';
     if (wantTts && !imageInfo) {
       await audioHub.pauseSpotifyForVoice();
       try {
-        const u8 = await synthesizeSpeechToPcmU8(replyText, { hz: 22255, data });
+        const u8 = await synthesizeSpeechToPcmU8(replyText, { hz: 22255, data, isScifi: isScifiChat, providerOverride: provider });
         if (u8 && u8.length > 0) {
-          audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
+          const streamed = audioHub.streamPcmU8ToTcpClients(u8, { hz: 22255 });
+          ttsModeFlag = streamed && streamed.mixedIntoSpotify ? '2' : '1';
         }
       } catch (ttsErr) {
         console.warn('[MacAI:TTS] Speech synthesis error:', ttsErr.message);
@@ -1755,6 +2056,8 @@ router.all('/ask', async (req, res) => {
     const pipeCols = ['REPLY', chat.id, chat.title || prompt, provider, thinking, replyText];
     if (imageInfo) {
       pipeCols.push(imageInfo.id, String(imageInfo.width), String(imageInfo.height), String(imageInfo.rowBytes));
+    } else if (ttsModeFlag !== '0') {
+      pipeCols.push(ttsModeFlag);
     }
     const pipe = formatMacAIPipeRow(pipeCols) + '\n';
     if (req.query.format === 'json') {
@@ -1925,7 +2228,7 @@ router.all(
       store.save({ chats: chats.slice(0, 60) });
 
       let durationMs = 0;
-      const u8Speech = await synthesizeSpeechToPcmU8(replyText, { hz: 22255, data });
+      const u8Speech = await synthesizeSpeechToPcmU8(replyText, { hz: 22255, data, isScifi: Boolean(chat.isScifi) });
       if (u8Speech && u8Speech.length > 0) {
         const streamed = audioHub.streamPcmU8ToTcpClients(u8Speech, { hz: 22255 });
         durationMs = streamed.durationMs;
@@ -1945,14 +2248,20 @@ router.all('/tts', async (req, res) => {
     await audioHub.pauseSpotifyForVoice();
     const data = store.load();
     let text = String(req.query.text || (req.body && req.body.text) || '').trim();
+    let isScifi = req.query.scifi === '1' || req.query.scifi === 'true';
+    const voiceOverride = req.query.voice || (req.body && req.body.voice) || null;
     if (!text && req.query.chat_id) {
       const chat = (data.chats || []).find((c) => c.id === req.query.chat_id);
-      if (chat && Array.isArray(chat.messages)) {
-        const lastAssistant = [...chat.messages].reverse().find((m) => m.role === 'assistant');
-        if (lastAssistant) text = lastAssistant.content;
+      if (chat) {
+        if (chat.isScifi) isScifi = true;
+        if (Array.isArray(chat.messages)) {
+          const lastAssistant = [...chat.messages].reverse().find((m) => m.role === 'assistant');
+          if (lastAssistant) text = lastAssistant.content;
+        }
       }
     }
     if (!text && Array.isArray(data.chats) && data.chats[0] && Array.isArray(data.chats[0].messages)) {
+      if (data.chats[0].isScifi) isScifi = true;
       const lastAssistant = [...data.chats[0].messages].reverse().find((m) => m.role === 'assistant');
       if (lastAssistant) text = lastAssistant.content;
     }
@@ -1960,7 +2269,7 @@ router.all('/tts', async (req, res) => {
       return sendPipeResponse(req, res, 'ERR|400|No text to speak\n');
     }
 
-    const u8Speech = await synthesizeSpeechToPcmU8(text, { hz: 22255, data });
+    const u8Speech = await synthesizeSpeechToPcmU8(text, { hz: 22255, data, isScifi, voiceOverride });
     const streamed = audioHub.streamPcmU8ToTcpClients(u8Speech, { hz: 22255 });
     return sendPipeResponse(req, res, formatPipeRow(['OK', 'TTS', streamed.durationMs]) + '\n');
   } catch (err) {
@@ -1990,6 +2299,7 @@ function getStatus() {
     discoveredModels: data.discoveredModels || { gemini: [], chatgpt: [], claude: [], groq: [] },
     ttsEnabled: data.ttsEnabled !== undefined ? data.ttsEnabled : true,
     ttsVoice: data.ttsVoice || 'alloy',
+    pauseSpotifyOnSpeech: Boolean(data.pauseSpotifyOnSpeech),
     enabledProviders: enabled,
     providers: {
       gemini: {

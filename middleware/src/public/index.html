@@ -1516,11 +1516,17 @@
                 <option value="onyx">Onyx (Deep &amp; Authoritative)</option>
                 <option value="fable">Fable (Expressive &amp; British)</option>
                 <option value="shimmer">Shimmer (Soft &amp; Clear)</option>
-                <option value="retro">Retro Synth (Robotic 1984 MacinTalk / espeak)</option>
+                <option value="retro">Retro Synth (Robotic 1984 MacinTalk / eSpeak NG)</option>
+                <option value="hal">HAL 9000 (Ominous Calm Mainframe — eSpeak NG + DSP)</option>
+                <option value="glados">GLaDOS (Aperture AI — SSML Pitch Walk + eSpeak NG + SoX)</option>
               </select>
             </div>
+            <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer; margin-top:2px;">
+              <input type="checkbox" id="macai-pause-spotify-checkbox" onchange="savePauseSpotifyOnSpeech(this.checked)" style="width:15px; height:15px; accent-color:#000;" />
+              <span><strong>Pause SpotiMac on speech</strong> (pauses &amp; resumes Spotify instead of real-time audio ducking/mixing)</span>
+            </label>
             <div style="font-size:12px; color:#555; line-height:1.4;">
-              Natural voices use OpenAI when configured; otherwise, the server automatically uses local retro speech synthesis. Voice input (STT) uses Groq Whisper, OpenAI Whisper, or Gemini Multimodal Audio based on your active model with automatic fallback.
+              When <strong>ChatGPT (OpenAI)</strong> is active, natural voices use OpenAI TTS. For non-voice providers (Gemini, Claude, Groq), open-source <strong>eSpeak NG + FFmpeg/SoX DSP</strong> formant voices are used locally. Synthetic computer voices (<strong>HAL 9000</strong>, <strong>GLaDOS</strong>, <strong>Retro Synth</strong>) always use custom local synthesis (and Sci-Fi Mode defaults to <strong>HAL 9000</strong>).
             </div>
           </div>
         </div>
@@ -1834,6 +1840,19 @@
       }
     }
 
+    async function savePauseSpotifyOnSpeech(pauseSpotifyOnSpeech) {
+      try {
+        await fetch('/api/macai/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pauseSpotifyOnSpeech: Boolean(pauseSpotifyOnSpeech) }),
+        });
+        await pollStatus();
+      } catch (err) {
+        console.warn('Failed to save pauseSpotifyOnSpeech:', err);
+      }
+    }
+
     async function disconnectMacAIProvider(provider) {
       await fetch('/api/macai/config', {
         method: 'POST',
@@ -1999,7 +2018,40 @@
 
       const ttsSel = document.getElementById('macai-tts-voice-select');
       if (ttsSel && !ttsSel.matches(':focus')) {
+        const isChatGptVoice = (macai.activeProvider === 'chatgpt') && Boolean(providers.chatgpt && providers.chatgpt.enabled);
+        const voiceLabels = isChatGptVoice
+          ? {
+              alloy: 'OpenAI: Alloy (Neutral & Balanced)',
+              nova: 'OpenAI: Nova (Bright & Natural)',
+              echo: 'OpenAI: Echo (Warm & Smooth)',
+              onyx: 'OpenAI: Onyx (Deep & Authoritative)',
+              fable: 'OpenAI: Fable (Expressive & British)',
+              shimmer: 'OpenAI: Shimmer (Soft & Clear)',
+              retro: 'Synth: Retro 1984 (MacinTalk / eSpeak NG)',
+              hal: 'Synth: HAL 9000 (Ominous Calm Mainframe)',
+              glados: 'Synth: GLaDOS (Aperture AI — SSML + SoX)',
+            }
+          : {
+              alloy: 'eSpeak NG: US Neutral (Alloy Profile)',
+              nova: 'eSpeak NG: US Female (Nova Profile)',
+              echo: 'eSpeak NG: US Warm Male (Echo Profile)',
+              onyx: 'eSpeak NG: Deep Baritone (Onyx Profile)',
+              fable: 'eSpeak NG: British RP (Fable Profile)',
+              shimmer: 'eSpeak NG: Soft Female (Shimmer Profile)',
+              retro: 'Synth: Retro 1984 (MacinTalk / eSpeak NG)',
+              hal: 'Synth: HAL 9000 (Ominous Calm Mainframe)',
+              glados: 'Synth: GLaDOS (Aperture AI — SSML + SoX)',
+            };
+        for (const opt of ttsSel.options) {
+          if (voiceLabels[opt.value]) {
+            opt.textContent = voiceLabels[opt.value];
+          }
+        }
         ttsSel.value = macai.ttsVoice || 'alloy';
+      }
+      const pauseSpotifyChk = document.getElementById('macai-pause-spotify-checkbox');
+      if (pauseSpotifyChk && !pauseSpotifyChk.matches(':focus')) {
+        pauseSpotifyChk.checked = Boolean(macai.pauseSpotifyOnSpeech);
       }
 
       document.getElementById('macai-footer-label').textContent =

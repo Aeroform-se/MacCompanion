@@ -194,11 +194,9 @@ resource 'MBAR' (128) {
 
 resource 'MENU' (128, "Apple") {
     128, textMenuProc,
-    0x7FFFFFFD,
+    allEnabled,
     enabled, apple,
     {
-        "About SpotiMac...", noIcon, noKey, noMark, plain,
-        "-", noIcon, noKey, noMark, plain
     }
 };
 
@@ -207,6 +205,8 @@ resource 'MENU' (129, "File") {
     allEnabled,
     enabled, "File",
     {
+        "About SpotiMac...", noIcon, noKey, noMark, plain,
+        "-", noIcon, noKey, noMark, plain,
         "Server Connection...", noIcon, "R", noMark, plain,
         "Find / Search...", noIcon, "F", noMark, plain,
         "-", noIcon, noKey, noMark, plain,

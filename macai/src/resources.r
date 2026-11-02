@@ -240,6 +240,7 @@ resource 'MENU' (131, "Speech") {
     enabled, "Speech",
     {
         "Read Replies Aloud", noIcon, "T", noMark, plain,
+        "Pause SpotiMac on Speech", noIcon, noKey, noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Voice: Alloy (Neutral)", noIcon, noKey, noMark, plain,
         "Voice: Echo (Warm)", noIcon, noKey, noMark, plain,
@@ -247,7 +248,9 @@ resource 'MENU' (131, "Speech") {
         "Voice: Onyx (Deep)", noIcon, noKey, noMark, plain,
         "Voice: Nova (Bright)", noIcon, noKey, noMark, plain,
         "Voice: Shimmer (Soft)", noIcon, noKey, noMark, plain,
-        "Voice: Retro Synth (Robotic)", noIcon, noKey, noMark, plain
+        "Voice: Retro Synth (Robotic)", noIcon, noKey, noMark, plain,
+        "Voice: HAL 9000 (Mainframe)", noIcon, noKey, noMark, plain,
+        "Voice: GLaDOS (Synthetic AI)", noIcon, noKey, noMark, plain
     }
 };
 

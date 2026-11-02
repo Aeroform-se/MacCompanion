@@ -572,10 +572,22 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
 
     AudioStreamInit();
     if (gAudioRunning) {
-        if (sampleRateHz > 0 && sampleRateHz != gAudioSampleRateHz) {
-            gAudioSampleRateHz = sampleRateHz;
+        if (gAudioStream != 0) {
+            memset(&pb, 0, sizeof(pb));
+            pb.ioCRefNum = gMacTCPRef;
+            pb.csCode    = TCPStatus;
+            pb.tcpStream = gAudioStream;
+            if (PBControlSync((ParmBlkPtr)&pb) != noErr || pb.csParam.status.connectionState != 8) {
+                AudioStreamStop();
+            } else {
+                if (sampleRateHz > 0 && sampleRateHz != gAudioSampleRateHz) {
+                    gAudioSampleRateHz = sampleRateHz;
+                }
+                return true;
+            }
+        } else {
+            AudioStreamStop();
         }
-        return true;
     }
 
     if (!NetInit() || gServerIP == 0) return false;
@@ -809,6 +821,10 @@ void AudioStreamPump(void)
 
         unread = pb.csParam.status.amtUnreadData;
         if (unread == 0) {
+            if (pb.csParam.status.connectionState != 8 && !gBufferBusy[0] && !gBufferBusy[1]) {
+                AudioStreamStop();
+                return;
+            }
             gLastEmptyStatusTick = nowTicks;
             break;
         }

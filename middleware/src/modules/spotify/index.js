@@ -52,18 +52,35 @@ const audioEngine = new AudioStreamEngine({
   getFetchImpl: () => getFetchImpl(),
 });
 
-audioHub.registerSpotifyEngine(audioEngine, async () => {
-  try {
-    const raw = await callSpotify('/me/player');
-    if (raw && raw.is_playing) {
-      optimisticState.isPlaying = false;
+audioHub.registerSpotifyEngine(
+  audioEngine,
+  async () => {
+    try {
+      const raw = await callSpotify('/me/player');
+      if ((raw && raw.is_playing) || optimisticState.isPlaying === true) {
+        optimisticState.isPlaying = false;
+        optimisticState.isPlayingTs = Date.now();
+        audioEngine.onPause();
+        await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+        audioEngine.onPause();
+        nowPlayingCache.fetchedAt = 0;
+        return true;
+      }
+    } catch {}
+    return false;
+  },
+  async () => {
+    try {
+      optimisticState.isPlaying = true;
       optimisticState.isPlayingTs = Date.now();
-      audioEngine.onPause();
-      await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+      audioEngine.onResume();
+      await callPlayerCommand('/me/player/play', { method: 'PUT' });
       nowPlayingCache.fetchedAt = 0;
-    }
-  } catch {}
-});
+      return true;
+    } catch {}
+    return false;
+  }
+);
 
 // Allow injecting custom fetch for unit tests
 let customFetch = null;
@@ -1169,6 +1186,7 @@ router.all('/play', async (req, res) => {
 
     optimisticState.isPlaying = true;
     optimisticState.isPlayingTs = Date.now();
+    audioHub.onSpotifyResume();
     try {
       await callPlayerCommand('/me/player/play', {
         method: 'PUT',
@@ -1259,6 +1277,7 @@ router.all('/toggle-play', async (req, res) => {
       }
       optimisticState.isPlaying = true;
       optimisticState.isPlayingTs = now;
+      audioHub.onSpotifyResume();
       await callPlayerCommand('/me/player/play', { method: 'PUT' });
       nowPlayingCache.fetchedAt = 0;
       return sendPipeResponse(req, res, 'OK|PLAY\n');
@@ -1274,6 +1293,7 @@ router.all('/next', async (req, res) => {
     optimisticState.isPlayingTs = Date.now();
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
+    audioHub.onSpotifyResume();
     await callPlayerCommand('/me/player/next', { method: 'POST' });
     nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
@@ -1293,6 +1313,7 @@ router.all('/previous', async (req, res) => {
     optimisticState.isPlayingTs = Date.now();
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
+    audioHub.onSpotifyResume();
     await callPlayerCommand('/me/player/previous', { method: 'POST' });
     nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
@@ -1873,9 +1894,14 @@ router.all('/transfer', async (req, res) => {
         chosenMac = audioEngine.getActiveMacClient();
       }
       await audioEngine.ensureStarted();
-      const data = await callSpotify('/me/player/devices');
-      const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
-      const found = devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k'));
+      let found = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const data = await callSpotify('/me/player/devices');
+        const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
+        found = devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k'));
+        if (found || isStartup || customFetch) break;
+        await new Promise((r) => setTimeout(r, 600));
+      }
       if (!found) {
         if (isStartup && chosenMac) {
           deviceName = chosenMac.name;
@@ -1943,6 +1969,11 @@ router.all('/transfer', async (req, res) => {
       throw err;
     }
 
+    if (!isStartup) {
+      audioHub.onSpotifyResume();
+      optimisticState.isPlaying = true;
+      optimisticState.isPlayingTs = Date.now();
+    }
     await callSpotify('/me/player', {
       method: 'PUT',
       body: isStartup ? { device_ids: [deviceId] } : { device_ids: [deviceId], play: true },

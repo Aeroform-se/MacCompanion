@@ -63,13 +63,17 @@
 
 #define mSpeech             131
 #define iSpeechReadAloud    1
-#define iSpeechVoiceAlloy   3
-#define iSpeechVoiceEcho    4
-#define iSpeechVoiceFable   5
-#define iSpeechVoiceOnyx    6
-#define iSpeechVoiceNova    7
-#define iSpeechVoiceShimmer 8
-#define iSpeechVoiceRetro   9
+#define iSpeechPauseSpotify 2
+#define iSpeechVoiceAlloy   4
+#define iSpeechVoiceEcho    5
+#define iSpeechVoiceFable   6
+#define iSpeechVoiceOnyx    7
+#define iSpeechVoiceNova    8
+#define iSpeechVoiceShimmer 9
+#define iSpeechVoiceRetro   10
+#define iSpeechVoiceHal     11
+#define iSpeechVoiceGlados  12
+#define NUM_TTS_VOICES      9
 
 #define mView               132
 #define iScifiMode          1
@@ -185,7 +189,7 @@ static char           gActiveProvider[12] = "gemini";
 static char           gActiveTier[12]     = "Balanced";
 static const char    *gThinkingLevels[3]  = { "Fast", "Balanced", "Thinking" };
 static short          gActiveThinkingIdx  = 1; /* Default: Balanced */
-static const char    *gTtsVoiceNames[7]   = { "alloy", "echo", "fable", "onyx", "nova", "shimmer", "retro" };
+static const char    *gTtsVoiceNames[NUM_TTS_VOICES] = { "alloy", "echo", "fable", "onyx", "nova", "shimmer", "retro", "hal", "glados" };
 static short          gActiveVoiceIdx     = 0; /* Default: alloy (idx 0) */
 static char           gWaitStatusText[96] = "Thinking...";
 static unsigned long  gWaitStartTick      = 0;
@@ -193,6 +197,8 @@ static Boolean        gUserCancelledWait  = false;
 static Boolean        gProviderMenuOpen   = false;
 static Boolean        gTierMenuOpen       = false;
 static Boolean        gReadRepliesTTS     = true;
+static Boolean        gPauseSpotifyOnSpeech = false;
+static short          gSavedPreScifiVoiceIdx = -1;
 
 /* Sidebar & Chat History State */
 static Boolean        gSidebarCollapsed = false;
@@ -395,6 +401,7 @@ static void SaveMacAIPrefs(void)
     }
     prefs.activeVoiceIdx = gActiveVoiceIdx;
     prefs.readRepliesTTS = gReadRepliesTTS ? 1 : 0;
+    prefs.reserved[0] = gPauseSpotifyOnSpeech ? 1 : 0;
 
     if (GetPrefsFileSpec(&spec, false)) {
         FSpCreate(&spec, 'MCAI', 'pref', smSystemScript);
@@ -460,12 +467,15 @@ static Boolean LoadMacAIPrefs(ip_addr *outIP)
                                 gProviders[k].activeModelIdx = prefs.activeModelIdx[k];
                             }
                         }
-                        if (prefs.activeVoiceIdx >= 0 && prefs.activeVoiceIdx < 7) {
+                        if (prefs.activeVoiceIdx >= 0 && prefs.activeVoiceIdx < NUM_TTS_VOICES) {
                             gActiveVoiceIdx = prefs.activeVoiceIdx;
                         }
                         if (count >= 34 && prefs.readRepliesTTS >= 0 && prefs.readRepliesTTS <= 1) {
                             gReadRepliesTTS = (prefs.readRepliesTTS == 1);
                             gUserHasSavedPrefs = true;
+                        }
+                        if (count >= 35 && (prefs.reserved[0] == 0 || prefs.reserved[0] == 1)) {
+                            gPauseSpotifyOnSpeech = (prefs.reserved[0] == 1);
                         }
                     }
                     return true;
@@ -2217,9 +2227,38 @@ static void SyncSpeechMenuState(void)
 {
     MenuHandle speechMenu = GetMenuHandle(mSpeech);
     short v;
+    Boolean isOpenAIVoice = (strcmp(gActiveProvider, "chatgpt") == 0 && IsProviderEnabled("chatgpt"));
+    static const char *kOpenAIVoiceLabels[NUM_TTS_VOICES] = {
+        "OpenAI: Alloy (Neutral)",
+        "OpenAI: Echo (Warm)",
+        "OpenAI: Fable (Expressive)",
+        "OpenAI: Onyx (Deep)",
+        "OpenAI: Nova (Bright)",
+        "OpenAI: Shimmer (Soft)",
+        "Synth: Retro 1984 (Robotic)",
+        "Synth: HAL 9000 (Mainframe)",
+        "Synth: GLaDOS (Aperture AI)"
+    };
+    static const char *kLocalVoiceLabels[NUM_TTS_VOICES] = {
+        "eSpeak: US Neutral (Alloy)",
+        "eSpeak: US Male (Echo)",
+        "eSpeak: British RP (Fable)",
+        "eSpeak: Deep Baritone (Onyx)",
+        "eSpeak: US Female (Nova)",
+        "eSpeak: Soft Female (Shimmer)",
+        "Synth: Retro 1984 (Robotic)",
+        "Synth: HAL 9000 (Mainframe)",
+        "Synth: GLaDOS (Aperture AI)"
+    };
+
     if (!speechMenu) return;
     CheckItem(speechMenu, iSpeechReadAloud, gReadRepliesTTS);
-    for (v = 0; v < 7; v++) {
+    CheckItem(speechMenu, iSpeechPauseSpotify, gPauseSpotifyOnSpeech);
+    for (v = 0; v < NUM_TTS_VOICES; v++) {
+        Str255 pLabel;
+        const char *label = isOpenAIVoice ? kOpenAIVoiceLabels[v] : kLocalVoiceLabels[v];
+        c2pstrcpy(pLabel, label);
+        SetMenuItemText(speechMenu, iSpeechVoiceAlloy + v, pLabel);
         CheckItem(speechMenu, iSpeechVoiceAlloy + v, (gActiveVoiceIdx == v));
     }
 }
@@ -2227,7 +2266,7 @@ static void SyncSpeechMenuState(void)
 static void SelectVoice(short vIdx)
 {
     char url[64];
-    if (vIdx < 0 || vIdx >= 7) return;
+    if (vIdx < 0 || vIdx >= NUM_TTS_VOICES) return;
     gActiveVoiceIdx = vIdx;
     SyncSpeechMenuState();
     SaveMacAIPrefs();
@@ -2739,9 +2778,17 @@ static void FetchProvidersAndChats(void)
                     char *p3;
                     *p2++ = '\0';
                     p3 = strchr(p2, '|');
-                    if (p3) *p3 = '\0';
+                    if (p3) {
+                        char *p4;
+                        *p3++ = '\0';
+                        p4 = strchr(p3, '|');
+                        if (p4) {
+                            *p4++ = '\0';
+                            gPauseSpotifyOnSpeech = (p4[0] == '1');
+                        }
+                    }
                     gReadRepliesTTS = (p1[0] == '1');
-                    for (v = 0; v < 7; v++) {
+                    for (v = 0; v < NUM_TTS_VOICES; v++) {
                         if (strcmp(gTtsVoiceNames[v], p2) == 0) {
                             gActiveVoiceIdx = v;
                             break;
@@ -3123,10 +3170,6 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
     gWaitingForAI = true;
     RenderWindow();
 
-    if (gReadRepliesTTS) {
-        AudioStreamStart(22255);
-    }
-
     UrlEncode(promptText, encPrompt, sizeof(encPrompt));
     UrlEncode(modelId, encModel, sizeof(encModel));
     sprintf(path, "/api/macai/ask?chat_id=%s&provider=%s&model=%s&thinking=%s&tts=%d&retry=%d&q=%s",
@@ -3189,7 +3232,11 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
                     AppendMessage(false, replyCopy);
                 }
             } else {
+                Boolean mixedIntoSpotify = (numFields >= 6 && fields[5] && fields[5][0] == '2');
                 AppendMessage(false, fields[4]);
+                if (gReadRepliesTTS && !mixedIntoSpotify) {
+                    AudioStreamStart(22255);
+                }
             }
             RefreshChatList();
         }
@@ -3229,15 +3276,14 @@ static void ToggleVoiceRecording(void)
             gWaitingForAI = true;
             RenderWindow();
 
-            /* Open TCP 6802 audio stream so middleware TTS plays back immediately */
-            AudioStreamStart(22255);
-
             sprintf(path, "/api/macai/voice?chat_id=%s&provider=%s&tier=%s&rate=%u&tts=1",
                     gActiveChatId, gActiveProvider, gActiveTier, rateHz);
             n = NetHttpPost(path, "application/octet-stream", pcmBuf, pcmLen, gNetBuf, NET_BUF_SIZE);
             gWaitingForAI = false;
 
             if (n > 0 && strncmp(gNetBuf, "VOICE_REPLY|", 12) == 0) {
+                /* Open TCP 6802 audio stream so middleware buffered TTS plays back immediately */
+                AudioStreamStart(22255);
                 /* VOICE_REPLY|<chatId>|<title>|<provider>|<tier>|<transcript>|<reply> */
                 char *p1 = gNetBuf + 12;
                 char *p2 = strchr(p1, '|');
@@ -4433,6 +4479,15 @@ static void HandleMenuChoice(long menuChoice)
                 NetHttpGet(url, gNetBuf, NET_BUF_SIZE);
                 break;
             }
+            case iSpeechPauseSpotify: {
+                char url[64];
+                gPauseSpotifyOnSpeech = !gPauseSpotifyOnSpeech;
+                SyncSpeechMenuState();
+                SaveMacAIPrefs();
+                sprintf(url, "/api/macai/voice-settings?pause_spotify=%d", gPauseSpotifyOnSpeech ? 1 : 0);
+                NetHttpGet(url, gNetBuf, NET_BUF_SIZE);
+                break;
+            }
             case iSpeechVoiceAlloy:
             case iSpeechVoiceEcho:
             case iSpeechVoiceFable:
@@ -4440,6 +4495,8 @@ static void HandleMenuChoice(long menuChoice)
             case iSpeechVoiceNova:
             case iSpeechVoiceShimmer:
             case iSpeechVoiceRetro:
+            case iSpeechVoiceHal:
+            case iSpeechVoiceGlados:
                 SelectVoice(itemID - iSpeechVoiceAlloy);
                 break;
         }
@@ -4480,7 +4537,7 @@ static void NetworkIdleProc(void)
         }
     }
 
-    if (GetNextEvent(mDownMask | keyDownMask | updateMask | activMask, &ev)) {
+    if (WaitNextEvent(mDownMask | keyDownMask | updateMask | activMask | osMask, &ev, 1, NULL)) {
         switch (ev.what) {
             case mouseDown: {
                 WindowPtr hitWin = NULL;
@@ -5037,10 +5094,6 @@ static void ScifiSendPrompt(const char *promptText)
     gScifiAwaitingReply = true;
     RenderScifiWindow();
 
-    if (gReadRepliesTTS) {
-        AudioStreamStart(22255);
-    }
-
     UrlEncode(promptText, encPrompt, sizeof(encPrompt));
     sprintf(url, "/api/macai/ask?chat_id=%s&q=%s&provider=%s&tier=%s&tts=%d",
             gActiveChatId, encPrompt, gActiveProvider, gActiveTier, gReadRepliesTTS ? 1 : 0);
@@ -5059,9 +5112,13 @@ static void ScifiSendPrompt(const char *promptText)
                         *pTier++ = '\0';
                         char *pReply = strchr(pTier, '|');
                         if (pReply) {
+                            Boolean mixedIntoSpotify = false;
                             *pReply++ = '\0';
                             char *pNextPipe = strchr(pReply, '|');
-                            if (pNextPipe) *pNextPipe = '\0';
+                            if (pNextPipe) {
+                                *pNextPipe++ = '\0';
+                                if (pNextPipe[0] == '2') mixedIntoSpotify = true;
+                            }
                             SafeCopyString(gActiveChatId, pId, sizeof(gActiveChatId));
                             {
                                 short c;
@@ -5073,6 +5130,9 @@ static void ScifiSendPrompt(const char *promptText)
                                 }
                             }
                             gScifiAwaitingReply = false;
+                            if (gReadRepliesTTS && !mixedIntoSpotify) {
+                                AudioStreamStart(22255);
+                            }
                             ScifiQueueTypewriter(pReply);
                             return;
                         }
@@ -5312,6 +5372,11 @@ static void EnterScifiMode(void)
 
     gScifiMode          = true;
     gActiveChatIsScifi  = true;
+    gSavedPreScifiVoiceIdx = gActiveVoiceIdx;
+    if (gActiveVoiceIdx != 6 && gActiveVoiceIdx != 7 && gActiveVoiceIdx != 8) {
+        gActiveVoiceIdx = 7; /* Default voice in Sci-Fi Mode: HAL 9000 (idx 7) */
+        SyncSpeechMenuState();
+    }
     gScifiLaunchTick    = TickCount();
     gScifiLastBlinkTick = TickCount();
     gScifiCursorVisible = true;
@@ -5344,10 +5409,6 @@ static void EnterScifiMode(void)
         RenderScifiWindow();
         gScifiAwaitingReply = true;
 
-        if (gReadRepliesTTS) {
-            AudioStreamStart(22255);
-        }
-
         {
             char url[256];
             sprintf(url, "/api/macai/scifi/start?provider=%s&tier=%s&tts=%d",
@@ -5367,9 +5428,13 @@ static void EnterScifiMode(void)
                                 *pTier++ = '\0';
                                 char *pReply = strchr(pTier, '|');
                                 if (pReply) {
+                                    Boolean mixedIntoSpotify = false;
                                     *pReply++ = '\0';
                                     char *pNextPipe = strchr(pReply, '|');
-                                    if (pNextPipe) *pNextPipe = '\0';
+                                    if (pNextPipe) {
+                                        *pNextPipe++ = '\0';
+                                        if (pNextPipe[0] == '2') mixedIntoSpotify = true;
+                                    }
                                     SafeCopyString(gActiveChatId, pId, sizeof(gActiveChatId));
                                     {
                                         short c;
@@ -5381,6 +5446,9 @@ static void EnterScifiMode(void)
                                         }
                                     }
                                     gScifiAwaitingReply = false;
+                                    if (gReadRepliesTTS && !mixedIntoSpotify) {
+                                        AudioStreamStart(22255);
+                                    }
                                     ScifiQueueTypewriter(pReply);
                                     return;
                                 }
@@ -5401,6 +5469,11 @@ static void ExitScifiMode(void)
 {
     if (!gScifiMode) return;
     gScifiMode = false;
+    if (gSavedPreScifiVoiceIdx >= 0 && gSavedPreScifiVoiceIdx < NUM_TTS_VOICES) {
+        gActiveVoiceIdx = gSavedPreScifiVoiceIdx;
+        gSavedPreScifiVoiceIdx = -1;
+        SyncSpeechMenuState();
+    }
     gScifiInputBuf[0] = '\0';
     gScifiInputLen = 0;
     gScifiCursorPos = 0;
