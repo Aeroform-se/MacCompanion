@@ -22,26 +22,27 @@ static void         (*gIdleCallback)(void) = NULL;
 static Ptr            gHttpTcpRcvBuf  = NULL;
 
 /* ============================================================================
- * Native 68k Audio Streaming State (Double-Buffered Sound Manager)
+ * Native 68k Audio Streaming State (Quad-Buffered Sound Manager)
  * ============================================================================ */
 
-#define AUDIO_TCP_RCV_SIZE  32768
+#define AUDIO_TCP_RCV_SIZE  8192
 #define AUDIO_CHUNK_SIZE    8192
-#define NUM_AUDIO_BUFFERS   2
+#define NUM_AUDIO_BUFFERS   4
 
 static StreamPtr      gAudioStream       = 0;
 static Ptr            gAudioTcpRcvBuf    = NULL;
 static Boolean        gAudioRunning      = false;
+static Boolean        gAudioInBackground = false;
 static unsigned short gAudioSampleRateHz = 22255;
 
 static SndChannelPtr  gSndChan           = NULL;
 static SndCallBackUPP gSndCallBackUPP    = NULL;
 static SoundHeader    gSndHeaders[NUM_AUDIO_BUFFERS];
-static Ptr            gPcmBuffers[NUM_AUDIO_BUFFERS]      = { NULL, NULL };
-static long           gPcmFilled[NUM_AUDIO_BUFFERS]       = { 0, 0 };
-static long           gBufferQueuedLen[NUM_AUDIO_BUFFERS] = { 0, 0 };
-static unsigned long  gBufferQueuedTick[NUM_AUDIO_BUFFERS]= { 0, 0 };
-static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0 };
+static Ptr            gPcmBuffers[NUM_AUDIO_BUFFERS]      = { NULL, NULL, NULL, NULL };
+static long           gPcmFilled[NUM_AUDIO_BUFFERS]       = { 0, 0, 0, 0 };
+static long           gBufferQueuedLen[NUM_AUDIO_BUFFERS] = { 0, 0, 0, 0 };
+static unsigned long  gBufferQueuedTick[NUM_AUDIO_BUFFERS]= { 0, 0, 0, 0 };
+static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0, 0, 0 };
 static short          gNextFillBuf       = 0;
 static Boolean        gPrebuffering      = true;
 static unsigned long  gLastEmptyStatusTick = 0;
@@ -715,9 +716,15 @@ Boolean AudioStreamIsRunning(void)
     return gAudioRunning;
 }
 
+void AudioSetBackgroundMode(Boolean inBackground)
+{
+    gAudioInBackground = inBackground;
+}
+
 Boolean AudioGetLiveSamples(unsigned char *outSamples, short count)
 {
     short playBuf = -1;
+    short i;
     long  bufLen;
     long  elapsedTicks;
     long  samplesPerTick;
@@ -725,13 +732,15 @@ Boolean AudioGetLiveSamples(unsigned char *outSamples, short count)
 
     if (!outSamples || count <= 0 || !gAudioRunning) return false;
 
-    if (gBufferBusy[0] && gBufferBusy[1]) {
-        playBuf = ((long)(gBufferQueuedTick[1] - gBufferQueuedTick[0]) >= 0) ? 0 : 1;
-    } else if (gBufferBusy[0]) {
-        playBuf = 0;
-    } else if (gBufferBusy[1]) {
-        playBuf = 1;
-    } else {
+    /* Find the earliest-queued busy Sound Manager buffer (the one currently playing) */
+    for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
+        if (gBufferBusy[i]) {
+            if (playBuf < 0 || (long)(gBufferQueuedTick[playBuf] - gBufferQueuedTick[i]) > 0) {
+                playBuf = i;
+            }
+        }
+    }
+    if (playBuf < 0) {
         return false;
     }
 
@@ -761,13 +770,21 @@ void AudioStreamPump(void)
 {
     TCPiopb pb;
     short attempts;
+    short i;
+    short busyCount = 0;
+    long  minQueueSize;
     unsigned long nowTicks;
 
     if (!gAudioRunning || gAudioStream == 0 || !gSndChan) return;
 
-    /* Fast path: if both double-buffers are still playing in the Sound Manager,
-     * return immediately without calling MacTCP! */
-    if (!gPrebuffering && gBufferBusy[0] && gBufferBusy[1]) {
+    for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
+        if (gBufferBusy[i]) {
+            busyCount++;
+        }
+    }
+
+    /* Fast path: if all 4 Sound Manager buffers are busy playing, return immediately */
+    if (!gPrebuffering && busyCount == NUM_AUDIO_BUFFERS) {
         return;
     }
 
@@ -776,20 +793,24 @@ void AudioStreamPump(void)
         return;
     }
 
-    /* Outside prebuffering, while the other buffer is still actively playing with plenty of
-     * cushion left, poll MacTCP at most once every 2 ticks (~33ms) so data arrives in larger
-     * ~1.2 KB chunks instead of 60 tiny ~370B reads per second! */
-    if (!gPrebuffering && (gBufferBusy[0] || gBufferBusy[1])) {
+    /* Only throttle MacTCP status polls to every 2 ticks when in foreground with >= 3 buffers queued */
+    if (!gPrebuffering && !gAudioInBackground && busyCount >= 3) {
         if (gLastAudioPumpTick != 0 && (nowTicks - gLastAudioPumpTick) < 2) {
             return;
         }
     }
     gLastAudioPumpTick = nowTicks;
 
-    if (!gBufferBusy[0] && !gBufferBusy[1] && gPcmFilled[0] == 0 && gPcmFilled[1] == 0) {
+    if (busyCount == 0 && gPcmFilled[0] == 0 && gPcmFilled[1] == 0 && gPcmFilled[2] == 0 && gPcmFilled[3] == 0) {
         gPrebuffering = true;
         gNextFillBuf  = 0;
     }
+
+    /* When SpotiMac is in the background (e.g. while MacAI is in the foreground),
+     * allow queueing larger chunks up to 8192 bytes per buffer (4 * 8192 = 32 KB = 1.47s
+     * of interrupt-driven Sound Manager audio cushion) so cooperative MultiFinder switches
+     * never underrun! */
+    minQueueSize = gAudioInBackground ? 6144 : 4096;
 
     for (attempts = 0; attempts < NUM_AUDIO_BUFFERS; attempts++) {
         short idx;
@@ -821,7 +842,7 @@ void AudioStreamPump(void)
 
         unread = pb.csParam.status.amtUnreadData;
         if (unread == 0) {
-            if (pb.csParam.status.connectionState != 8 && !gBufferBusy[0] && !gBufferBusy[1]) {
+            if (pb.csParam.status.connectionState != 8 && busyCount == 0) {
                 AudioStreamStop();
                 return;
             }
@@ -830,13 +851,9 @@ void AudioStreamPump(void)
         }
         gLastEmptyStatusTick = 0;
 
-        /* When not prebuffering and the other buffer is still playing with >6 ticks (~100ms) left,
-         * wait until at least 1024 bytes have accumulated in MacTCP before issuing TCPRcv. */
-        if (!gPrebuffering && unread < 1024) {
-            short otherIdx = 1 - idx;
-            if (gBufferBusy[otherIdx] && (nowTicks - gBufferQueuedTick[otherIdx]) < 5) {
-                break;
-            }
+        /* Only coalesce small reads (< 1024B) when in foreground and at least 2 buffers are already playing */
+        if (!gPrebuffering && !gAudioInBackground && busyCount >= 2 && unread < 1024) {
+            break;
         }
 
         needed = targetSize - gPcmFilled[idx];
@@ -863,15 +880,18 @@ void AudioStreamPump(void)
             if (gPcmFilled[0] >= 4096 && gPcmFilled[1] >= 2048) {
                 gPrebuffering = false;
                 QueueSoundBuffer(0);
+                busyCount++;
                 if (gPcmFilled[1] >= 4096) {
                     QueueSoundBuffer(1);
-                    gNextFillBuf = 0;
+                    busyCount++;
+                    gNextFillBuf = 2;
                 } else {
                     gNextFillBuf = 1;
                 }
             }
-        } else if (gPcmFilled[idx] >= 4096) {
+        } else if (gPcmFilled[idx] >= minQueueSize || (busyCount <= 1 && gPcmFilled[idx] >= 2048)) {
             QueueSoundBuffer(idx);
+            busyCount++;
             gNextFillBuf = (idx + 1) % NUM_AUDIO_BUFFERS;
         } else {
             break;

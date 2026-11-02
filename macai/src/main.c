@@ -3238,7 +3238,27 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
                     AudioStreamStart(22255);
                 }
             }
-            RefreshChatList();
+            /* Update existing chat title in-place; only fetch `/api/macai/chats` over HTTP
+             * if this is a brand-new chat not yet in `gChats`, avoiding a blocking HTTP
+             * round-trip right as TTS audio or ducked SpotiMac playback begins! */
+            {
+                Boolean foundInList = false;
+                short c;
+                for (c = 0; c < gChatCount; c++) {
+                    if (strcmp(gChats[c].id, gActiveChatId) == 0) {
+                        SafeCopyString(gChats[c].title, fields[1], sizeof(gChats[c].title));
+                        SafeCopyString(gChats[c].provider, gActiveProvider, sizeof(gChats[c].provider));
+                        SafeCopyString(gChats[c].tier, gActiveTier, sizeof(gChats[c].tier));
+                        SafeCopyString(gChats[c].age, "Just now", sizeof(gChats[c].age));
+                        gSelectedChatIdx = c;
+                        foundInList = true;
+                        break;
+                    }
+                }
+                if (!foundInList) {
+                    RefreshChatList();
+                }
+            }
         }
     } else if (n > 0 && strncmp(gNetBuf, "ERR|", 4) == 0) {
         char *msg = strchr(gNetBuf + 4, '|');
@@ -4537,7 +4557,7 @@ static void NetworkIdleProc(void)
         }
     }
 
-    if (WaitNextEvent(mDownMask | keyDownMask | updateMask | activMask | osMask, &ev, 1, NULL)) {
+    if (WaitNextEvent(everyEvent, &ev, 1, NULL)) {
         switch (ev.what) {
             case mouseDown: {
                 WindowPtr hitWin = NULL;
@@ -5042,10 +5062,11 @@ static void ScifiIdle(void)
 
     if (!gScifiMode || !gScifiWindow) return;
 
-    /* Typewriter speed: ~38 characters/sec (approx 1 char every 1.58 ticks) */
+    /* Typewriter speed: ~38 characters/sec; render at ~20 FPS (every 3 ticks) so background
+     * SpotiMac audio under System 7 MultiFinder gets plenty of 68k CPU time! */
     if (gScifiTypewriterPos < gScifiTypewriterLen) {
         unsigned long elapsed = now - gScifiLastTypeTick;
-        if (elapsed > 0) {
+        if (elapsed >= 3) {
             gScifiTypeAccum += elapsed * 38;
             gScifiLastTypeTick = now;
             if (gScifiTypeAccum >= 60) {
@@ -5613,15 +5634,19 @@ int main(void)
             }
         }
 
-        /* Mouse hover tracking over message bubbles & action icons */
+        /* Mouse hover tracking over message bubbles & action icons (only re-run hit-test when mouse moves) */
         if (!gScifiMode && gServerConnected && !gAwaitingLogin && !gSearchModalOpen && !gAboutModalOpen && !gTierMenuOpen && !gProviderMenuOpen && !Button()) {
+            static Point sLastHoverMouse = { -32000, -32000 };
             Point pt;
             GetMouse(&pt);
-            ActionIconType prevIcon = gHoverActionIcon;
-            short hov = HitTestMessageBubble(pt);
-            if (hov != gHoverBubbleIdx || prevIcon != gHoverActionIcon) {
-                gHoverBubbleIdx = hov;
-                RenderChatAreaOnly();
+            if (pt.h != sLastHoverMouse.h || pt.v != sLastHoverMouse.v) {
+                sLastHoverMouse = pt;
+                ActionIconType prevIcon = gHoverActionIcon;
+                short hov = HitTestMessageBubble(pt);
+                if (hov != gHoverBubbleIdx || prevIcon != gHoverActionIcon) {
+                    gHoverBubbleIdx = hov;
+                    RenderChatAreaOnly();
+                }
             }
         }
 

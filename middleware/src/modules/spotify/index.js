@@ -60,9 +60,9 @@ audioHub.registerSpotifyEngine(
       if ((raw && raw.is_playing) || optimisticState.isPlaying === true) {
         optimisticState.isPlaying = false;
         optimisticState.isPlayingTs = Date.now();
-        audioEngine.onPause();
+        audioEngine.onPause({ discardMs: 0 });
         await callPlayerCommand('/me/player/pause', { method: 'PUT' });
-        audioEngine.onPause();
+        audioEngine.onPause({ discardMs: 0 });
         nowPlayingCache.fetchedAt = 0;
         return true;
       }
@@ -419,6 +419,12 @@ async function checkIsTrackLiked(trackIdOrUri) {
     const now = Date.now();
     if (optimisticState.isPlaying !== null && (now - optimisticState.isPlayingTs) < OPTIMISTIC_TTL_MS) {
       np.isPlaying = optimisticState.isPlaying;
+    }
+    // If SpotiMac was temporarily paused for MacAI TTS speech ("Pause SpotiMac on Speech"),
+    // keep reporting `isPlaying = true` to 68k polls so SpotiMac keeps its TCP :6802 audio
+    // socket open and resumes playing within < 50ms when speech ends!
+    if (audioHub.wasSpotifyPausedForSpeech && audioHub.isVoiceGateBlockingSpotify()) {
+      np.isPlaying = true;
     }
     if (optimisticState.progressMs !== null && (now - optimisticState.progressTs) < OPTIMISTIC_PROGRESS_TTL_MS) {
       const sameTrack = !optimisticState.progressTrackId || !np.trackId || np.trackId === optimisticState.progressTrackId;

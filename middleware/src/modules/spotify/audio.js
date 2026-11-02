@@ -348,10 +348,10 @@ class RealTimePacer extends Transform {
       const durationMs = (slice.length / LIBRESPOT_BYTES_PER_SEC) * 1000;
       const now = performance.now();
 
-      // If starting fresh or resuming after a pause (> 500ms gap), allow a 300ms pre-fill burst
-      // so the 68k client's double-buffer fills immediately without initial underrun jitter
+      // If starting fresh or resuming after a pause (> 500ms gap), allow an 80ms pre-fill burst
+      // so the 68k client's double-buffer starts promptly without injecting extra pipe latency
       if (now - this.nextFrameTimeMs > 500) {
-        this.nextFrameTimeMs = now - 300;
+        this.nextFrameTimeMs = now - 80;
       }
 
       const delayMs = Math.max(0, this.nextFrameTimeMs - now);
@@ -420,6 +420,59 @@ class AudioStreamEngine extends EventEmitter {
     // Multi-Mac network speaker registry: Map<clientId, { id, ip, baseName, lastSeen }>
     this.macClients = new Map();
     this.activeMacClientId = null;
+
+    // Cache of Linux kernel TCP send buffer (`tx_queue` in `/proc/net/tcp`) per remotePort
+    this._procTcpCacheAt = 0;
+    this._procTcpTxByRemotePort = new Map();
+  }
+
+  /**
+   * Returns the total unacknowledged bytes sitting in the Linux kernel TCP send buffer
+   * (`tx_queue` from `/proc/net/tcp` + `/proc/net/tcp6`) plus Node's userspace `writableLength`
+   * for `sock`. By capping `tx_queue` at ~6 KB (~275ms of 22kHz 8-bit audio), we guarantee
+   * that even if the 68k Mac pauses or context-switches in MultiFinder, stale music NEVER
+   * piles up in kernel TCP buffers and Server-Side Audio Ducking is heard with near-zero delay!
+   */
+  getSocketQueuedBytes(sock) {
+    if (!sock || sock.destroyed) return 0;
+    const userspaceBytes = sock.writableLength || 0;
+    const remotePort = sock.remotePort;
+    if (!remotePort) return userspaceBytes;
+
+    const now = Date.now();
+    if (now - this._procTcpCacheAt > 120) {
+      this._procTcpCacheAt = now;
+      const map = new Map();
+      const parseProcFile = (filePath) => {
+        try {
+          if (!fs.existsSync(filePath)) return;
+          const text = fs.readFileSync(filePath, 'utf8');
+          const lines = text.split('\n');
+          for (let i = 1; i < lines.length; i++) {
+            const line = lines[i].trim();
+            if (!line) continue;
+            const parts = line.split(/\s+/);
+            if (parts.length < 5) continue;
+            // local_address = parts[1] (HEX_IP:HEX_PORT), rem_address = parts[2], tx_queue:rx_queue = parts[4]
+            const localPortHex = parts[1].split(':')[1];
+            if (localPortHex !== '1A92') continue; // 0x1A92 === 6802
+            const remPortHex = parts[2].split(':')[1];
+            const remPort = parseInt(remPortHex, 16);
+            const txHex = parts[4].split(':')[0];
+            const txBytes = parseInt(txHex, 16);
+            if (Number.isFinite(remPort) && Number.isFinite(txBytes)) {
+              map.set(remPort, txBytes);
+            }
+          }
+        } catch {}
+      };
+      parseProcFile('/proc/net/tcp');
+      parseProcFile('/proc/net/tcp6');
+      this._procTcpTxByRemotePort = map;
+    }
+
+    const kernelTxBytes = this._procTcpTxByRemotePort.get(remotePort) || 0;
+    return userspaceBytes + kernelTxBytes;
   }
 
   isActivelyStreamingMusic() {
@@ -594,16 +647,23 @@ class AudioStreamEngine extends EventEmitter {
         if (hasMatchingSocket && cleanIpAddress(sock.remoteAddress) !== targetIp) {
           continue;
         }
+        // Real-time TCP backpressure guard: if the 68k Mac is temporarily busy in a
+        // foreground app (e.g. MacAI rendering or HTTP polling) and > 6 KB (~275ms) of
+        // audio has accumulated in the kernel TCP send queue, drop this music frame rather
+        // than letting seconds of stale music pile up in SO_SNDBUF!
+        if (this.getSocketQueuedBytes(sock) > 6144) {
+          continue;
+        }
         sock._receivedSpotifyBytes = (sock._receivedSpotifyBytes || 0) + payload.length;
         sock.write(payload);
       }
     }
   }
 
-  onPause() {
+  onPause({ discardMs = 250 } = {}) {
     this.clearTcpPending();
     if (this.pacer && typeof this.pacer.flush === 'function') {
-      this.pacer.flush({ discardMs: 250 });
+      this.pacer.flush({ discardMs });
     }
   }
 
@@ -1044,6 +1104,9 @@ class AudioStreamEngine extends EventEmitter {
         audioHub.pendingTts.buffer &&
         audioHub.pendingTts.buffer.length > 0
       );
+      if (hasPendingStandaloneTts) {
+        socket._isTemporaryTtsSocket = true;
+      }
 
       // If no standalone TTS is pending and SpotiMac is ALREADY actively streaming ducked audio
       // to an existing socket from this IP, close any redundant second socket immediately so
@@ -1061,10 +1124,17 @@ class AudioStreamEngine extends EventEmitter {
         }
       }
 
-      // Enforce a single active TCP 6802 audio pipe per 68k Mac IP address
+      // Enforce a single active TCP 6802 audio pipe per role (music vs temporary TTS) per 68k Mac IP:
+      // NEVER close SpotiMac's active music socket when MacAI opens a temporary TTS socket during
+      // "Pause SpotiMac on Speech" — keeping SpotiMac's socket alive lets music resume in < 50ms
+      // instead of waiting 6 seconds for SpotiMac's next `/api/spotify/poll` cycle!
       if (remoteIp) {
         for (const existing of Array.from(this.tcpClients)) {
-          if (existing !== socket && cleanIpAddress(existing.remoteAddress) === remoteIp) {
+          if (
+            existing !== socket &&
+            cleanIpAddress(existing.remoteAddress) === remoteIp &&
+            Boolean(existing._isTemporaryTtsSocket) === Boolean(socket._isTemporaryTtsSocket)
+          ) {
             this.tcpClients.delete(existing);
             try {
               existing.end();

@@ -5750,7 +5750,7 @@ int main(void)
                      !gMiniPlayerMode && !gSearchViewOpen && !gForYouViewOpen &&
                      !gAboutModalOpen && !gSpeakerPopupOpen);
         if (gInBackground) {
-            sleepTicks = AudioStreamIsRunning() ? 2 : 15;
+            sleepTicks = AudioStreamIsRunning() ? 1 : 15;
         } else if (vizActive) {
             unsigned long elapsedViz = nowTicks - gLastVizTicks;
             sleepTicks = (elapsedViz >= 2) ? 0 : (2 - elapsedViz);
@@ -5807,6 +5807,7 @@ int main(void)
                 case osEvt:
                     if (((ev.message >> 24) & 0xFF) == suspendResumeMessage) {
                         gInBackground = ((ev.message & resumeFlag) == 0);
+                        AudioSetBackgroundMode(gInBackground);
                         gLastHoverMouse.h = -32000;
                         if (!gInBackground) {
                             /* Poll immediately when returning to foreground (e.g. after MacAI TTS paused playback) */
@@ -5863,22 +5864,32 @@ int main(void)
             if ((curMs / 1000L) != (gNowPlaying.progressMs / 1000L)) {
                 gNowPlaying.progressMs = curMs;
                 FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
-                if (!gSpeakerPopupOpen && !gAboutModalOpen) {
+                if (!gInBackground && !gSpeakerPopupOpen && !gAboutModalOpen) {
                     RenderTimelineOnly();
                 }
                 /* If a playing track reaches its end, trigger an immediate poll so the next track loads fast */
                 if (gNowPlaying.durationMs > 0 && curMs >= gNowPlaying.durationMs &&
                     (nowTicks - gLastPollTicks) >= 30) {
-                    gLastPollTicks = nowTicks - 240;
+                    gLastPollTicks = nowTicks - 900;
                 }
             }
         }
 
-        /* Poll /api/spotify/poll every ~3s (180 ticks) when playing, ~4s (240 ticks) when visualizer is active,
-         * or ~6s (360 ticks) when paused/idle; pause background polls while actively typing in the search bar. */
+        /* Poll /api/spotify/poll every ~3s (180 ticks) when playing in foreground, ~12s (720 ticks)
+         * when streaming in background so MultiFinder foreground apps (e.g. MacAI) aren't interrupted
+         * by frequent blocking HTTP polls, or ~2s (120 ticks) when paused with this Mac as speaker. */
         {
-            unsigned long pollIntervalTicks = !gNowPlaying.isPlaying ? 360UL :
-                ((gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen) ? 240UL : 180UL);
+            Boolean nearTrackEnd = (gNowPlaying.durationMs > 0 && gNowPlaying.progressMs >= (gNowPlaying.durationMs - 4000L));
+            unsigned long pollIntervalTicks;
+            if (!gNowPlaying.isPlaying) {
+                pollIntervalTicks = IsThisMacSelectedSpeaker() ? 120UL : 360UL;
+            } else if (gInBackground && !nearTrackEnd) {
+                pollIntervalTicks = 720UL;
+            } else if (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen) {
+                pollIntervalTicks = 240UL;
+            } else {
+                pollIntervalTicks = 180UL;
+            }
             Boolean activelyTypingSearch = (gSearchFocused && gLastKeyPressTicks != 0 && (nowTicks - gLastKeyPressTicks) < 150UL);
             if (NetHasServer() && !gAboutModalOpen && !activelyTypingSearch &&
                 (nowTicks - gLastPollTicks) >= pollIntervalTicks) {

@@ -127,7 +127,7 @@ class SharedAudioHub {
     this.ttsActiveUntil = Date.now() + 15000;
 
     if (this.spotifyEngine && typeof this.spotifyEngine.onPause === 'function') {
-      this.spotifyEngine.onPause();
+      this.spotifyEngine.onPause({ discardMs: 0 });
     }
 
     if (typeof this.pauseSpotifyFn === 'function') {
@@ -140,7 +140,7 @@ class SharedAudioHub {
     }
 
     if (this.spotifyEngine && typeof this.spotifyEngine.onPause === 'function') {
-      this.spotifyEngine.onPause();
+      this.spotifyEngine.onPause({ discardMs: 0 });
     }
   }
 
@@ -229,6 +229,9 @@ class SharedAudioHub {
       this.spotifyEngine.isActivelyStreamingMusic()
     ) {
       this.stopTtsStream();
+      if (typeof this.spotifyEngine.clearTcpPending === 'function') {
+        this.spotifyEngine.clearTcpPending();
+      }
       this.duckQueue = u8Buffer;
       this.duckOffset = 0;
       console.log(`[AudioHub] Mixing ${u8Buffer.length} TTS bytes (${durationMs}ms) into live SpotiMac stream with audio ducking`);
@@ -242,7 +245,7 @@ class SharedAudioHub {
 
     if (this.pauseSpotifyOnSpeech || this.wasSpotifyPausedForSpeech) {
       this.voiceGateActive = true;
-      this.ttsActiveUntil = Date.now() + durationMs + 800;
+      this.ttsActiveUntil = Date.now() + durationMs + 600;
     }
 
     // Choose target socket(s): if targetSocket is provided (MacAI just connected), stream to it;
@@ -274,8 +277,34 @@ class SharedAudioHub {
       return { streamedBytes: u8Buffer.length, durationMs, mixedIntoSpotify: false };
     }
 
-    const frameBytes = Math.max(512, Math.round(hz * 0.08)); // 80ms coalesced TCP frames (~1780 bytes @ 22k)
+    // Pre-burst the first 4096 bytes (~184ms) immediately so MacAI's double-buffer starts
+    // playing with zero prebuffer latency, then pace remaining frames at ~90ms intervals.
+    const initialBurstBytes = Math.min(4096, u8Buffer.length);
+    const frameBytes = Math.max(512, Math.round(hz * 0.09)); // ~2000 bytes @ 22k (90ms)
     let offset = 0;
+
+    // If SpotiMac was paused for speech, fire `resumeSpotifyFn()` (`PUT /me/player/play`)
+    // ~350ms before the TTS utterance finishes draining on the 68k Mac so Spotify's cloud
+    // API latency (~350-450ms) is hidden and music resumes right as speech finishes!
+    let resumeTriggered = false;
+    const triggerSpotifyResume = () => {
+      if (resumeTriggered) return;
+      resumeTriggered = true;
+      if (this.wasSpotifyPausedForSpeech && typeof this.resumeSpotifyFn === 'function') {
+        this.wasSpotifyPausedForSpeech = false;
+        Promise.resolve(this.resumeSpotifyFn()).catch(() => {});
+      }
+    };
+
+    if (this.wasSpotifyPausedForSpeech && durationMs > 450) {
+      const earlyResumeDelayMs = Math.max(80, durationMs - 350);
+      const earlyTimer = setTimeout(() => {
+        if (this.wasSpotifyPausedForSpeech) {
+          triggerSpotifyResume();
+        }
+      }, earlyResumeDelayMs);
+      if (typeof earlyTimer.unref === 'function') earlyTimer.unref();
+    }
 
     const finishTtsHandover = () => {
       this.activeTtsTimer = null;
@@ -294,21 +323,16 @@ class SharedAudioHub {
                 sock.end();
                 const destroyTimer = setTimeout(() => {
                   try { sock.destroy(); } catch {}
-                }, 250);
+                }, 150);
                 if (typeof destroyTimer.unref === 'function') destroyTimer.unref();
               } catch {}
             }
           }
         }
 
-        // If SpotiMac was paused because "Pause SpotiMac on Speech" is enabled, automatically resume it!
-        if (this.wasSpotifyPausedForSpeech && typeof this.resumeSpotifyFn === 'function') {
-          this.wasSpotifyPausedForSpeech = false;
-          setTimeout(() => {
-            Promise.resolve(this.resumeSpotifyFn()).catch(() => {});
-          }, 250);
-        }
-      }, 350);
+        // Ensure Spotify resumes if it wasn't already triggered by the early resume timer
+        triggerSpotifyResume();
+      }, 180);
       if (typeof this.ttsDrainTimer.unref === 'function') this.ttsDrainTimer.unref();
     };
 
@@ -317,7 +341,8 @@ class SharedAudioHub {
         finishTtsHandover();
         return;
       }
-      const end = Math.min(offset + frameBytes, u8Buffer.length);
+      const step = offset === 0 ? initialBurstBytes : frameBytes;
+      const end = Math.min(offset + step, u8Buffer.length);
       const chunk = u8Buffer.subarray(offset, end);
       offset = end;
 
@@ -329,7 +354,7 @@ class SharedAudioHub {
       }
 
       if (offset < u8Buffer.length) {
-        this.activeTtsTimer = setTimeout(pump, 76);
+        this.activeTtsTimer = setTimeout(pump, 85);
       } else {
         finishTtsHandover();
       }
