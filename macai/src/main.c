@@ -5475,6 +5475,9 @@ static void EnterScifiMode(void)
                                     gScifiAwaitingReply = false;
                                     if (gReadRepliesTTS && !mixedIntoSpotify) {
                                         AudioStreamStart(22255);
+                                    } else if (gReadRepliesTTS && mixedIntoSpotify) {
+                                        EventRecord yieldEv;
+                                        WaitNextEvent(everyEvent, &yieldEv, 2, NULL);
                                     }
                                     ScifiQueueTypewriter(pReply);
                                     return;

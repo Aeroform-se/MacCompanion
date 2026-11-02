@@ -352,6 +352,7 @@ class SharedAudioHub {
           if (!usingExistingMusicSocket) {
             sock._isTemporaryTtsSocket = true;
           }
+          sock._bytesWritten = (sock._bytesWritten || 0) + chunk.length;
           sock.write(chunk);
         }
       }

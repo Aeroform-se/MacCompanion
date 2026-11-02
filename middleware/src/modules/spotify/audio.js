@@ -427,15 +427,20 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   /**
-   * Returns the total unacknowledged bytes sitting in the Linux kernel TCP send buffer
-   * (`tx_queue` from `/proc/net/tcp` + `/proc/net/tcp6`) plus Node's userspace `writableLength`
-   * for `sock`. By capping `tx_queue` at ~6 KB (~275ms of 22kHz 8-bit audio), we guarantee
-   * that even if the 68k Mac pauses or context-switches in MultiFinder, stale music NEVER
-   * piles up in kernel TCP buffers and Server-Side Audio Ducking is heard with near-zero delay!
+   * Returns the total unconsumed bytes currently in flight between the server and the 68k Mac:
+   * - If the 68k client is sending 4-byte cumulative read ACKs (`sock._hasClientAck`), returns
+   *   `Math.max(0, sock._bytesWritten - sock._bytesAcked) + sock.writableLength`, which accurately
+   *   measures the exact in-flight bytes across OrbStack/Docker host proxies, Basilisk II slirp,
+   *   and MacTCP's receive buffer!
+   * - Otherwise falls back to Linux kernel `/proc/net/tcp` `tx_queue` + `sock.writableLength`.
    */
   getSocketQueuedBytes(sock) {
     if (!sock || sock.destroyed) return 0;
     const userspaceBytes = sock.writableLength || 0;
+    if (sock._hasClientAck) {
+      const inFlight = (sock._bytesWritten || 0) - (sock._bytesAcked || 0);
+      return Math.max(0, inFlight) + userspaceBytes;
+    }
     const remotePort = sock.remotePort;
     if (!remotePort) return userspaceBytes;
 
@@ -648,13 +653,14 @@ class AudioStreamEngine extends EventEmitter {
           continue;
         }
         // Real-time TCP backpressure guard: if the 68k Mac is temporarily busy in a
-        // foreground app (e.g. MacAI rendering or HTTP polling) and > 3 KB (~138ms) of
-        // audio has accumulated in the kernel TCP send queue, drop this music frame rather
-        // than letting stale music pile up in SO_SNDBUF!
-        if (!audioHub.hasActiveDuckMix() && this.getSocketQueuedBytes(sock) > 3072) {
+        // foreground app (e.g. MacAI rendering or HTTP polling) and > 3.5 KB (~160ms) of
+        // audio has accumulated in flight across the proxy/TCP pipe, drop this music frame
+        // rather than letting stale music pile up ahead of future TTS speech!
+        if (!audioHub.hasActiveDuckMix() && this.getSocketQueuedBytes(sock) > 3584) {
           continue;
         }
         sock._receivedSpotifyBytes = (sock._receivedSpotifyBytes || 0) + payload.length;
+        sock._bytesWritten = (sock._bytesWritten || 0) + payload.length;
         sock.write(payload);
       }
     }
@@ -1143,6 +1149,22 @@ class AudioStreamEngine extends EventEmitter {
           }
         }
       }
+
+      socket._bytesWritten = 0;
+      socket._bytesAcked = 0;
+      socket._hasClientAck = false;
+      socket._ackRemainder = Buffer.alloc(0);
+      socket.on('data', (chunk) => {
+        if (!chunk || chunk.length === 0) return;
+        const buf = socket._ackRemainder.length > 0 ? Buffer.concat([socket._ackRemainder, chunk]) : chunk;
+        const fullLen = buf.length - (buf.length % 4);
+        if (fullLen >= 4) {
+          const acked = buf.readUInt32BE(fullLen - 4);
+          socket._bytesAcked = acked;
+          socket._hasClientAck = true;
+        }
+        socket._ackRemainder = buf.subarray(fullLen);
+      });
 
       this.tcpClients.add(socket);
       console.log(`[AudioEngine] 68k TCP client connected (${socket.remoteAddress}:${socket.remotePort}) — active clients: ${this.tcpClients.size}`);

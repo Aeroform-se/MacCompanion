@@ -25,7 +25,7 @@ static Ptr            gHttpTcpRcvBuf  = NULL;
  * Native 68k Audio Streaming State (Quad-Buffered Sound Manager)
  * ============================================================================ */
 
-#define AUDIO_TCP_RCV_SIZE  4096
+#define AUDIO_TCP_RCV_SIZE  8192
 #define AUDIO_CHUNK_SIZE    4096
 #define NUM_AUDIO_BUFFERS   4
 
@@ -34,6 +34,13 @@ static Ptr            gAudioTcpRcvBuf    = NULL;
 static Boolean        gAudioRunning      = false;
 static Boolean        gAudioInBackground = false;
 static unsigned short gAudioSampleRateHz = 22255;
+
+static unsigned long  gAudioBytesRead    = 0;
+static unsigned long  gAudioLastAcked    = 0;
+static TCPiopb        gAudioAckPb;
+static wdsEntry       gAudioAckWds[2];
+static unsigned char  gAudioAckBuf[4];
+static Boolean        gAudioAckInFlight  = false;
 
 static SndChannelPtr  gSndChan           = NULL;
 static SndCallBackUPP gSndCallBackUPP    = NULL;
@@ -671,11 +678,14 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
         gBufferBusy[i] = 0;
         gPcmFilled[i]  = 0;
     }
-    gNextFillBuf  = 0;
-    gPrebuffering = true;
+    gNextFillBuf      = 0;
+    gPrebuffering     = true;
     gLastEmptyStatusTick = 0;
     gLastAudioPumpTick   = 0;
-    gAudioRunning = true;
+    gAudioBytesRead   = 0;
+    gAudioLastAcked   = 0;
+    gAudioAckInFlight = false;
+    gAudioRunning     = true;
     return true;
 }
 
@@ -704,6 +714,7 @@ void AudioStreamStop(void)
         pb.tcpStream = gAudioStream;
         RunTCPControl(&pb, false);
     }
+    gAudioAckInFlight = false;
 
     for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
         gBufferBusy[i] = 0;
@@ -871,6 +882,7 @@ void AudioStreamPump(void)
 
         if (PBControlSync((ParmBlkPtr)&pb) == noErr && pb.csParam.receive.rcvBuffLen > 0) {
             gPcmFilled[idx] += pb.csParam.receive.rcvBuffLen;
+            gAudioBytesRead += (unsigned long)pb.csParam.receive.rcvBuffLen;
         } else {
             break;
         }
@@ -894,6 +906,35 @@ void AudioStreamPump(void)
             gNextFillBuf = (idx + 1) % NUM_AUDIO_BUFFERS;
         } else {
             break;
+        }
+    }
+
+    /* Send an asynchronous 4-byte cumulative byte-read ACK back to the server on :6802
+     * every >= 1024 bytes consumed so the server knows the exact in-flight byte count
+     * across intermediate proxies (OrbStack, Docker NAT, Basilisk II slirp) and never
+     * lets more than ~160ms of music accumulate ahead of TTS speech! */
+    if ((gAudioBytesRead - gAudioLastAcked) >= 1024) {
+        if (!gAudioAckInFlight || gAudioAckPb.ioResult != inProgress) {
+            gAudioLastAcked = gAudioBytesRead;
+            gAudioAckBuf[0] = (unsigned char)((gAudioBytesRead >> 24) & 0xFF);
+            gAudioAckBuf[1] = (unsigned char)((gAudioBytesRead >> 16) & 0xFF);
+            gAudioAckBuf[2] = (unsigned char)((gAudioBytesRead >> 8)  & 0xFF);
+            gAudioAckBuf[3] = (unsigned char)(gAudioBytesRead & 0xFF);
+            gAudioAckWds[0].length = 4;
+            gAudioAckWds[0].ptr    = (Ptr)gAudioAckBuf;
+            gAudioAckWds[1].length = 0;
+            gAudioAckWds[1].ptr    = NULL;
+            memset(&gAudioAckPb, 0, sizeof(gAudioAckPb));
+            gAudioAckPb.ioCRefNum                     = gMacTCPRef;
+            gAudioAckPb.csCode                        = TCPSend;
+            gAudioAckPb.tcpStream                     = gAudioStream;
+            gAudioAckPb.csParam.send.ulpTimeoutValue  = 5;
+            gAudioAckPb.csParam.send.ulpTimeoutAction = 1;
+            gAudioAckPb.csParam.send.validityFlags    = timeoutValue | timeoutAction;
+            gAudioAckPb.csParam.send.pushFlag         = 1;
+            gAudioAckPb.csParam.send.wdsPtr           = (Ptr)gAudioAckWds;
+            gAudioAckInFlight = true;
+            PBControlAsync((ParmBlkPtr)&gAudioAckPb);
         }
     }
 }
