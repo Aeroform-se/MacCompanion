@@ -57,7 +57,11 @@ audioHub.registerSpotifyEngine(
   async () => {
     try {
       const raw = await callSpotify('/me/player');
-      if ((raw && raw.is_playing) || optimisticState.isPlaying === true) {
+      const isMusicStreaming =
+        (raw && raw.is_playing) ||
+        optimisticState.isPlaying === true ||
+        audioEngine.isActivelyStreamingMusic();
+      if (isMusicStreaming) {
         optimisticState.isPlaying = false;
         optimisticState.isPlayingTs = Date.now();
         audioEngine.onPause({ discardMs: 0 });
@@ -420,9 +424,9 @@ async function checkIsTrackLiked(trackIdOrUri) {
     if (optimisticState.isPlaying !== null && (now - optimisticState.isPlayingTs) < OPTIMISTIC_TTL_MS) {
       np.isPlaying = optimisticState.isPlaying;
     }
-    // If SpotiMac was temporarily paused for MacAI TTS speech ("Pause SpotiMac on Speech"),
-    // keep reporting `isPlaying = true` to 68k polls so SpotiMac keeps its TCP :6802 audio
-    // socket open and resumes playing within < 50ms when speech ends!
+    // Keep reporting `isPlaying = true` to 68k polls while SpotiMac's warm TCP :6802 pipe
+    // is temporarily playing MacAI TTS speech ("Pause SpotiMac on Speech") so SpotiMac
+    // never closes its audio stream and resumes music with 0ms lag!
     if (audioHub.wasSpotifyPausedForSpeech && audioHub.isVoiceGateBlockingSpotify()) {
       np.isPlaying = true;
     }

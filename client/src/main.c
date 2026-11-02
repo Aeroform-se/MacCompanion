@@ -5750,7 +5750,7 @@ int main(void)
                      !gMiniPlayerMode && !gSearchViewOpen && !gForYouViewOpen &&
                      !gAboutModalOpen && !gSpeakerPopupOpen);
         if (gInBackground) {
-            sleepTicks = AudioStreamIsRunning() ? 1 : 15;
+            sleepTicks = (AudioStreamIsRunning() || IsThisMacSelectedSpeaker()) ? 1 : 15;
         } else if (vizActive) {
             unsigned long elapsedViz = nowTicks - gLastVizTicks;
             sleepTicks = (elapsedViz >= 2) ? 0 : (2 - elapsedViz);
@@ -5877,12 +5877,13 @@ int main(void)
 
         /* Poll /api/spotify/poll every ~3s (180 ticks) when playing in foreground, ~12s (720 ticks)
          * when streaming in background so MultiFinder foreground apps (e.g. MacAI) aren't interrupted
-         * by frequent blocking HTTP polls, or ~2s (120 ticks) when paused with this Mac as speaker. */
+         * by frequent blocking HTTP polls, or ~0.6s (36 ticks) when paused with this Mac as speaker
+         * so SpotiMac reconnects immediately after a "Pause SpotiMac on Speech" TTS utterance ends! */
         {
             Boolean nearTrackEnd = (gNowPlaying.durationMs > 0 && gNowPlaying.progressMs >= (gNowPlaying.durationMs - 4000L));
             unsigned long pollIntervalTicks;
             if (!gNowPlaying.isPlaying) {
-                pollIntervalTicks = IsThisMacSelectedSpeaker() ? 120UL : 360UL;
+                pollIntervalTicks = IsThisMacSelectedSpeaker() ? 36UL : 360UL;
             } else if (gInBackground && !nearTrackEnd) {
                 pollIntervalTicks = 720UL;
             } else if (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen) {

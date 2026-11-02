@@ -3236,6 +3236,9 @@ static void SendPromptToAI(const char *promptText, Boolean isRetry)
                 AppendMessage(false, fields[4]);
                 if (gReadRepliesTTS && !mixedIntoSpotify) {
                     AudioStreamStart(22255);
+                } else if (gReadRepliesTTS && mixedIntoSpotify) {
+                    EventRecord yieldEv;
+                    WaitNextEvent(everyEvent, &yieldEv, 2, NULL);
                 }
             }
             /* Update existing chat title in-place; only fetch `/api/macai/chats` over HTTP
@@ -4557,7 +4560,7 @@ static void NetworkIdleProc(void)
         }
     }
 
-    if (WaitNextEvent(everyEvent, &ev, 1, NULL)) {
+    if (WaitNextEvent(everyEvent, &ev, 3, NULL)) {
         switch (ev.what) {
             case mouseDown: {
                 WindowPtr hitWin = NULL;
@@ -5153,6 +5156,9 @@ static void ScifiSendPrompt(const char *promptText)
                             gScifiAwaitingReply = false;
                             if (gReadRepliesTTS && !mixedIntoSpotify) {
                                 AudioStreamStart(22255);
+                            } else if (gReadRepliesTTS && mixedIntoSpotify) {
+                                EventRecord yieldEv;
+                                WaitNextEvent(everyEvent, &yieldEv, 2, NULL);
                             }
                             ScifiQueueTypewriter(pReply);
                             return;
@@ -5588,7 +5594,7 @@ int main(void)
 
         if (gScifiMode) {
             ScifiIdle();
-            sleepTicks = 1;
+            sleepTicks = (gScifiTypewriterPos < gScifiTypewriterLen) ? 2 : 6;
         }
 
         if (AudioStreamIsRunning()) {
@@ -5603,7 +5609,7 @@ int main(void)
             }
         }
         if (!gScifiMode && gWaitingForAI) {
-            sleepTicks = 3;
+            sleepTicks = 5;
             if ((TickCount() - gLastWaitAnimTick) >= 5) {
                 gLastWaitAnimTick = TickCount();
                 RenderChatAreaOnly();

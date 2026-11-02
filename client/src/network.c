@@ -25,8 +25,8 @@ static Ptr            gHttpTcpRcvBuf  = NULL;
  * Native 68k Audio Streaming State (Quad-Buffered Sound Manager)
  * ============================================================================ */
 
-#define AUDIO_TCP_RCV_SIZE  8192
-#define AUDIO_CHUNK_SIZE    8192
+#define AUDIO_TCP_RCV_SIZE  4096
+#define AUDIO_CHUNK_SIZE    4096
 #define NUM_AUDIO_BUFFERS   4
 
 static StreamPtr      gAudioStream       = 0;
@@ -806,11 +806,10 @@ void AudioStreamPump(void)
         gNextFillBuf  = 0;
     }
 
-    /* When SpotiMac is in the background (e.g. while MacAI is in the foreground),
-     * allow queueing larger chunks up to 8192 bytes per buffer (4 * 8192 = 32 KB = 1.47s
-     * of interrupt-driven Sound Manager audio cushion) so cooperative MultiFinder switches
-     * never underrun! */
-    minQueueSize = gAudioInBackground ? 6144 : 4096;
+    /* Keep Sound Manager buffers nimble (2048 bytes = ~92ms each; 4 * 2048 = 8192 bytes = ~368ms
+     * total hardware interrupt cushion) so server-side ducked TTS audio is heard within ~0.35s
+     * while still riding through cooperative MultiFinder context switches! */
+    minQueueSize = 2048;
 
     for (attempts = 0; attempts < NUM_AUDIO_BUFFERS; attempts++) {
         short idx;
@@ -820,11 +819,11 @@ void AudioStreamPump(void)
         unsigned short toRead;
 
         if (gPrebuffering) {
-            idx = (gPcmFilled[0] < 4096) ? 0 : 1;
-            targetSize = 4096;
+            idx = (gPcmFilled[0] < 2048) ? 0 : 1;
+            targetSize = 2048;
         } else {
             idx = gNextFillBuf;
-            targetSize = AUDIO_CHUNK_SIZE;
+            targetSize = 2048;
         }
 
         if (gBufferBusy[idx]) {
@@ -851,8 +850,8 @@ void AudioStreamPump(void)
         }
         gLastEmptyStatusTick = 0;
 
-        /* Only coalesce small reads (< 1024B) when in foreground and at least 2 buffers are already playing */
-        if (!gPrebuffering && !gAudioInBackground && busyCount >= 2 && unread < 1024) {
+        /* Only coalesce small reads (< 512B) when in foreground and at least 2 buffers are already playing */
+        if (!gPrebuffering && !gAudioInBackground && busyCount >= 2 && unread < 512) {
             break;
         }
 
@@ -877,11 +876,11 @@ void AudioStreamPump(void)
         }
 
         if (gPrebuffering) {
-            if (gPcmFilled[0] >= 4096 && gPcmFilled[1] >= 2048) {
+            if (gPcmFilled[0] >= 2048 && gPcmFilled[1] >= 1024) {
                 gPrebuffering = false;
                 QueueSoundBuffer(0);
                 busyCount++;
-                if (gPcmFilled[1] >= 4096) {
+                if (gPcmFilled[1] >= 2048) {
                     QueueSoundBuffer(1);
                     busyCount++;
                     gNextFillBuf = 2;
@@ -889,7 +888,7 @@ void AudioStreamPump(void)
                     gNextFillBuf = 1;
                 }
             }
-        } else if (gPcmFilled[idx] >= minQueueSize || (busyCount <= 1 && gPcmFilled[idx] >= 2048)) {
+        } else if (gPcmFilled[idx] >= minQueueSize || (busyCount <= 1 && gPcmFilled[idx] >= 1024)) {
             QueueSoundBuffer(idx);
             busyCount++;
             gNextFillBuf = (idx + 1) % NUM_AUDIO_BUFFERS;

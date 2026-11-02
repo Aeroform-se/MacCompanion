@@ -115,7 +115,8 @@ class SharedAudioHub {
    * - In default Audio Ducking mode (`pauseSpotifyOnSpeech = false` and `forcePause = false`),
    *   SpotiMac is NOT paused so music continues playing smoothly under the ducked TTS voice.
    * - When `pauseSpotifyOnSpeech = true` (or `forcePause = true` for mic recording),
-   *   SpotiMac is paused and will automatically resume after speech finishes.
+   *   SpotiMac is muted on the server (`voiceGateActive = true`) while keeping SpotiMac's
+   *   TCP :6802 connection and `librespot` stream warm so speech AND resume are both instant!
    */
   async pauseSpotifyForVoice({ forcePause = false } = {}) {
     const shouldPause = Boolean(forcePause || this.pauseSpotifyOnSpeech);
@@ -125,22 +126,20 @@ class SharedAudioHub {
 
     this.voiceGateActive = true;
     this.ttsActiveUntil = Date.now() + 15000;
+    this.wasSpotifyPausedForSpeech = true;
 
     if (this.spotifyEngine && typeof this.spotifyEngine.onPause === 'function') {
       this.spotifyEngine.onPause({ discardMs: 0 });
     }
 
-    if (typeof this.pauseSpotifyFn === 'function') {
+    // Only pause Spotify in the cloud for long microphone recordings (`forcePause = true`).
+    // For short TTS utterances (`forcePause = false`), muting the server pipe via `voiceGateActive`
+    // while streaming the TTS audio into SpotiMac's warm TCP :6802 pipe avoids Spotify Cloud API
+    // race conditions and makes post-speech music resume instantaneous (0ms lag)!
+    if (forcePause && typeof this.pauseSpotifyFn === 'function') {
       try {
-        const paused = await this.pauseSpotifyFn();
-        if (paused) {
-          this.wasSpotifyPausedForSpeech = true;
-        }
+        await this.pauseSpotifyFn();
       } catch {}
-    }
-
-    if (this.spotifyEngine && typeof this.spotifyEngine.onPause === 'function') {
-      this.spotifyEngine.onPause({ discardMs: 0 });
     }
   }
 
@@ -245,16 +244,38 @@ class SharedAudioHub {
 
     if (this.pauseSpotifyOnSpeech || this.wasSpotifyPausedForSpeech) {
       this.voiceGateActive = true;
-      this.ttsActiveUntil = Date.now() + durationMs + 600;
+      this.ttsActiveUntil = Date.now() + durationMs + 500;
     }
 
-    // Choose target socket(s): if targetSocket is provided (MacAI just connected), stream to it;
-    // otherwise check if there is a connected socket that is NOT an idle background SpotiMac socket when MacAI is about to connect.
-    const activeSockets = targetSocket
-      ? [targetSocket]
-      : (this.spotifyEngine && this.spotifyEngine.tcpClients
-          ? Array.from(this.spotifyEngine.tcpClients).filter((s) => !s.destroyed && s.writable && !s._receivedSpotifyBytes)
-          : []);
+    // Check if SpotiMac already has an open, active TCP :6802 music socket (`s._receivedSpotifyBytes > 0`).
+    // If so (i.e. "Pause SpotiMac on Speech" while SpotiMac is running in the background), stream the
+    // standalone TTS audio directly through SpotiMac's existing TCP :6802 socket and return `mixedIntoSpotify: true`
+    // so MacAI doesn't open a second socket! Because `voiceGateActive` is true during `durationMs`,
+    // SpotiMac's pipe receives 100% pure TTS speech (zero music overlap) and then resumes music at the
+    // exact millisecond the speech ends (0.0s resume delay)!
+    const existingMusicSockets = (
+      !targetSocket &&
+      this.spotifyEngine &&
+      this.spotifyEngine.tcpClients
+    )
+      ? Array.from(this.spotifyEngine.tcpClients).filter(
+          (s) => !s.destroyed && s.writable && !s._isTemporaryTtsSocket && s._receivedSpotifyBytes > 0
+        )
+      : [];
+
+    const usingExistingMusicSocket = existingMusicSockets.length > 0;
+
+    // Choose target socket(s):
+    // - If `usingExistingMusicSocket` is true, stream directly into SpotiMac's warm socket;
+    // - Otherwise if `targetSocket` is provided (MacAI just connected), stream to it;
+    // - Otherwise check if there is a connected MacAI socket.
+    const activeSockets = usingExistingMusicSocket
+      ? existingMusicSockets
+      : (targetSocket
+          ? [targetSocket]
+          : (this.spotifyEngine && this.spotifyEngine.tcpClients
+              ? Array.from(this.spotifyEngine.tcpClients).filter((s) => !s.destroyed && s.writable && !s._receivedSpotifyBytes)
+              : []));
 
     if (activeSockets.length === 0) {
       console.log(`[AudioHub] Buffering ${u8Buffer.length} TTS bytes (${durationMs}ms) for MacAI TCP :6802 arrival...`);
@@ -268,43 +289,23 @@ class SharedAudioHub {
         this.pendingTts = null;
         this.voiceGateActive = false;
         this.ttsActiveUntil = 0;
-        if (this.wasSpotifyPausedForSpeech && typeof this.resumeSpotifyFn === 'function') {
-          this.wasSpotifyPausedForSpeech = false;
-          Promise.resolve(this.resumeSpotifyFn()).catch(() => {});
-        }
+        this.wasSpotifyPausedForSpeech = false;
       }, 12000);
       if (typeof this.ttsDrainTimer.unref === 'function') this.ttsDrainTimer.unref();
       return { streamedBytes: u8Buffer.length, durationMs, mixedIntoSpotify: false };
     }
 
-    // Pre-burst the first 4096 bytes (~184ms) immediately so MacAI's double-buffer starts
-    // playing with zero prebuffer latency, then pace remaining frames at ~90ms intervals.
-    const initialBurstBytes = Math.min(4096, u8Buffer.length);
-    const frameBytes = Math.max(512, Math.round(hz * 0.09)); // ~2000 bytes @ 22k (90ms)
-    let offset = 0;
-
-    // If SpotiMac was paused for speech, fire `resumeSpotifyFn()` (`PUT /me/player/play`)
-    // ~350ms before the TTS utterance finishes draining on the 68k Mac so Spotify's cloud
-    // API latency (~350-450ms) is hidden and music resumes right as speech finishes!
-    let resumeTriggered = false;
-    const triggerSpotifyResume = () => {
-      if (resumeTriggered) return;
-      resumeTriggered = true;
-      if (this.wasSpotifyPausedForSpeech && typeof this.resumeSpotifyFn === 'function') {
-        this.wasSpotifyPausedForSpeech = false;
-        Promise.resolve(this.resumeSpotifyFn()).catch(() => {});
+    if (usingExistingMusicSocket) {
+      if (this.spotifyEngine && typeof this.spotifyEngine.clearTcpPending === 'function') {
+        this.spotifyEngine.clearTcpPending();
       }
-    };
-
-    if (this.wasSpotifyPausedForSpeech && durationMs > 450) {
-      const earlyResumeDelayMs = Math.max(80, durationMs - 350);
-      const earlyTimer = setTimeout(() => {
-        if (this.wasSpotifyPausedForSpeech) {
-          triggerSpotifyResume();
-        }
-      }, earlyResumeDelayMs);
-      if (typeof earlyTimer.unref === 'function') earlyTimer.unref();
+      console.log(`[AudioHub] Streaming ${u8Buffer.length} TTS bytes (${durationMs}ms) over paused SpotiMac TCP :6802 pipe`);
     }
+
+    // Pre-burst the first 2048 bytes (~92ms) immediately, then pace remaining frames at ~85ms intervals.
+    const initialBurstBytes = Math.min(2048, u8Buffer.length);
+    const frameBytes = Math.max(512, Math.round(hz * 0.085)); // ~1890 bytes @ 22k (85ms)
+    let offset = 0;
 
     const finishTtsHandover = () => {
       this.activeTtsTimer = null;
@@ -312,10 +313,13 @@ class SharedAudioHub {
         this.ttsDrainTimer = null;
         this.voiceGateActive = false;
         this.ttsActiveUntil = 0;
+        this.wasSpotifyPausedForSpeech = false;
+        if (this.spotifyEngine && typeof this.spotifyEngine.onResume === 'function') {
+          this.spotifyEngine.onResume();
+        }
 
-        // Cleanly close temporary MacAI TTS sockets so MacAI releases its Sound Manager
-        // channel and never double-plays when SpotiMac plays music!
-        if (this.spotifyEngine && this.spotifyEngine.tcpClients) {
+        // Cleanly close temporary MacAI TTS sockets (if MacAI opened one when SpotiMac wasn't running)
+        if (!usingExistingMusicSocket && this.spotifyEngine && this.spotifyEngine.tcpClients) {
           for (const sock of Array.from(this.spotifyEngine.tcpClients)) {
             if (sock._isTemporaryTtsSocket) {
               this.spotifyEngine.tcpClients.delete(sock);
@@ -329,10 +333,7 @@ class SharedAudioHub {
             }
           }
         }
-
-        // Ensure Spotify resumes if it wasn't already triggered by the early resume timer
-        triggerSpotifyResume();
-      }, 180);
+      }, 120);
       if (typeof this.ttsDrainTimer.unref === 'function') this.ttsDrainTimer.unref();
     };
 
@@ -348,20 +349,22 @@ class SharedAudioHub {
 
       for (const sock of activeSockets) {
         if (!sock.destroyed && sock.writable) {
-          sock._isTemporaryTtsSocket = true;
+          if (!usingExistingMusicSocket) {
+            sock._isTemporaryTtsSocket = true;
+          }
           sock.write(chunk);
         }
       }
 
       if (offset < u8Buffer.length) {
-        this.activeTtsTimer = setTimeout(pump, 85);
+        this.activeTtsTimer = setTimeout(pump, 82);
       } else {
         finishTtsHandover();
       }
     };
 
     pump();
-    return { streamedBytes: u8Buffer.length, durationMs, mixedIntoSpotify: false };
+    return { streamedBytes: u8Buffer.length, durationMs, mixedIntoSpotify: usingExistingMusicSocket };
   }
 
   /**

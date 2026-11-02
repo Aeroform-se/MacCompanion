@@ -648,10 +648,10 @@ class AudioStreamEngine extends EventEmitter {
           continue;
         }
         // Real-time TCP backpressure guard: if the 68k Mac is temporarily busy in a
-        // foreground app (e.g. MacAI rendering or HTTP polling) and > 6 KB (~275ms) of
+        // foreground app (e.g. MacAI rendering or HTTP polling) and > 3 KB (~138ms) of
         // audio has accumulated in the kernel TCP send queue, drop this music frame rather
-        // than letting seconds of stale music pile up in SO_SNDBUF!
-        if (this.getSocketQueuedBytes(sock) > 6144) {
+        // than letting stale music pile up in SO_SNDBUF!
+        if (!audioHub.hasActiveDuckMix() && this.getSocketQueuedBytes(sock) > 3072) {
           continue;
         }
         sock._receivedSpotifyBytes = (sock._receivedSpotifyBytes || 0) + payload.length;
@@ -853,15 +853,15 @@ class AudioStreamEngine extends EventEmitter {
         this.state = 'PLAYING';
       }
 
-      // Coalesce outgoing TCP chunks to ~1460 bytes (1 Ethernet MSS) or 60ms max delay
-      // to cut MacTCP / Ethernet receive interrupt overhead on the 68k Mac by 3-4x
+      // Coalesce outgoing TCP chunks to ~1024 bytes (~46ms) or 35ms max delay
+      // for responsive low-latency streaming and instant ducked TTS speech onset
       if (this.tcpClients.size > 0) {
         this.tcpPendingChunks.push(mixedChunk);
         this.tcpPendingBytes += mixedChunk.length;
-        if (this.tcpPendingBytes >= 1460) {
+        if (this.tcpPendingBytes >= 1024 || audioHub.hasActiveDuckMix()) {
           this.flushTcpPending();
         } else if (!this.tcpFlushTimer) {
-          this.tcpFlushTimer = setTimeout(() => this.flushTcpPending(), 60);
+          this.tcpFlushTimer = setTimeout(() => this.flushTcpPending(), 35);
         }
       }
 

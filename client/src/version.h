@@ -7,13 +7,13 @@
  */
 #define APP_NAME_STR            "SpotiMac"
 #define APP_VERSION_MAJOR_BCD   0x00
-#define APP_VERSION_MINOR_BCD   0x55
+#define APP_VERSION_MINOR_BCD   0x56
 #define APP_VERSION_STAGE       final
 #define APP_VERSION_NONFINAL    0x00
 
-#define APP_VERSION_SHORT       "0.5.5"
+#define APP_VERSION_SHORT       "0.5.6"
 #define APP_VERSION_CODENAME    "Supersonic"
-#define APP_VERSION_LONG        "0.5.5 \"Supersonic\" (SpotiMac 68k)"
-#define APP_VERSION_SLUG        "v0.5.5"
+#define APP_VERSION_LONG        "0.5.6 \"Supersonic\" (SpotiMac 68k)"
+#define APP_VERSION_SLUG        "v0.5.6"
 
 #endif /* VERSION_H */
