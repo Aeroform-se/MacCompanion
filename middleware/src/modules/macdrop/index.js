@@ -1165,11 +1165,36 @@ class MacDropModule {
 
       const cleanIp = ip.trim();
       const numPort = parseInt(port || DEFAULT_MACDROP_PORT, 10);
-      const targetName = (name || `Macintosh (${cleanIp})`).trim();
 
-      // Test ping before saving
-      const isOnline = await this.pingTarget(cleanIp, numPort);
-      this.pingCache.set(`${cleanIp}:${numPort}`, { online: isOnline, checkedAt: Date.now() });
+      // Check if client is already known or connected live to read its name directly
+      const activeClient = Array.from(this.activeClients.values()).find(c => c.ip === cleanIp);
+      const data = this.store.load();
+      const known = (data.knownDevices || []).find(d => d.ip === cleanIp);
+
+      let targetName = (name || '').trim();
+      let targetMachine = 'Vintage Macintosh';
+      let targetVersion = '';
+
+      if (activeClient) {
+        targetName = activeClient.name;
+        targetMachine = activeClient.machine;
+        targetVersion = activeClient.version;
+      } else if (known && known.name) {
+        targetName = known.name;
+        targetMachine = known.machine || targetMachine;
+        targetVersion = known.version || targetVersion;
+      }
+
+      if (!targetName) {
+        targetName = `Macintosh (${cleanIp})`;
+      }
+
+      // Test ping before saving (or if already connected live via reverse channel, it's online)
+      let isOnline = Boolean(activeClient);
+      if (!isOnline) {
+        isOnline = await this.pingTarget(cleanIp, numPort);
+        this.pingCache.set(`${cleanIp}:${numPort}`, { online: isOnline, checkedAt: Date.now() });
+      }
 
       if (!isOnline) {
         return res.status(400).json({
@@ -1178,7 +1203,6 @@ class MacDropModule {
         });
       }
 
-      const data = this.store.load();
       const targets = Array.isArray(data.targets) ? [...data.targets] : [];
 
       const targetObj = {
@@ -1186,13 +1210,14 @@ class MacDropModule {
         ip: cleanIp,
         port: numPort,
         name: targetName,
-        machine: 'Vintage Macintosh',
+        machine: targetMachine,
+        version: targetVersion,
         lastSeen: Date.now(),
         online: true,
         source: 'manual',
       };
 
-      const existingIdx = targets.findIndex(t => t.ip === targetObj.ip && t.port === targetObj.port);
+      const existingIdx = targets.findIndex(t => t.ip === targetObj.ip);
       if (existingIdx >= 0) {
         targets[existingIdx] = { ...targets[existingIdx], ...targetObj };
       } else {

@@ -43,6 +43,7 @@ static pascal void Patched_InsertMenu(MenuHandle mHdl, short beforeID);
 static pascal void Patched_DrawMenuBar(void);
 static pascal long Patched_MenuSelect(Point where);
 static pascal void Patched_SystemMenu(long result);
+static pascal Boolean Patched_WaitNextEvent(EventMask mask, EventRecord *theEvent, unsigned long sleep, RgnHandle mouseRgn);
 static void UpdateMenuContents(void);
 
 static pascal OSErr MacDropGestaltProc(OSType selector, long *response)
@@ -78,11 +79,12 @@ void _start(void)
         NewGestalt(MACDROP_GESTALT_TAG, upp);
     }
 
-    /* Hook system menu traps in SystemZone */
-    glob.saveInsertMenu  = (InsertMenuProcPtr)ApplyTrapPatch(_InsertMenu, (ProcPtr)Patched_InsertMenu);
-    glob.saveDrawMenuBar = (DrawMenuProcPtr)ApplyTrapPatch(_DrawMenuBar, (ProcPtr)Patched_DrawMenuBar);
-    glob.saveMenuSelect  = (MenuSelectProcPtr)ApplyTrapPatch(_MenuSelect, (ProcPtr)Patched_MenuSelect);
-    glob.saveSystemMenu  = (SystemMenuProcPtr)ApplyTrapPatch(_SystemMenu, (ProcPtr)Patched_SystemMenu);
+    /* Hook system menu & event traps in SystemZone */
+    glob.saveInsertMenu    = (InsertMenuProcPtr)ApplyTrapPatch(_InsertMenu, (ProcPtr)Patched_InsertMenu);
+    glob.saveDrawMenuBar   = (DrawMenuProcPtr)ApplyTrapPatch(_DrawMenuBar, (ProcPtr)Patched_DrawMenuBar);
+    glob.saveMenuSelect    = (MenuSelectProcPtr)ApplyTrapPatch(_MenuSelect, (ProcPtr)Patched_MenuSelect);
+    glob.saveSystemMenu    = (SystemMenuProcPtr)ApplyTrapPatch(_SystemMenu, (ProcPtr)Patched_SystemMenu);
+    glob.saveWaitNextEvent = (WaitNextEventProcPtr)ApplyTrapPatch(_WaitNextEvent, (ProcPtr)Patched_WaitNextEvent);
 
     glob.mHdl     = NULL;
     glob.menuID   = 0;
@@ -161,12 +163,30 @@ static pascal short DetachIcons(long iconType, Handle *iconHdl, void *data)
     return err;
 }
 
+static Boolean       sLaunchInProgress = false;
+static unsigned long sLastLaunchTick   = 0;
+
 static void TryLaunchDaemon(void)
 {
     LaunchParamBlockRec launchPB;
     OSErr err;
+    long osAttr = 0;
+    unsigned long nowTicks;
 
-    if (sharedData.DaemonRunning) return;
+    if (sharedData.DaemonRunning) {
+        sLaunchInProgress = false;
+        return;
+    }
+
+    nowTicks = TickCount();
+    if (sLaunchInProgress && (nowTicks - sLastLaunchTick < 300)) {
+        return;
+    }
+
+    /* Verify Process Manager / LaunchControl is available */
+    if (Gestalt(gestaltOSAttr, &osAttr) != noErr || !(osAttr & (1 << gestaltLaunchControl))) {
+        return;
+    }
 
     if (glob.homeFile.vRefNum == 0) {
         short vRef = 0;
@@ -191,11 +211,15 @@ static void TryLaunchDaemon(void)
     launchPB.launchControlFlags = launchContinue | launchNoFileFlags | launchDontSwitch | launchUseMinimum;
     launchPB.launchAppSpec      = &glob.homeFile;
 
+    sLaunchInProgress = true;
+    sLastLaunchTick   = nowTicks;
+
     err = LaunchApplication(&launchPB);
     if (err == noErr) {
         snprintf(sharedData.StatusText, sizeof(sharedData.StatusText), "Daemon starting...");
         sharedData.UpdateUI = true;
     } else {
+        sLaunchInProgress = false;
         snprintf(sharedData.StatusText, sizeof(sharedData.StatusText), "Launch err %d", (int)err);
         sharedData.UpdateUI = true;
     }
@@ -256,6 +280,10 @@ static pascal void Patched_DrawMenuBar(void)
 
     proc = glob.saveDrawMenuBar;
     (*proc)();
+
+    if (!sharedData.DaemonRunning) {
+        TryLaunchDaemon();
+    }
 }
 
 static void AddMenuItem(MenuHandle mHdl, ConstStr255Param text, Boolean enabled)
@@ -426,4 +454,15 @@ static pascal void Patched_SystemMenu(long result)
     if (menuID != glob.menuID) {
         (*proc)(result);
     }
+}
+
+static pascal Boolean Patched_WaitNextEvent(EventMask mask, EventRecord *theEvent, unsigned long sleep, RgnHandle mouseRgn)
+{
+    WaitNextEventProcPtr proc = glob.saveWaitNextEvent;
+
+    if (!sharedData.DaemonRunning) {
+        TryLaunchDaemon();
+    }
+
+    return (*proc)(mask, theEvent, sleep, mouseRgn);
 }

@@ -203,28 +203,32 @@
       z-index: 10;
       box-shadow: 1px 1px 0 #000000;
       transition: background 0.1s, color 0.1s, transform 0.1s;
-      display: inline-flex;
+      display: inline-flex !important;
       align-items: center;
       justify-content: center;
       gap: 5px;
       line-height: 1;
+      white-space: nowrap !important;
     }
 
     #macdrop-sub-refresh-btn {
-      display: inline-flex;
+      display: inline-flex !important;
       align-items: center;
       justify-content: center;
       gap: 5px;
       line-height: 1;
+      white-space: nowrap !important;
     }
 
     .macdrop-reload-icon {
       height: 12px;
       width: auto;
-      display: block;
+      display: inline-block;
+      vertical-align: middle;
       object-fit: contain;
       margin: 0;
       padding: 0;
+      flex-shrink: 0;
     }
 
     .macdrop-refresh-btn:hover {
@@ -1109,7 +1113,7 @@
         <!-- Big AirDrop-Style Drop Zone -->
         <div class="macdrop-dropzone" id="macdrop-dropzone">
           <button type="button" id="macdrop-refresh-btn" class="macdrop-refresh-btn action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)" title="Scan & refresh connected Macs">
-            <img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh
+            <img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh
           </button>
           <input type="file" id="macdrop-file-input" style="display:none;" multiple onchange="handleFileSelect(event)" />
           
@@ -1578,7 +1582,7 @@
             </table>
           </div>
           <div style="margin-top:10px; display:flex; justify-content:space-between; align-items:center;">
-            <button type="button" id="macdrop-sub-refresh-btn" class="action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)"><img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh Status</button>
+            <button type="button" id="macdrop-sub-refresh-btn" class="action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)"><img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh Status</button>
             <button type="button" id="macdrop-broadcast-btn" class="action-btn-sm pixel-pill-clip" style="display:none;" onclick="changeMacDropTarget('all')">🌟 Broadcast to All Connected Macs</button>
           </div>
         </div>
@@ -1587,15 +1591,12 @@
         <div class="section-box">
           <div class="section-title-row">
             <span>Add client manually</span>
-            <span id="macdrop-target-state-pill" style="font-size:12px; color:#666;">Direct TCP :6803</span>
           </div>
           <div style="font-size:13px; line-height:1.4; margin-bottom:10px;">
             If a device fails to be found, enter it's ip address below. If the device responds to MacDrop pings it will be added.
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-            <input type="text" id="macdrop-name-input" placeholder="Client Name (e.g. Mac SE/30)" style="flex:1; min-width:140px; font-size:13px; padding:6px 8px; border:2px solid #000;" />
-            <input type="text" id="macdrop-ip-input" placeholder="IP (e.g. 192.168.1.50)" style="flex:1; min-width:120px; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
-            <input type="number" id="macdrop-port-input" value="6803" placeholder="6803" style="width:70px; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
+            <input type="text" id="macdrop-ip-input" placeholder="IP address (e.g. 192.168.1.50)" style="flex:1; min-width:200px; font-family:monospace; font-size:13px; padding:6px 8px; border:2px solid #000;" />
             <div class="action-btn-wrap">
               <button type="button" class="action-btn-sm pixel-pill-clip" onclick="saveMacDropTarget()">Add &amp; Ping Client</button>
             </div>
@@ -2058,12 +2059,10 @@
       const subBanner = document.getElementById('macdrop-sub-banner');
       const subIcon = document.getElementById('macdrop-sub-icon');
       const subText = document.getElementById('macdrop-sub-text');
-      const targetPill = document.getElementById('macdrop-target-state-pill');
       const clientsCount = document.getElementById('macdrop-clients-count');
       const clientsTbody = document.getElementById('macdrop-clients-tbody');
       const broadcastBtn = document.getElementById('macdrop-broadcast-btn');
       const ipInput = document.getElementById('macdrop-ip-input');
-      const portInput = document.getElementById('macdrop-port-input');
 
       const clients = macdrop.clients || [];
       const savedTargets = macdrop.savedTargets || [];
@@ -2075,11 +2074,9 @@
       if (isOnline) {
         if (subIcon) setIconStatus(subIcon, 'ok');
         if (subText) subText.textContent = `Target Ready: ${active.name} (${active.ip})`;
-        if (targetPill) targetPill.textContent = 'Online & Ready';
       } else {
         if (subIcon) setIconStatus(subIcon, 'off');
         if (subText) subText.textContent = 'No clients found / online.';
-        if (targetPill) targetPill.textContent = 'No Target';
       }
 
       // Collect all truly online clients for display
@@ -2205,9 +2202,6 @@
 
       if (active && ipInput && document.activeElement !== ipInput) {
         ipInput.value = active.ip || '';
-      }
-      if (active && portInput && document.activeElement !== portInput) {
-        portInput.value = active.port || 6803;
       }
 
       // Check for incoming staged file from 68k Mac (AirDrop prompt)
@@ -2380,8 +2374,8 @@
       if (event) event.stopPropagation();
       const btn = document.getElementById('macdrop-refresh-btn');
       const subBtn = document.getElementById('macdrop-sub-refresh-btn');
-      const origHtml = '<img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh';
-      const origSubHtml = '<img src="/img/reload-icon.png" class="macdrop-reload-icon" alt="" /> Refresh Status';
+      const origHtml = '<img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh';
+      const origSubHtml = '<img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh Status';
       if (btn) {
         btn.innerHTML = 'Scanning...';
         btn.disabled = true;
@@ -2679,9 +2673,7 @@
     }
 
     async function saveMacDropTarget() {
-      const name = (document.getElementById('macdrop-name-input')?.value || '').trim();
       const ip = (document.getElementById('macdrop-ip-input')?.value || '').trim();
-      const port = parseInt(document.getElementById('macdrop-port-input')?.value || '6803', 10);
       const resEl = document.getElementById('macdrop-ping-result');
 
       if (!ip) {
@@ -2690,7 +2682,7 @@
       }
 
       if (resEl) {
-        resEl.textContent = `Pinging ${ip}:${port}...`;
+        resEl.textContent = `Pinging ${ip}...`;
         resEl.style.color = '#555';
       }
 
@@ -2698,7 +2690,7 @@
         const res = await fetch('/api/macdrop/target', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ip, port, name }),
+          body: JSON.stringify({ ip }),
         });
         const data = await res.json();
         if (data.ok) {
