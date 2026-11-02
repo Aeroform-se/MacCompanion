@@ -366,7 +366,7 @@
       height: 100%;
       background: #000000;
       width: 0%;
-      transition: width 0.1s linear;
+      transition: width 0.25s ease-out;
     }
 
     .macdrop-progress-sub {
@@ -2560,7 +2560,7 @@
                   if (t.status === 'STREAMING' && t.speedFormatted) {
                     pctEl.textContent = `${pct}% (${t.speedFormatted})`;
                   } else if (t.status === 'WRITING_DISK') {
-                    pctEl.textContent = `99%`;
+                    pctEl.textContent = `${pct}%`;
                   } else {
                     pctEl.textContent = `${pct}%`;
                   }
@@ -2573,7 +2573,7 @@
                     const totStr = formatBytes(t.totalBytes);
                     subEl.textContent = `Streaming to ${t.targetName}: ${sentStr} / ${totStr} at ${t.speedFormatted}`;
                   } else if (t.status === 'WRITING_DISK') {
-                    subEl.textContent = `Saving "${t.fileName}" to disk on ${t.targetName}...`;
+                    subEl.textContent = `Finalizing "${t.fileName}" on ${t.targetName}...`;
                   }
                 }
               }

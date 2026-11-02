@@ -85,6 +85,7 @@ typedef struct {
 void MacBinaryRx_Init(MacBinaryRx *rx);
 OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long count);
 void MacBinaryRx_Finish(MacBinaryRx *rx);
+void MacBinaryRx_FlushDestVolume(void);
 void MacBinaryRx_Abort(MacBinaryRx *rx);
 
 /* Stream Transmitter State Machine (68k -> Server / Modern Mac) */

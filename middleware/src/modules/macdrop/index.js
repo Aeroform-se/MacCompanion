@@ -583,6 +583,11 @@ class MacDropModule {
         } catch (_) {}
       }
 
+      if (req.socket) {
+        req.socket.setNoDelay(true);
+      }
+      res.shouldKeepAlive = false;
+
       const clientObj = {
         id: clientId,
         name,
@@ -627,7 +632,7 @@ class MacDropModule {
           try {
             curr.probing = true;
             curr.probeSentAt = Date.now();
-            res.writeHead(204, { 'X-MacDrop-Status': 'POLL' });
+            res.writeHead(204, { 'X-MacDrop-Status': 'POLL', 'Connection': 'close' });
             res.end();
           } catch (_) {}
         }
@@ -671,6 +676,9 @@ class MacDropModule {
 
     // 2. Client Transfer ACK Endpoint
     this.router.get('/ack', (req, res) => {
+      res.shouldKeepAlive = false;
+      res.setHeader('Connection', 'close');
+
       const transferId = req.query.transfer_id;
       const status = req.query.status || 'OK';
       const bytes = parseInt(req.query.bytes || '0', 10);
@@ -700,6 +708,11 @@ class MacDropModule {
 
     // 2c. Real-Time Active File Transfer Progress Endpoint
     this.router.get('/progress', (req, res) => {
+      if (this.activeTransfer && this.activeTransfer.status === 'WRITING_DISK') {
+        const elapsedMs = Date.now() - (this.activeTransfer.writingDiskStartedAt || Date.now());
+        const steppedPct = 89 + Math.floor(elapsedMs / 350);
+        this.activeTransfer.percent = Math.min(99, Math.max(this.activeTransfer.percent || 89, steppedPct));
+      }
       res.json({
         ok: true,
         transfer: this.activeTransfer || null,
@@ -1540,9 +1553,15 @@ class MacDropModule {
           target.transferInProgress = true;
           target.lastSeen = Date.now();
 
+          clientRes.shouldKeepAlive = false;
+          if (clientRes.socket && typeof clientRes.socket.setNoDelay === 'function') {
+            clientRes.socket.setNoDelay(true);
+          }
+
           clientRes.writeHead(200, {
             'Content-Type': 'application/x-macbinary',
             'Content-Length': buffer.length,
+            'Connection': 'close',
             'X-MacDrop-Status': 'STREAM',
             'X-Filename': macInfo.fileName,
             'X-Transfer-Id': transferId,
@@ -1568,7 +1587,9 @@ class MacDropModule {
 
             if (this.activeTransfer) {
               this.activeTransfer.bytesSent = offset;
-              this.activeTransfer.percent = Math.min(99, Math.round((offset / buffer.length) * 100));
+              // Map streaming to 0-88% so the remaining 89-99% smoothly tracks
+              // TCP socket drain + HFS disk finalization on the 68k Mac.
+              this.activeTransfer.percent = Math.min(88, Math.round((offset / buffer.length) * 88));
               this.activeTransfer.lastProgressAt = now;
 
               const speedElapsed = (now - lastSpeedSampleTime) / 1000;
@@ -1619,22 +1640,25 @@ class MacDropModule {
             }
           }
 
-          // Complete HTTP stream
-          await new Promise((resolveEnd) => {
-            clientRes.end(resolveEnd);
-          });
-
+          // Mark disk-write phase before clientRes.end() so socket close events
+          // are recognized as normal end-of-stream rather than mid-stream abort.
           target.transferInProgress = false;
           target.writingDisk = true;
           target.lastSeen = Date.now();
 
           if (this.activeTransfer) {
             this.activeTransfer.bytesSent = buffer.length;
-            this.activeTransfer.percent = 99;
+            this.activeTransfer.percent = 89;
             this.activeTransfer.status = 'WRITING_DISK';
-            this.activeTransfer.speedFormatted = 'Saving to disk...';
+            this.activeTransfer.writingDiskStartedAt = Date.now();
+            this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
             this.activeTransfer.lastProgressAt = Date.now();
           }
+
+          // Complete HTTP stream and send TCP FIN immediately (Connection: close)
+          await new Promise((resolveEnd) => {
+            clientRes.end(resolveEnd);
+          });
 
           // Dynamic timeout for disk write based on file size:
           // Base 45s + 1s per 3MB (e.g. 200MB gets 45 + 66 = 111s)

@@ -382,12 +382,25 @@ OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long c
                     return err;
                 }
 
+                if (rx->dataLen > 0) {
+                    long preAlloc = (long)rx->dataLen;
+                    if (AllocContig(rx->dataRefNum, &preAlloc) != noErr) {
+                        preAlloc = (long)rx->dataLen;
+                        Allocate(rx->dataRefNum, &preAlloc);
+                    }
+                }
+
                 if (rx->rsrcLen > 0) {
+                    long preAllocRF = (long)rx->rsrcLen;
                     err = HOpenRF(gDestVRefNum, gDestDirID, pName, fsWrPerm, &rx->rsrcRefNum);
                     if (err != noErr) {
                         rx->lastError = err;
                         rx->state = RX_ERROR;
                         return err;
+                    }
+                    if (AllocContig(rx->rsrcRefNum, &preAllocRF) != noErr) {
+                        preAllocRF = (long)rx->rsrcLen;
+                        Allocate(rx->rsrcRefNum, &preAllocRF);
                     }
                 }
 
@@ -506,8 +519,6 @@ void MacBinaryRx_Finish(MacBinaryRx *rx)
         HSetFInfo(gDestVRefNum, gDestDirID, pName, &finfo);
     }
 
-    FlushVol(NULL, gDestVRefNum);
-
     /* Add to recent files queue */
     for (i = RECENT_FILES_COUNT - 1; i > 0; i--) {
         gRecentFiles[i] = gRecentFiles[i - 1];
@@ -522,6 +533,11 @@ void MacBinaryRx_Finish(MacBinaryRx *rx)
     if (gRecentFileCount < RECENT_FILES_COUNT) {
         gRecentFileCount++;
     }
+}
+
+void MacBinaryRx_FlushDestVolume(void)
+{
+    FlushVol(NULL, gDestVRefNum);
 }
 
 /* ========================================================================= */
