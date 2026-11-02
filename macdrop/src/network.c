@@ -34,10 +34,12 @@ static Boolean  gCancelUpload        = false;
 
 #define LISTEN_RCV_BUF_SIZE 65536
 #define CHAN_RCV_BUF_SIZE   65536
+#define FALLBACK_RCV_SIZE   16384
 #define CHUNK_BUF_SIZE      32768
 
 /* Passive listener on port 6803 */
 static Ptr          gListenRcvBuf    = NULL;
+static long         gListenRcvBufLen = 0;
 static StreamPtr    gListenStream    = 0;
 static TCPiopb      gPassivePB;
 static Boolean      gListenerActive  = false;
@@ -54,11 +56,15 @@ typedef enum {
 
 static ChannelState gChannelState    = CHAN_DISCONNECTED;
 static Ptr          gChannelRcvBuf   = NULL;
+static long         gChannelRcvBufLen = 0;
 static StreamPtr    gChannelStream   = 0;
 static TCPiopb      gChanOpenPB;
 static TCPiopb      gChanRcvPB;
 static Boolean      gChanRcvPending  = false;
 static unsigned long gLastChannelAttemptTick = 0;
+static unsigned long gLastSiblingCheckTick   = 0;
+static unsigned long gRxLastSpeedTicks       = 0;
+static unsigned long gRxLastSpeedBytes       = 0;
 static MacBinaryRx  gChannelRx;
 static unsigned char gChanChunkBuf[CHUNK_BUF_SIZE];
 
@@ -418,17 +424,24 @@ Boolean NetSendFile(const FSSpec *spec)
 {
     MacBinaryTx tx;
     TCPiopb pb;
+    TCPiopb sendPB;
     StreamPtr stream;
     Ptr tcpRcvBuf;
     char req[1024];
     char hostStr[32];
+    char ourIpStr[32];
     char encId[128];
     char encName[128];
     wdsEntry wds[2];
     OSErr err;
-    unsigned char *chunkBuf;
-    unsigned long startTicks, lastSpeedTicks, speedBytes;
+    unsigned char *chunkBufA = NULL;
+    unsigned char *chunkBufB = NULL;
+    long chunkBufSize = 24576;
+    unsigned long startTicks, lastSpeedTicks, lastUiTicks, lastSysTicks, speedBytes;
     unsigned long totalSize;
+    long curBytes = 0, nextBytes = 0;
+    unsigned char *curPtr = NULL;
+    unsigned char *nextPtr = NULL;
     extern void UpdateProgressUI(void);
 
     if (!spec || !NetInit() || gServerIP == 0) return false;
@@ -441,17 +454,37 @@ Boolean NetSendFile(const FSSpec *spec)
 
     totalSize = 128 + tx.dataBytesTarget + tx.rsrcBytesTarget;
 
-    tcpRcvBuf = NewPtr(4096);
+    tcpRcvBuf = NewPtr(32768);
     if (!tcpRcvBuf) {
-        MacBinaryTx_Abort(&tx);
-        return false;
+        tcpRcvBuf = NewPtr(16384);
+        if (!tcpRcvBuf) {
+            tcpRcvBuf = NewPtr(4096);
+            if (!tcpRcvBuf) {
+                MacBinaryTx_Abort(&tx);
+                return false;
+            }
+        }
     }
 
-    chunkBuf = (unsigned char *)NewPtr(8192);
-    if (!chunkBuf) {
-        DisposePtr(tcpRcvBuf);
-        MacBinaryTx_Abort(&tx);
-        return false;
+    chunkBufA = (unsigned char *)NewPtr(24576);
+    chunkBufB = (unsigned char *)NewPtr(24576);
+    if (!chunkBufA || !chunkBufB) {
+        if (chunkBufA) { DisposePtr((Ptr)chunkBufA); chunkBufA = NULL; }
+        if (chunkBufB) { DisposePtr((Ptr)chunkBufB); chunkBufB = NULL; }
+        chunkBufSize = 16384;
+        chunkBufA = (unsigned char *)NewPtr(16384);
+        chunkBufB = (unsigned char *)NewPtr(16384);
+        if (!chunkBufA || !chunkBufB) {
+            if (chunkBufA) { DisposePtr((Ptr)chunkBufA); chunkBufA = NULL; }
+            if (chunkBufB) { DisposePtr((Ptr)chunkBufB); chunkBufB = NULL; }
+            chunkBufSize = 8192;
+            chunkBufA = (unsigned char *)NewPtr(8192);
+            if (!chunkBufA) {
+                DisposePtr(tcpRcvBuf);
+                MacBinaryTx_Abort(&tx);
+                return false;
+            }
+        }
     }
 
     /* Create TCP stream */
@@ -459,10 +492,11 @@ Boolean NetSendFile(const FSSpec *spec)
     pb.ioCRefNum                 = gMacTCPRef;
     pb.csCode                    = TCPCreate;
     pb.csParam.create.rcvBuff    = tcpRcvBuf;
-    pb.csParam.create.rcvBuffLen = 4096;
+    pb.csParam.create.rcvBuffLen = GetPtrSize(tcpRcvBuf);
     pb.csParam.create.notifyProc = NULL;
     if (PBControlSync((ParmBlkPtr)&pb) != noErr) {
-        DisposePtr((Ptr)chunkBuf);
+        if (chunkBufA) DisposePtr((Ptr)chunkBufA);
+        if (chunkBufB) DisposePtr((Ptr)chunkBufB);
         DisposePtr(tcpRcvBuf);
         MacBinaryTx_Abort(&tx);
         return false;
@@ -484,8 +518,13 @@ Boolean NetSendFile(const FSSpec *spec)
 
     err = PBControlAsync((ParmBlkPtr)&pb);
     startTicks = TickCount();
+    lastSysTicks = startTicks;
     while (pb.ioResult > 0 && (TickCount() - startTicks) < 360) {
-        SystemTask();
+        unsigned long t = TickCount();
+        if ((t - lastSysTicks) >= 2) {
+            lastSysTicks = t;
+            SystemTask();
+        }
     }
     if (pb.ioResult != noErr) {
         memset(&pb, 0, sizeof(pb));
@@ -495,28 +534,31 @@ Boolean NetSendFile(const FSSpec *spec)
         PBControlSync((ParmBlkPtr)&pb);
         pb.csCode    = TCPRelease;
         PBControlSync((ParmBlkPtr)&pb);
-        DisposePtr((Ptr)chunkBuf);
+        if (chunkBufA) DisposePtr((Ptr)chunkBufA);
+        if (chunkBufB) DisposePtr((Ptr)chunkBufB);
         DisposePtr(tcpRcvBuf);
         MacBinaryTx_Abort(&tx);
         return false;
     }
 
     FormatIP(gServerIP, hostStr);
+    FormatIP(gOurIP, ourIpStr);
     URLEncode(gClientID, encId, sizeof(encId));
     URLEncode(gClientName, encName, sizeof(encName));
 
     sprintf(req,
-        "POST /api/macdrop/inbound/upload?id=%s&name=%s HTTP/1.0\r\n"
+        "POST /api/macdrop/inbound/upload?id=%s&name=%s&ip=%s HTTP/1.0\r\n"
         "Host: %s:%u\r\n"
         "User-Agent: MacDrop-68k\r\n"
         "Content-Type: application/x-macbinary\r\n"
         "Content-Length: %lu\r\n"
         "X-Client-Id: %s\r\n"
         "X-Client-Name: %s\r\n"
+        "X-Client-IP: %s\r\n"
         "X-Filename: %s\r\n"
         "Connection: close\r\n\r\n",
-        encId, encName, hostStr, gServerPort, totalSize,
-        gClientID, gClientName, tx.fileName);
+        encId, encName, ourIpStr, hostStr, gServerPort, totalSize,
+        gClientID, gClientName, ourIpStr, tx.fileName);
 
     wds[0].length = (unsigned short)strlen(req);
     wds[0].ptr    = (Ptr)req;
@@ -548,72 +590,115 @@ Boolean NetSendFile(const FSSpec *spec)
     gActiveTransferName[sizeof(gActiveTransferName) - 1] = '\0';
 
     lastSpeedTicks = TickCount();
-    speedBytes = 0;
+    lastUiTicks    = lastSpeedTicks;
+    lastSysTicks   = lastSpeedTicks;
+    speedBytes     = 0;
 
     UpdateProgressUI();
 
-    /* Streaming loop */
-    while (tx.state != TX_COMPLETE && tx.state != TX_ERROR) {
-        EventRecord evt;
+    /* Prime first buffer from disk */
+    curPtr = chunkBufA;
+    nextPtr = chunkBufB ? chunkBufB : chunkBufA;
+    curBytes = MacBinaryTx_ReadBytes(&tx, curPtr, chunkBufSize);
+
+    /* Pipelined double-buffered streaming loop:
+     * Overlaps asynchronous MacTCP transmission of curPtr with HFS disk read into nextPtr */
+    while (curBytes > 0) {
+        unsigned long sendStartTicks;
+
         if (gCancelUpload) {
             goto abort_transfer;
         }
-        if (GetNextEvent(everyEvent, &evt)) {
-            if (evt.what == mouseDown) {
-                extern WindowRef gWindow;
-                WindowPtr win;
-                short part = FindWindow(evt.where, &win);
-                if (part == inContent && win == gWindow) {
-                    Point localPt = evt.where;
-                    SetPort(gWindow);
-                    GlobalToLocal(&localPt);
-                    if (PtInRect(localPt, &gBtnCancelTransferRect)) {
+
+        wds[0].length = (unsigned short)curBytes;
+        wds[0].ptr    = (Ptr)curPtr;
+        wds[1].length = 0;
+        wds[1].ptr    = NULL;
+
+        memset(&sendPB, 0, sizeof(sendPB));
+        sendPB.ioCRefNum                        = gMacTCPRef;
+        sendPB.csCode                           = TCPSend;
+        sendPB.tcpStream                        = stream;
+        sendPB.csParam.send.ulpTimeoutValue     = 15;
+        sendPB.csParam.send.ulpTimeoutAction    = 1;
+        sendPB.csParam.send.validityFlags       = timeoutValue | timeoutAction;
+        sendPB.csParam.send.pushFlag            = true; /* Immediate PSH avoids 200ms delayed-ACK stall */
+        sendPB.csParam.send.urgentFlag          = false;
+        sendPB.csParam.send.wdsPtr              = (Ptr)wds;
+
+        err = PBControlAsync((ParmBlkPtr)&sendPB);
+
+        /* While MacTCP transmits curPtr in the background, read the next chunk from HFS disk if double-buffered! */
+        nextBytes = 0;
+        if (chunkBufB && tx.state != TX_COMPLETE && tx.state != TX_ERROR) {
+            nextBytes = MacBinaryTx_ReadBytes(&tx, nextPtr, chunkBufSize);
+        }
+
+        /* Wait for current TCPSend to complete without hammering SystemTask on every spin */
+        sendStartTicks = TickCount();
+        while (sendPB.ioResult > 0) {
+            unsigned long t = TickCount();
+            if ((t - sendStartTicks) > 900) {
+                goto abort_transfer;
+            }
+            if ((t - lastSysTicks) >= 2) {
+                lastSysTicks = t;
+                SystemTask();
+            }
+        }
+        if (sendPB.ioResult != noErr) {
+            goto abort_transfer;
+        }
+
+        /* If single-buffered fallback, read next chunk now */
+        if (!chunkBufB && tx.state != TX_COMPLETE && tx.state != TX_ERROR) {
+            nextBytes = MacBinaryTx_ReadBytes(&tx, curPtr, chunkBufSize);
+        }
+
+        gActiveTransferBytes += curBytes;
+        speedBytes += curBytes;
+
+        unsigned long nowTicks = TickCount();
+        if ((nowTicks - lastSpeedTicks) >= 20) {
+            unsigned long ticks = nowTicks - lastSpeedTicks;
+            gTransferSpeedBps = (speedBytes * 60) / ticks;
+            lastSpeedTicks = nowTicks;
+            speedBytes = 0;
+        }
+
+        /* Throttle UI redraw & event polling to ~5 Hz (every 12 ticks) so CPU stays on I/O */
+        if ((nowTicks - lastUiTicks) >= 12 || nextBytes <= 0) {
+            EventRecord evt;
+            lastUiTicks = nowTicks;
+            UpdateProgressUI();
+            if (GetNextEvent(mDownMask | keyDownMask | autoKeyMask, &evt)) {
+                if (evt.what == mouseDown) {
+                    extern WindowRef gWindow;
+                    WindowPtr win;
+                    short part = FindWindow(evt.where, &win);
+                    if (part == inContent && win == gWindow) {
+                        Point localPt = evt.where;
+                        SetPort(gWindow);
+                        GlobalToLocal(&localPt);
+                        if (PtInRect(localPt, &gBtnCancelTransferRect)) {
+                            goto abort_transfer;
+                        }
+                    }
+                } else if (evt.what == keyDown || evt.what == autoKey) {
+                    char key = (char)(evt.message & charCodeMask);
+                    if (((evt.modifiers & cmdKey) && key == '.') || key == 27) {
                         goto abort_transfer;
                     }
-                }
-            } else if (evt.what == keyDown) {
-                char key = (char)(evt.message & charCodeMask);
-                if (((evt.modifiers & cmdKey) && key == '.') || key == 27) {
-                    goto abort_transfer;
                 }
             }
         }
 
-        long bytesToRead = MacBinaryTx_ReadBytes(&tx, chunkBuf, 8192);
-        if (bytesToRead <= 0) break;
-
-        wds[0].length = (unsigned short)bytesToRead;
-        wds[0].ptr    = (Ptr)chunkBuf;
-        wds[1].length = 0;
-        wds[1].ptr    = NULL;
-
-        memset(&pb, 0, sizeof(pb));
-        pb.ioCRefNum                        = gMacTCPRef;
-        pb.csCode                           = TCPSend;
-        pb.tcpStream                        = stream;
-        pb.csParam.send.ulpTimeoutValue     = 15;
-        pb.csParam.send.ulpTimeoutAction    = 1;
-        pb.csParam.send.validityFlags       = timeoutValue | timeoutAction;
-        pb.csParam.send.pushFlag            = true;
-        pb.csParam.send.urgentFlag          = false;
-        pb.csParam.send.wdsPtr              = (Ptr)wds;
-        err = PBControlSync((ParmBlkPtr)&pb);
-        if (err != noErr) {
-            goto abort_transfer;
+        if (chunkBufB) {
+            unsigned char *tmp = curPtr;
+            curPtr = nextPtr;
+            nextPtr = tmp;
         }
-
-        gActiveTransferBytes += bytesToRead;
-        speedBytes += bytesToRead;
-
-        if ((TickCount() - lastSpeedTicks) >= 30) {
-            unsigned long ticks = TickCount() - lastSpeedTicks;
-            gTransferSpeedBps = (speedBytes * 60) / ticks;
-            lastSpeedTicks = TickCount();
-            speedBytes = 0;
-        }
-
-        UpdateProgressUI();
-        SystemTask();
+        curBytes = nextBytes;
     }
 
     if (tx.state == TX_ERROR) {
@@ -651,11 +736,15 @@ Boolean NetSendFile(const FSSpec *spec)
     pb.tcpStream = stream;
     PBControlSync((ParmBlkPtr)&pb);
 
-    DisposePtr((Ptr)chunkBuf);
+    if (chunkBufA) DisposePtr((Ptr)chunkBufA);
+    if (chunkBufB) DisposePtr((Ptr)chunkBufB);
     DisposePtr(tcpRcvBuf);
 
     gTransferActive   = false;
     gTransferIsUpload = false;
+
+    /* Refresh reverse push channel immediately so client stays online after long uploads */
+    NetConnectChannel();
 
     TriggerUploadNotification(tx.fileName);
     UpdateProgressUI();
@@ -675,11 +764,14 @@ abort_transfer:
     pb.tcpStream = stream;
     PBControlSync((ParmBlkPtr)&pb);
 
-    DisposePtr((Ptr)chunkBuf);
+    if (chunkBufA) DisposePtr((Ptr)chunkBufA);
+    if (chunkBufB) DisposePtr((Ptr)chunkBufB);
     DisposePtr(tcpRcvBuf);
 
     gTransferActive   = false;
     gTransferIsUpload = false;
+
+    NetConnectChannel();
     UpdateProgressUI();
     return false;
 }
@@ -713,12 +805,15 @@ Boolean NetDiscoverServer(void)
     }
     udpStream = pb.udpStream;
 
-    targets[0] = (gOurIP & (ip_addr)gOurNetMask) | 2; /* 10.0.2.2 */
-    targets[1] = (gOurIP & (ip_addr)gOurNetMask) | 1;
-    targets[2] = gOurIP | ~(ip_addr)gOurNetMask;
-    targets[3] = (ip_addr)0xFFFFFFFF;
+    short numTargets = 0;
+    if ((gOurIP & (ip_addr)0xFFFFFF00UL) == (ip_addr)0x0A000200UL) {
+        targets[numTargets++] = (gOurIP & (ip_addr)gOurNetMask) | 2; /* 10.0.2.2 SLIRP host */
+    }
+    targets[numTargets++] = (gOurIP & (ip_addr)gOurNetMask) | 1;
+    targets[numTargets++] = gOurIP | ~(ip_addr)gOurNetMask;
+    targets[numTargets++] = (ip_addr)0xFFFFFFFF;
 
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < numTargets; i++) {
         memset(&pb, 0, sizeof(pb));
         wds[0].length = (unsigned short)strlen(magic);
         wds[0].ptr    = (Ptr)magic;
@@ -736,12 +831,12 @@ Boolean NetDiscoverServer(void)
         PBControlSync((ParmBlkPtr)&pb);
     }
 
-    /* Wait up to 2 seconds for reply */
+    /* Wait up to 1 second for reply */
     memset(&pb, 0, sizeof(pb));
     pb.ioCRefNum               = gMacTCPRef;
     pb.csCode                  = UDPRead;
     pb.udpStream               = udpStream;
-    pb.csParam.receive.timeOut = 2;
+    pb.csParam.receive.timeOut = 1;
     if (PBControlSync((ParmBlkPtr)&pb) == noErr && pb.csParam.receive.rcvBuffLen > 0) {
         char reply[256];
         short copyLen = pb.csParam.receive.rcvBuffLen;
@@ -854,15 +949,20 @@ Boolean NetConnectChannel(void)
     NetStopChannel();
 
     if (!gChannelRcvBuf) {
-        gChannelRcvBuf = NewPtr(CHAN_RCV_BUF_SIZE);
-        if (!gChannelRcvBuf) return false;
+        gChannelRcvBufLen = CHAN_RCV_BUF_SIZE;
+        gChannelRcvBuf = NewPtr(gChannelRcvBufLen);
+        if (!gChannelRcvBuf) {
+            gChannelRcvBufLen = FALLBACK_RCV_SIZE;
+            gChannelRcvBuf = NewPtr(gChannelRcvBufLen);
+            if (!gChannelRcvBuf) return false;
+        }
     }
 
     memset(&pb, 0, sizeof(pb));
     pb.ioCRefNum                 = gMacTCPRef;
     pb.csCode                    = TCPCreate;
     pb.csParam.create.rcvBuff    = gChannelRcvBuf;
-    pb.csParam.create.rcvBuffLen = CHAN_RCV_BUF_SIZE;
+    pb.csParam.create.rcvBuffLen = gChannelRcvBufLen;
     pb.csParam.create.notifyProc = NULL;
     err = PBControlSync((ParmBlkPtr)&pb);
     if (err != noErr) return false;
@@ -902,15 +1002,20 @@ Boolean NetStartListener(void)
     if (!NetInit()) return false;
 
     if (!gListenRcvBuf) {
-        gListenRcvBuf = NewPtr(LISTEN_RCV_BUF_SIZE);
-        if (!gListenRcvBuf) return false;
+        gListenRcvBufLen = LISTEN_RCV_BUF_SIZE;
+        gListenRcvBuf = NewPtr(gListenRcvBufLen);
+        if (!gListenRcvBuf) {
+            gListenRcvBufLen = FALLBACK_RCV_SIZE;
+            gListenRcvBuf = NewPtr(gListenRcvBufLen);
+            if (!gListenRcvBuf) return false;
+        }
     }
 
     memset(&pb, 0, sizeof(pb));
     pb.ioCRefNum                 = gMacTCPRef;
     pb.csCode                    = TCPCreate;
     pb.csParam.create.rcvBuff    = gListenRcvBuf;
-    pb.csParam.create.rcvBuffLen = LISTEN_RCV_BUF_SIZE;
+    pb.csParam.create.rcvBuffLen = gListenRcvBufLen;
     pb.csParam.create.notifyProc = NULL;
     err = PBControlSync((ParmBlkPtr)&pb);
     if (err != noErr) return false;
@@ -973,8 +1078,20 @@ void NetIdle(void)
 
     /* 1. Handle Reverse Push Channel connection lifecycle */
     if (gChannelState == CHAN_DISCONNECTED) {
-        if (gServerIP != 0 && (TickCount() - gLastChannelAttemptTick > 180)) {
-            gLastChannelAttemptTick = TickCount();
+        unsigned long nowTicks = TickCount();
+
+        /* Periodically check if SpotiMac or MacAI saved a server IP in Preferences when unconfigured */
+        if (gServerIP == 0 && !gChannelConnected && (nowTicks - gLastSiblingCheckTick > 240)) {
+            unsigned long sibIP = 0;
+            gLastSiblingCheckTick = nowTicks;
+            if (TryLoadSiblingServerIP(&sibIP) && sibIP != 0) {
+                NetSetServer(sibIP, DEFAULT_HTTP_PORT);
+                gLastChannelAttemptTick = 0;
+            }
+        }
+
+        if (gServerIP != 0 && (nowTicks - gLastChannelAttemptTick > 180)) {
+            gLastChannelAttemptTick = nowTicks;
             NetConnectChannel();
         }
     } else if (gChannelState == CHAN_CONNECTING) {
@@ -983,22 +1100,25 @@ void NetIdle(void)
                 /* Connection opened! Send reverse channel HTTP GET request */
                 char encName[128];
                 char encMach[128];
-                char req[512];
+                char req[768];
                 char hostStr[32];
+                char ourIpStr[32];
                 wdsEntry wds[2];
                 TCPiopb sendPB;
 
                 FormatIP(gServerIP, hostStr);
+                FormatIP(gOurIP, ourIpStr);
                 URLEncode(gClientName, encName, sizeof(encName));
                 URLEncode(GetMacMachineName(), encMach, sizeof(encMach));
 
-                sprintf(req,
-                    "GET /api/macdrop/channel?id=%s&name=%s&machine=%s&ver=%s HTTP/1.0\r\n"
+                snprintf(req, sizeof(req),
+                    "GET /api/macdrop/channel?id=%s&name=%s&machine=%s&ver=%s&ip=%s HTTP/1.0\r\n"
                     "Host: %s:%u\r\n"
                     "User-Agent: MacDrop-68k/%s\r\n"
+                    "X-Client-IP: %s\r\n"
                     "Connection: close\r\n\r\n",
-                    gClientID, encName, encMach, APP_VERSION_STR,
-                    hostStr, gServerPort, APP_VERSION_STR);
+                    gClientID, encName, encMach, APP_VERSION_STR, ourIpStr,
+                    hostStr, gServerPort, APP_VERSION_STR, ourIpStr);
 
                 wds[0].length = (unsigned short)strlen(req);
                 wds[0].ptr    = (Ptr)req;
@@ -1030,25 +1150,75 @@ void NetIdle(void)
             }
         }
     } else if (gChannelState == CHAN_CONNECTED || gChannelState == CHAN_STREAMING) {
-        short chunkBatch = 0;
-        while (chunkBatch < 16 && (gChannelState == CHAN_CONNECTED || gChannelState == CHAN_STREAMING)) {
-            if (!gChanRcvPending || gChanRcvPB.ioResult > 0) {
+        unsigned long lastDataTick = TickCount();
+        unsigned long lastSysTick  = lastDataTick;
+        unsigned long lastUiTick   = lastDataTick;
+        extern void UpdateProgressUI(void);
+        extern WindowRef gWindow;
+
+        while (gChannelState == CHAN_CONNECTED || gChannelState == CHAN_STREAMING) {
+            if (!gChanRcvPending) {
+                break;
+            }
+            if (gChanRcvPB.ioResult > 0) {
+                /* While actively streaming a file, stay inside NetIdle without yielding to
+                 * WaitNextEvent() (which incurs a 16.6ms MultiFinder context switch per chunk!) */
+                if (gChannelState == CHAN_STREAMING) {
+                    unsigned long nowTick = TickCount();
+                    if ((nowTick - lastDataTick) > 1200) {
+                        /* Stalled for >20s with no packets */
+                        break;
+                    }
+                    if ((nowTick - lastSysTick) >= 2) {
+                        lastSysTick = nowTick;
+                        SystemTask();
+                    }
+                    if ((nowTick - lastUiTick) >= 12) {
+                        EventRecord evt;
+                        lastUiTick = nowTick;
+                        UpdateProgressUI();
+                        if (GetNextEvent(mDownMask | keyDownMask | autoKeyMask, &evt)) {
+                            if (evt.what == mouseDown) {
+                                WindowPtr win;
+                                short part = FindWindow(evt.where, &win);
+                                if (part == inContent && win == gWindow) {
+                                    Point localPt = evt.where;
+                                    SetPort(gWindow);
+                                    GlobalToLocal(&localPt);
+                                    if (PtInRect(localPt, &gBtnCancelTransferRect)) {
+                                        NetCancelActiveTransfer();
+                                        UpdateProgressUI();
+                                        return;
+                                    }
+                                }
+                            } else if (evt.what == keyDown || evt.what == autoKey) {
+                                char key = (char)(evt.message & charCodeMask);
+                                if (((evt.modifiers & cmdKey) && key == '.') || key == 27) {
+                                    NetCancelActiveTransfer();
+                                    UpdateProgressUI();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 break;
             }
             gChanRcvPending = false;
-            chunkBatch++;
+            lastDataTick = TickCount();
 
             if (gChanRcvPB.ioResult == noErr && gChanRcvPB.csParam.receive.rcvBuffLen > 0) {
                 long nBytes = (unsigned short)gChanRcvPB.csParam.receive.rcvBuffLen;
                 unsigned char *pData = gChanChunkBuf;
 
                 if (!gHeaderParsed) {
-                    short copyLen = (short)nBytes;
-                    if (gHttpHeaderLen + copyLen > (short)(sizeof(gHttpHeaderBuf) - 1)) {
-                        copyLen = (short)(sizeof(gHttpHeaderBuf) - 1 - gHttpHeaderLen);
+                    long copyLen = nBytes;
+                    if (gHttpHeaderLen + copyLen > (long)(sizeof(gHttpHeaderBuf) - 1)) {
+                        copyLen = (long)(sizeof(gHttpHeaderBuf) - 1 - gHttpHeaderLen);
                     }
-                    memcpy(gHttpHeaderBuf + gHttpHeaderLen, pData, copyLen);
-                    gHttpHeaderLen += copyLen;
+                    memcpy(gHttpHeaderBuf + gHttpHeaderLen, pData, (size_t)copyLen);
+                    gHttpHeaderLen += (short)copyLen;
                     gHttpHeaderBuf[gHttpHeaderLen] = '\0';
 
                     char *delim = strstr(gHttpHeaderBuf, "\r\n\r\n");
@@ -1070,10 +1240,14 @@ void NetIdle(void)
                         gHeaderParsed = true;
                         gChannelState = CHAN_STREAMING;
                         gTransferActive = true;
+                        gTransferIsUpload = false;
                         MacBinaryRx_Init(&gChannelRx);
                         gActiveTransferName[0] = '\0';
                         gActiveTransferBytes = 0;
                         gActiveTransferTotal = 0;
+                        gTransferSpeedBps    = 0;
+                        gRxLastSpeedTicks    = TickCount();
+                        gRxLastSpeedBytes    = 0;
                         gCurrentTransferId[0] = '\0';
 
                         /* Extract Transfer ID for ACK */
@@ -1099,6 +1273,13 @@ void NetIdle(void)
                             gActiveTransferTotal = gChannelRx.dataLen + gChannelRx.rsrcLen;
                             gActiveTransferBytes = gChannelRx.dataBytesWritten + gChannelRx.rsrcBytesWritten;
                         }
+
+                        if (gWindow && !IsWindowVisible(gWindow)) {
+                            ShowWindow(gWindow);
+                            SelectWindow(gWindow);
+                        }
+                        UpdateProgressUI();
+                        lastUiTick = TickCount();
                     }
                 } else {
                     MacBinaryRx_ProcessBytes(&gChannelRx, pData, nBytes);
@@ -1109,6 +1290,46 @@ void NetIdle(void)
                     gActiveTransferBytes = gChannelRx.dataBytesWritten + gChannelRx.rsrcBytesWritten;
                 }
 
+                if (gChannelState == CHAN_STREAMING) {
+                    unsigned long nowTicks = TickCount();
+                    if ((nowTicks - gRxLastSpeedTicks) >= 20) {
+                        unsigned long elapsedTicks = nowTicks - gRxLastSpeedTicks;
+                        unsigned long bytesDelta = gActiveTransferBytes - gRxLastSpeedBytes;
+                        gTransferSpeedBps = (bytesDelta * 60) / elapsedTicks;
+                        gRxLastSpeedTicks = nowTicks;
+                        gRxLastSpeedBytes = gActiveTransferBytes;
+                    }
+
+                    if ((nowTicks - lastUiTick) >= 12) {
+                        EventRecord evt;
+                        lastUiTick = nowTicks;
+                        UpdateProgressUI();
+                        if (GetNextEvent(mDownMask | keyDownMask | autoKeyMask, &evt)) {
+                            if (evt.what == mouseDown) {
+                                WindowPtr win;
+                                short part = FindWindow(evt.where, &win);
+                                if (part == inContent && win == gWindow) {
+                                    Point localPt = evt.where;
+                                    SetPort(gWindow);
+                                    GlobalToLocal(&localPt);
+                                    if (PtInRect(localPt, &gBtnCancelTransferRect)) {
+                                        NetCancelActiveTransfer();
+                                        UpdateProgressUI();
+                                        return;
+                                    }
+                                }
+                            } else if (evt.what == keyDown || evt.what == autoKey) {
+                                char key = (char)(evt.message & charCodeMask);
+                                if (((evt.modifiers & cmdKey) && key == '.') || key == 27) {
+                                    NetCancelActiveTransfer();
+                                    UpdateProgressUI();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (gChannelState == CHAN_STREAMING && gChannelRx.state == RX_COMPLETE) {
                     MacBinaryRx_Finish(&gChannelRx);
                     NetStopChannel();
@@ -1117,7 +1338,9 @@ void NetIdle(void)
                     TriggerTransferNotification(gChannelRx.fileName);
                     gTransferActive = false;
                     gCurrentTransferId[0] = '\0';
-                    gLastChannelAttemptTick = 0; /* reconnect immediately for next file */
+                    gLastChannelAttemptTick = 0;
+                    NetConnectChannel(); /* reconnect immediately for next file */
+                    UpdateProgressUI();
                     return;
                 }
 
@@ -1152,16 +1375,116 @@ void NetIdle(void)
     if (gListenerActive && !gTransferActive) {
         if (gPassivePB.ioResult <= 0) {
             if (gPassivePB.ioResult == noErr) {
-                /* Direct incoming connection */
+                ip_addr remotePeerIP = gPassivePB.csParam.open.remoteHost;
+                TCPiopb rcvPB;
+                OSErr rErr;
+
+                /* Read first chunk to distinguish a server ping/discovery probe from a file transfer */
+                memset(&rcvPB, 0, sizeof(rcvPB));
+                rcvPB.ioCRefNum                        = gMacTCPRef;
+                rcvPB.csCode                           = TCPRcv;
+                rcvPB.tcpStream                        = gListenStream;
+                rcvPB.csParam.receive.rcvBuff          = (Ptr)gListenChunkBuf;
+                rcvPB.csParam.receive.rcvBuffLen       = CHUNK_BUF_SIZE;
+                rcvPB.csParam.receive.commandTimeoutValue = 1;
+                rcvPB.csParam.receive.secondTimeStamp  = 0;
+                rcvPB.csParam.receive.urgentFlag       = false;
+                rcvPB.csParam.receive.markFlag         = false;
+
+                rErr = PBControlSync((ParmBlkPtr)&rcvPB);
+
+                if (rErr != noErr || rcvPB.csParam.receive.rcvBuffLen == 0 ||
+                    (rcvPB.csParam.receive.rcvBuffLen >= 13 && strncmp((char *)gListenChunkBuf, "MACDROP_HELLO", 13) == 0)) {
+                    /* Server Ping / Auto-Discovery Probe! Reply with MACDROP_PONG and auto-pair if needed */
+                    ip_addr discoveredIP = remotePeerIP;
+                    unsigned short discoveredPort = DEFAULT_HTTP_PORT;
+
+                    if (rErr == noErr && rcvPB.csParam.receive.rcvBuffLen >= 14 &&
+                        strncmp((char *)gListenChunkBuf, "MACDROP_HELLO|", 14) == 0) {
+                        char helloBuf[128];
+                        short hLen = rcvPB.csParam.receive.rcvBuffLen;
+                        if (hLen > (short)(sizeof(helloBuf) - 1)) hLen = sizeof(helloBuf) - 1;
+                        memcpy(helloBuf, gListenChunkBuf, hLen);
+                        helloBuf[hLen] = '\0';
+
+                        char *pIp = helloBuf + 14;
+                        char *pSep = strchr(pIp, '|');
+                        if (pSep) {
+                            *pSep = '\0';
+                            int portVal = atoi(pSep + 1);
+                            if (portVal > 0 && portVal < 65536) {
+                                discoveredPort = (unsigned short)portVal;
+                            }
+                        }
+                        ip_addr parsedHelloIP = 0;
+                        if (ParseIPAddress(pIp, &parsedHelloIP) && parsedHelloIP != 0 && parsedHelloIP != 0x7F000001UL) {
+                            /* In Basilisk II SLIRP (10.0.2.x), keep the on-subnet 10.0.2.2 peer IP */
+                            if (!((gOurIP & 0xFFFFFF00UL) == 0x0A000200UL && (remotePeerIP & 0xFFFFFF00UL) == 0x0A000200UL)) {
+                                discoveredIP = parsedHelloIP;
+                            }
+                        }
+                    }
+
+                    /* Send MACDROP_PONG|<id>|<name>|<machine>|<ver>|<ourIp> */
+                    {
+                        TCPiopb sendPB;
+                        wdsEntry wds[2];
+                        char pongStr[256];
+                        char ourIpStr[32];
+                        FormatIP(gOurIP, ourIpStr);
+                        snprintf(pongStr, sizeof(pongStr), "MACDROP_PONG|%s|%s|%s|%s|%s\n",
+                                 gClientID, gClientName, GetMacMachineName(), APP_VERSION_STR, ourIpStr);
+
+                        wds[0].length = (unsigned short)strlen(pongStr);
+                        wds[0].ptr    = (Ptr)pongStr;
+                        wds[1].length = 0;
+                        wds[1].ptr    = NULL;
+
+                        memset(&sendPB, 0, sizeof(sendPB));
+                        sendPB.ioCRefNum                     = gMacTCPRef;
+                        sendPB.csCode                        = TCPSend;
+                        sendPB.tcpStream                     = gListenStream;
+                        sendPB.csParam.send.ulpTimeoutValue  = 2;
+                        sendPB.csParam.send.ulpTimeoutAction = 1;
+                        sendPB.csParam.send.validityFlags    = timeoutValue | timeoutAction;
+                        sendPB.csParam.send.pushFlag         = true;
+                        sendPB.csParam.send.urgentFlag       = false;
+                        sendPB.csParam.send.wdsPtr           = (Ptr)wds;
+                        PBControlSync((ParmBlkPtr)&sendPB);
+                    }
+
+                    NetStopListener();
+                    NetStartListener();
+
+                    /* If we aren't connected to the server yet, auto-connect our reverse channel to this server! */
+                    if (!gChannelConnected && discoveredIP != 0) {
+                        NetSetServer(discoveredIP, discoveredPort);
+                        NetConnectChannel();
+                    }
+                    return;
+                }
+
+                /* Direct incoming MacBinary file transfer */
                 gTransferActive = true;
+                gTransferIsUpload = false;
                 MacBinaryRx_Init(&gPassiveRx);
                 gActiveTransferName[0] = '\0';
                 gActiveTransferBytes = 0;
                 gActiveTransferTotal = 0;
+                gTransferSpeedBps    = 0;
+                gRxLastSpeedTicks    = TickCount();
+                gRxLastSpeedBytes    = 0;
 
-                /* Read from direct connection until done */
-                while (1) {
-                    TCPiopb rcvPB;
+                /* Process the first chunk already read */
+                MacBinaryRx_ProcessBytes(&gPassiveRx, gListenChunkBuf, (unsigned short)rcvPB.csParam.receive.rcvBuffLen);
+                if (gPassiveRx.fileName[0] != '\0') {
+                    snprintf(gActiveTransferName, sizeof(gActiveTransferName), "%s", gPassiveRx.fileName);
+                }
+                gActiveTransferTotal = gPassiveRx.dataLen + gPassiveRx.rsrcLen;
+                gActiveTransferBytes = gPassiveRx.dataBytesWritten + gPassiveRx.rsrcBytesWritten;
+
+                /* Read remaining chunks from direct connection until done */
+                while (gPassiveRx.state != RX_COMPLETE && gPassiveRx.state != RX_ERROR) {
                     unsigned short askLen = CHUNK_BUF_SIZE;
                     if (gPassiveRx.headerBytesRead == 128) {
                         unsigned long remData = (gPassiveRx.dataBytesTarget > gPassiveRx.dataBytesPadded)
@@ -1180,57 +1503,54 @@ void NetIdle(void)
                     rcvPB.tcpStream                     = gListenStream;
                     rcvPB.csParam.receive.rcvBuff       = (Ptr)gListenChunkBuf;
                     rcvPB.csParam.receive.rcvBuffLen    = askLen;
-                    rcvPB.csParam.receive.commandTimeoutValue = 1;
+                    rcvPB.csParam.receive.commandTimeoutValue = 2;
                     rcvPB.csParam.receive.secondTimeStamp = 0;
                     rcvPB.csParam.receive.urgentFlag    = false;
                     rcvPB.csParam.receive.markFlag      = false;
 
-                    OSErr rErr = PBControlSync((ParmBlkPtr)&rcvPB);
+                    rErr = PBControlSync((ParmBlkPtr)&rcvPB);
                     if (rErr == noErr && rcvPB.csParam.receive.rcvBuffLen > 0) {
-                        short bytes = rcvPB.csParam.receive.rcvBuffLen;
+                        long bytes = (unsigned short)rcvPB.csParam.receive.rcvBuffLen;
                         MacBinaryRx_ProcessBytes(&gPassiveRx, gListenChunkBuf, bytes);
                         if (gPassiveRx.fileName[0] != '\0') {
                             snprintf(gActiveTransferName, sizeof(gActiveTransferName), "%s", gPassiveRx.fileName);
                         }
                         gActiveTransferTotal = gPassiveRx.dataLen + gPassiveRx.rsrcLen;
                         gActiveTransferBytes = gPassiveRx.dataBytesWritten + gPassiveRx.rsrcBytesWritten;
-
-                        if (gPassiveRx.state == RX_COMPLETE) {
-                            MacBinaryRx_Finish(&gPassiveRx);
-
-                            /* Send ACK back to server over the direct TCP socket */
-                            TCPiopb sendPB;
-                            wdsEntry wds[2];
-                            char ackStr[64];
-                            sprintf(ackStr, "MACDROP_ACK %lu\n", gPassiveRx.dataBytesWritten + gPassiveRx.rsrcBytesWritten);
-                            wds[0].length = (unsigned short)strlen(ackStr);
-                            wds[0].ptr    = (Ptr)ackStr;
-                            wds[1].length = 0;
-                            wds[1].ptr    = NULL;
-
-                            memset(&sendPB, 0, sizeof(sendPB));
-                            sendPB.ioCRefNum                     = gMacTCPRef;
-                            sendPB.csCode                        = TCPSend;
-                            sendPB.tcpStream                     = gListenStream;
-                            sendPB.csParam.send.ulpTimeoutValue  = 3;
-                            sendPB.csParam.send.ulpTimeoutAction = 1;
-                            sendPB.csParam.send.validityFlags    = timeoutValue | timeoutAction;
-                            sendPB.csParam.send.pushFlag         = true;
-                            sendPB.csParam.send.urgentFlag       = false;
-                            sendPB.csParam.send.wdsPtr           = (Ptr)wds;
-                            PBControlSync((ParmBlkPtr)&sendPB);
-
-                            MacBinaryRx_FlushDestVolume();
-                            TriggerTransferNotification(gPassiveRx.fileName);
-                            gTransferActive = false;
-                            break;
-                        }
                     } else {
                         break;
                     }
                 }
 
-                if (gPassiveRx.state != RX_COMPLETE) {
+                if (gPassiveRx.state == RX_COMPLETE) {
+                    MacBinaryRx_Finish(&gPassiveRx);
+
+                    /* Send ACK back to server over the direct TCP socket */
+                    TCPiopb sendPB;
+                    wdsEntry wds[2];
+                    char ackStr[64];
+                    sprintf(ackStr, "MACDROP_ACK %lu\n", gPassiveRx.dataBytesWritten + gPassiveRx.rsrcBytesWritten);
+                    wds[0].length = (unsigned short)strlen(ackStr);
+                    wds[0].ptr    = (Ptr)ackStr;
+                    wds[1].length = 0;
+                    wds[1].ptr    = NULL;
+
+                    memset(&sendPB, 0, sizeof(sendPB));
+                    sendPB.ioCRefNum                     = gMacTCPRef;
+                    sendPB.csCode                        = TCPSend;
+                    sendPB.tcpStream                     = gListenStream;
+                    sendPB.csParam.send.ulpTimeoutValue  = 3;
+                    sendPB.csParam.send.ulpTimeoutAction = 1;
+                    sendPB.csParam.send.validityFlags    = timeoutValue | timeoutAction;
+                    sendPB.csParam.send.pushFlag         = true;
+                    sendPB.csParam.send.urgentFlag       = false;
+                    sendPB.csParam.send.wdsPtr           = (Ptr)wds;
+                    PBControlSync((ParmBlkPtr)&sendPB);
+
+                    MacBinaryRx_FlushDestVolume();
+                    TriggerTransferNotification(gPassiveRx.fileName);
+                    gTransferActive = false;
+                } else {
                     MacBinaryRx_Abort(&gPassiveRx);
                     gTransferActive = false;
                 }

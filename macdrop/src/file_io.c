@@ -148,6 +148,48 @@ typedef struct {
     unsigned short serverPort;
 } MacDropPrefsRecord;
 
+#define MACAI_PREFS_MAGIC     0x4D434131UL /* 'MCA1' */
+#define SPOTIMAC_PREFS_MAGIC  0x4D435331UL /* 'MCS1' */
+
+typedef struct {
+    unsigned long magic;
+    unsigned long serverIp;
+} SiblingPrefsHeader;
+
+Boolean TryLoadSiblingServerIP(unsigned long *outIP)
+{
+    short vRefNum = 0;
+    long dirID = 0;
+    short refNum = 0;
+    SiblingPrefsHeader hdr;
+    long count;
+    ConstStr255Param names[2] = { "\pSpotiMac Prefs", "\pMacAI Prefs" };
+    short i;
+
+    if (!outIP) return false;
+
+    if (FindFolder(kOnSystemDisk, kPreferencesFolderType, kDontCreateFolder, &vRefNum, &dirID) != noErr) {
+        return false;
+    }
+
+    for (i = 0; i < 2; i++) {
+        if (HOpen(vRefNum, dirID, names[i], fsRdPerm, &refNum) == noErr) {
+            count = sizeof(hdr);
+            memset(&hdr, 0, sizeof(hdr));
+            if (FSRead(refNum, &count, &hdr) == noErr && count >= 8) {
+                if ((hdr.magic == SPOTIMAC_PREFS_MAGIC || hdr.magic == MACAI_PREFS_MAGIC) &&
+                    hdr.serverIp != 0) {
+                    FSClose(refNum);
+                    *outIP = hdr.serverIp;
+                    return true;
+                }
+            }
+            FSClose(refNum);
+        }
+    }
+    return false;
+}
+
 void LoadPreferences(void)
 {
     short vRefNum = 0;
@@ -206,6 +248,15 @@ void LoadPreferences(void)
         GetDateTime(&now);
         snprintf(gClientID, sizeof(gClientID), "mac_%08lX", now);
         SavePreferences();
+    }
+
+    if (gSavedServerIP == 0) {
+        unsigned long sibIP = 0;
+        if (TryLoadSiblingServerIP(&sibIP) && sibIP != 0) {
+            gSavedServerIP   = sibIP;
+            gSavedServerPort = 6800;
+            SavePreferences();
+        }
     }
 }
 
@@ -335,12 +386,12 @@ OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long c
 
     while (offset < count && rx->state != RX_COMPLETE && rx->state != RX_ERROR) {
         if (rx->state == RX_HEADER) {
-            short needed = 128 - rx->headerBytesRead;
-            short take = (short)(count - offset);
+            long needed = 128 - rx->headerBytesRead;
+            long take = count - offset;
             if (take > needed) take = needed;
 
-            memcpy(&rx->headerBuf[rx->headerBytesRead], &buf[offset], take);
-            rx->headerBytesRead += take;
+            memcpy(&rx->headerBuf[rx->headerBytesRead], &buf[offset], (size_t)take);
+            rx->headerBytesRead += (short)take;
             offset += take;
 
             if (rx->headerBytesRead == 128) {
@@ -681,12 +732,12 @@ long MacBinaryTx_ReadBytes(MacBinaryTx *tx, unsigned char *outBuf, long maxCount
 
     while (totalRead < maxCount && tx->state != TX_COMPLETE && tx->state != TX_ERROR) {
         if (tx->state == TX_HEADER) {
-            short needed = 128 - tx->headerBytesSent;
-            short take = (short)(maxCount - totalRead);
+            long needed = 128 - tx->headerBytesSent;
+            long take = maxCount - totalRead;
             if (take > needed) take = needed;
 
-            memcpy(outBuf + totalRead, &tx->headerBuf[tx->headerBytesSent], take);
-            tx->headerBytesSent += take;
+            memcpy(outBuf + totalRead, &tx->headerBuf[tx->headerBytesSent], (size_t)take);
+            tx->headerBytesSent += (short)take;
             totalRead += take;
 
             if (tx->headerBytesSent >= 128) {

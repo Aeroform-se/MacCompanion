@@ -45,6 +45,7 @@ Boolean ChooseDestinationFolder(void);
 /* Save / load settings */
 void SavePreferences(void);
 void LoadPreferences(void);
+Boolean TryLoadSiblingServerIP(unsigned long *outIP);
 
 /* Stream Receiver State Machine */
 typedef enum {

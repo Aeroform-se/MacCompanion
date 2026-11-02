@@ -36,8 +36,9 @@
 #define ITEM_SEND_FILE  1
 #define ITEM_DOWNLOAD   3
 #define ITEM_SET_NAME   4
-#define ITEM_CLOSE      6
-#define ITEM_QUIT       7
+#define ITEM_SET_SERVER 5
+#define ITEM_CLOSE      7
+#define ITEM_QUIT       8
 
 #define ITEM_SOUND      1
 #define ITEM_NOTIFY     2
@@ -68,6 +69,8 @@ static char      gClientNameInput[64]  = "";
 static ConnState gConnState          = CONN_READY;
 static char      gServerIpInput[32]  = "10.0.2.2";
 static char      gConnErrorMsg[64]   = "";
+static char      gCachedDownloadPath[160] = "";
+static Boolean   gLastDrawnTransferActive = false;
 
 /* UI Rectangles for hit testing */
 static Rect      gBtnRetryScanRect;
@@ -75,10 +78,14 @@ static Rect      gBtnConnectRect;
 static Rect      gBtnCancelConnRect;
 static Rect      gBtnSaveNameRect;
 static Rect      gBtnCancelNameRect;
+static Rect      gStatusRowRect;
 static Rect      gDownloadFolderRowRect;
 static Rect      gDropZoneRect;
 
 void UpdateProgressUI(void);
+static void DrawTransferProgressOnly(void);
+static void RefreshCachedDownloadPath(void);
+static void PrepareServerIpInput(void);
 static void SwitchToFinder(void);
 static void SyncSharedData(void);
 static void UpdateMenuStates(void);
@@ -164,10 +171,90 @@ static void DrawProgressBar(short left, short top, short width, short height, un
 
 static void DrawWindow(void);
 
+static void RefreshCachedDownloadPath(void)
+{
+    Str255 volName;
+    volName[0] = 0;
+    GetVInfo(gDestVRefNum, volName, NULL, NULL);
+    if (volName[0] > 0) {
+        char volStr[64];
+        short vLen = volName[0] > 63 ? 63 : volName[0];
+        memcpy(volStr, &volName[1], vLen);
+        volStr[vLen] = '\0';
+        snprintf(gCachedDownloadPath, sizeof(gCachedDownloadPath), "%s:%s:", volStr, gDestFolderName);
+    } else {
+        snprintf(gCachedDownloadPath, sizeof(gCachedDownloadPath), ":%s:", gDestFolderName);
+    }
+}
+
+static void PrepareServerIpInput(void)
+{
+    if (gServerIP != 0) {
+        FormatIP(gServerIP, gServerIpInput);
+    } else if (gSavedServerIP != 0) {
+        FormatIP(gSavedServerIP, gServerIpInput);
+    } else if (gOurIP != 0 && (gOurIP & 0xFFFFFF00UL) != 0x0A000200UL) {
+        unsigned char b0 = (unsigned char)((gOurIP >> 24) & 0xFF);
+        unsigned char b1 = (unsigned char)((gOurIP >> 16) & 0xFF);
+        unsigned char b2 = (unsigned char)((gOurIP >> 8)  & 0xFF);
+        snprintf(gServerIpInput, sizeof(gServerIpInput), "%u.%u.%u.", b0, b1, b2);
+    } else if (gServerIpInput[0] == '\0') {
+        strcpy(gServerIpInput, "10.0.2.2");
+    }
+}
+
+static void DrawTransferProgressOnly(void)
+{
+    Rect r, textEraseR;
+    char buf[256];
+    char curStr[32], totStr[32];
+    short y = 82;
+    short barW;
+
+    if (!gWindow || !IsWindowVisible(gWindow) || !gTransferActive || gModalSetName || gConnState != CONN_READY) {
+        DrawWindow();
+        return;
+    }
+
+    SetPort(gWindow);
+    r = gWindow->portRect;
+    TextFont(kFontIDGeneva);
+    TextSize(9);
+    TextFace(normal);
+
+    barW = r.right - 32 - 76;
+    DrawProgressBar(16, y, barW, 14, gActiveTransferBytes, gActiveTransferTotal);
+    y += 28;
+
+    SetRect(&textEraseR, 16, y - 10, r.right - 16, y + 5);
+    EraseRect(&textEraseR);
+
+    FormatBytes(gActiveTransferBytes, curStr);
+    FormatBytes(gActiveTransferTotal, totStr);
+
+    MoveTo(16, y);
+    if (gActiveTransferTotal > 0) {
+        unsigned short pct = (unsigned short)(((unsigned long long)gActiveTransferBytes * 100) / gActiveTransferTotal);
+        if (gTransferSpeedBps >= 1024) {
+            sprintf(buf, "%s / %s (%u%%) - %lu.%lu kB/s", curStr, totStr, pct,
+                    gTransferSpeedBps / 1024, (gTransferSpeedBps % 1024) * 10 / 1024);
+        } else {
+            sprintf(buf, "%s / %s (%u%%)", curStr, totStr, pct);
+        }
+    } else {
+        sprintf(buf, "%s transferred", curStr);
+    }
+    DrawCString(buf);
+}
+
 void UpdateProgressUI(void)
 {
     if (!gWindow || !IsWindowVisible(gWindow)) return;
-    DrawWindow();
+    if (gTransferActive && gLastDrawnTransferActive && !gModalSetName && gConnState == CONN_READY) {
+        DrawTransferProgressOnly();
+    } else {
+        DrawWindow();
+    }
 }
 
 static DragTrackingHandlerUPP gDragTrackingUPP = NULL;
@@ -324,10 +411,10 @@ static void EnsureFrontProcess(void)
     if (!isFront) {
         short i;
         gInternalSwitch = true;
-        SetFrontProcess(&gMacDropPSN);
         for (i = 0; i < 30; i++) {
             EventRecord ev;
-            WaitNextEvent(everyEvent, &ev, 2, NULL);
+            SetFrontProcess(&gMacDropPSN);
+            WaitNextEvent(everyEvent, &ev, 1, NULL);
             GetFrontProcess(&frontPSN);
             SameProcess(&gMacDropPSN, &frontPSN, &isFront);
             if (isFront) break;
@@ -453,6 +540,7 @@ static void ChooseDestinationWithFolderPicker(void)
         }
 
         SavePreferences();
+        RefreshCachedDownloadPath();
         if (gWindow && IsWindowVisible(gWindow)) {
             DrawWindow();
         }
@@ -721,6 +809,40 @@ static void DrawWindow(void)
     TextSize(9);
     TextFace(normal);
 
+    /* --- MODAL DIALOG: SET CLIENT NAME (Top priority so modal rects are always active) --- */
+    if (gModalSetName) {
+        Rect dlgR, boxR;
+        short cx = (r.left + r.right) / 2;
+        const char *t1 = "Set Macintosh Name";
+        const char *t2 = "Enter a name for this Mac on MacCompanion:";
+
+        SetRect(&dlgR, cx - 145, 35, cx + 145, 165);
+        DrawShadowRoundRect(&dlgR, 12, 12, 2);
+
+        TextFace(bold);
+        MoveTo(cx - MeasureCString(t1) / 2, dlgR.top + 22);
+        DrawCString(t1);
+        TextFace(normal);
+
+        MoveTo(cx - MeasureCString(t2) / 2, dlgR.top + 46);
+        DrawCString(t2);
+
+        SetRect(&boxR, cx - 100, dlgR.top + 58, cx + 100, dlgR.top + 78);
+        EraseRect(&boxR);
+        FrameRect(&boxR);
+        sprintf(buf, "%s_", gClientNameInput);
+        MoveTo(boxR.left + 6, boxR.top + 14);
+        DrawCString(buf);
+
+        SetRect(&gBtnSaveNameRect, cx - 90, dlgR.bottom - 32, cx - 10, dlgR.bottom - 12);
+        DrawButton(&gBtnSaveNameRect, "Save", true);
+
+        SetRect(&gBtnCancelNameRect, cx + 15, dlgR.bottom - 32, cx + 90, dlgR.bottom - 12);
+        DrawButton(&gBtnCancelNameRect, "Cancel", false);
+        gLastDrawnTransferActive = false;
+        return;
+    }
+
     /* --- VIEW A: SEARCHING FOR SERVER --- */
     if (gConnState == CONN_SEARCHING) {
         Rect cardR;
@@ -746,6 +868,7 @@ static void DrawWindow(void)
 
         SetRect(&gBtnCancelConnRect, cx - 40, cardR.bottom - 32, cx + 40, cardR.bottom - 12);
         DrawButton(&gBtnCancelConnRect, "Cancel", false);
+        gLastDrawnTransferActive = false;
         return;
     }
 
@@ -753,8 +876,8 @@ static void DrawWindow(void)
     if (gConnState == CONN_FAILED) {
         Rect cardR, boxR;
         short cx = (r.left + r.right) / 2;
-        const char *t1 = "No MacCompanion server found";
-        const char *t2 = "Or connect manually:";
+        const char *t1 = gChannelConnected ? "Configure MacCompanion Server" : "No MacCompanion server found";
+        const char *t2 = "Enter MacCompanion Server IP:";
 
         SetRect(&cardR, cx - 150, 20, cx + 150, 185);
         DrawShadowRoundRect(&cardR, 12, 12, 2);
@@ -793,12 +916,14 @@ static void DrawWindow(void)
 
         SetRect(&gBtnCancelConnRect, cx + 10, cardR.bottom - 32, cx + 85, cardR.bottom - 12);
         DrawButton(&gBtnCancelConnRect, "Cancel", false);
+        gLastDrawnTransferActive = false;
         return;
     }
 
     /* --- VIEW C: NORMAL READY STATUS VIEW --- */
 
-    /* Top Status line */
+    /* Top Status line (clickable to open Server IP configuration) */
+    SetRect(&gStatusRowRect, 16, y - 10, r.right - 16, y + 4);
     MoveTo(16, y);
     TextFace(bold);
     DrawCString("Status: ");
@@ -810,9 +935,9 @@ static void DrawWindow(void)
             snprintf(buf, sizeof(buf), "Connected to server");
         }
     } else if (gServerConnected) {
-        snprintf(buf, sizeof(buf), "Connecting to server...");
+        snprintf(buf, sizeof(buf), "Connecting to server... (Click to set IP)");
     } else {
-        snprintf(buf, sizeof(buf), "Searching for server...");
+        snprintf(buf, sizeof(buf), "Searching for server... (Click to set IP)");
     }
     DrawCString(buf);
     y += 16;
@@ -823,21 +948,10 @@ static void DrawWindow(void)
     TextFace(bold);
     DrawCString("Download Dir: ");
     TextFace(normal);
-    {
-        Str255 volName;
-        volName[0] = 0;
-        GetVInfo(gDestVRefNum, volName, NULL, NULL);
-        if (volName[0] > 0) {
-            char volStr[64];
-            short vLen = volName[0] > 63 ? 63 : volName[0];
-            memcpy(volStr, &volName[1], vLen);
-            volStr[vLen] = '\0';
-            snprintf(buf, sizeof(buf), "%s:%s:", volStr, gDestFolderName);
-        } else {
-            snprintf(buf, sizeof(buf), ":%s:", gDestFolderName);
-        }
+    if (gCachedDownloadPath[0] == '\0') {
+        RefreshCachedDownloadPath();
     }
-    DrawCString(buf);
+    DrawCString(gCachedDownloadPath);
     y += 16;
 
     /* Divider */
@@ -868,7 +982,7 @@ static void DrawWindow(void)
 
         SetRect(&gBtnCancelTransferRect, r.right - 16 - 70, y - 2, r.right - 16, y + 16);
         DrawButton(&gBtnCancelTransferRect, "Cancel", false);
-        y += 20;
+        y += 28;
 
         MoveTo(16, y);
         if (gActiveTransferTotal > 0) {
@@ -883,6 +997,7 @@ static void DrawWindow(void)
             sprintf(buf, "%s transferred", curStr);
         }
         DrawCString(buf);
+        gLastDrawnTransferActive = true;
     } else {
         /* Drop Box Area */
         Rect dropBox;
@@ -910,40 +1025,8 @@ static void DrawWindow(void)
         TextFace(normal);
         MoveTo(cx - MeasureCString(t2) / 2, dropBox.top + 98);
         DrawCString(t2);
+        gLastDrawnTransferActive = false;
     }
-
-    /* --- MODAL DIALOG: SET CLIENT NAME --- */
-    if (gModalSetName) {
-        Rect dlgR, boxR;
-        short cx = (r.left + r.right) / 2;
-        const char *t1 = "Set Macintosh Name";
-        const char *t2 = "Enter a name for this Mac on MacCompanion:";
-
-        SetRect(&dlgR, cx - 145, 35, cx + 145, 165);
-        DrawShadowRoundRect(&dlgR, 12, 12, 2);
-
-        TextFace(bold);
-        MoveTo(cx - MeasureCString(t1) / 2, dlgR.top + 22);
-        DrawCString(t1);
-        TextFace(normal);
-
-        MoveTo(cx - MeasureCString(t2) / 2, dlgR.top + 46);
-        DrawCString(t2);
-
-        SetRect(&boxR, cx - 100, dlgR.top + 58, cx + 100, dlgR.top + 78);
-        EraseRect(&boxR);
-        FrameRect(&boxR);
-        sprintf(buf, "%s_", gClientNameInput);
-        MoveTo(boxR.left + 6, boxR.top + 14);
-        DrawCString(buf);
-
-        SetRect(&gBtnSaveNameRect, cx - 90, dlgR.bottom - 32, cx - 10, dlgR.bottom - 12);
-        DrawButton(&gBtnSaveNameRect, "Save", true);
-
-        SetRect(&gBtnCancelNameRect, cx + 15, dlgR.bottom - 32, cx + 90, dlgR.bottom - 12);
-        DrawButton(&gBtnCancelNameRect, "Cancel", false);
-    }
-
 }
 
 static void ProcessSharedCommand(void)
@@ -955,7 +1038,7 @@ static void ProcessSharedCommand(void)
 
     switch (cmd) {
         case CMD_OPEN_WINDOW:
-            SetFrontProcess(&gMacDropPSN);
+            EnsureFrontProcess();
             if (gWindow) {
                 ShowWindow(gWindow);
                 SelectWindow(gWindow);
@@ -989,12 +1072,29 @@ static void ProcessSharedCommand(void)
             break;
 
         case CMD_SET_NAME:
-            SetFrontProcess(&gMacDropPSN);
+            EnsureFrontProcess();
             DrawMenuBar();
             gWasHiddenBeforeName = (!gWindow || !IsWindowVisible(gWindow));
             gModalSetName = true;
             strncpy(gClientNameInput, gClientName, sizeof(gClientNameInput) - 1);
             gClientNameInput[sizeof(gClientNameInput) - 1] = '\0';
+            if (gWindow) {
+                ShowWindow(gWindow);
+                SelectWindow(gWindow);
+                SetPortWindowPort(gWindow);
+                DrawWindow();
+            }
+            SyncSharedData();
+            UpdateMenuStates();
+            break;
+
+        case CMD_FIND_SERVER:
+            EnsureFrontProcess();
+            DrawMenuBar();
+            gModalSetName = false;
+            gConnErrorMsg[0] = '\0';
+            PrepareServerIpInput();
+            gConnState = CONN_FAILED;
             if (gWindow) {
                 ShowWindow(gWindow);
                 SelectWindow(gWindow);
@@ -1074,6 +1174,21 @@ static void HandleMenuChoice(long choice)
                     gModalSetName = true;
                     strncpy(gClientNameInput, gClientName, sizeof(gClientNameInput) - 1);
                     gClientNameInput[sizeof(gClientNameInput) - 1] = '\0';
+                    if (gWindow && !IsWindowVisible(gWindow)) {
+                        ShowWindow(gWindow);
+                        SelectWindow(gWindow);
+                    }
+                    DrawWindow();
+                    break;
+                case ITEM_SET_SERVER:
+                    gModalSetName = false;
+                    gConnErrorMsg[0] = '\0';
+                    PrepareServerIpInput();
+                    gConnState = CONN_FAILED;
+                    if (gWindow && !IsWindowVisible(gWindow)) {
+                        ShowWindow(gWindow);
+                        SelectWindow(gWindow);
+                    }
                     DrawWindow();
                     break;
                 case ITEM_CLOSE:
@@ -1152,8 +1267,10 @@ static void HandleMouseDown(EventRecord *evt)
             }
             if (win != FrontWindow()) {
                 SelectWindow(win);
-            } else if (win == gWindow) {
+            }
+            if (win == gWindow) {
                 Point localPt = evt->where;
+                SetPort(gWindow);
                 GlobalToLocal(&localPt);
 
                 /* Modal: Set Client Name */
@@ -1207,6 +1324,7 @@ static void HandleMouseDown(EventRecord *evt)
                             NetConnectChannel();
                         } else {
                             gConnState = CONN_FAILED;
+                            strcpy(gConnErrorMsg, "UDP scan found no server on LAN");
                         }
                         DrawWindow();
                         return;
@@ -1214,7 +1332,10 @@ static void HandleMouseDown(EventRecord *evt)
                     if (PtInRect(localPt, &gBtnConnectRect)) {
                         ip_addr parsed = 0;
                         if (ParseIPAddress(gServerIpInput, &parsed)) {
+                            strcpy(gConnErrorMsg, "Connecting to server...");
+                            DrawWindow();
                             if (NetVerifyServer(parsed, DEFAULT_HTTP_PORT)) {
+                                gConnErrorMsg[0] = '\0';
                                 gConnState = CONN_READY;
                                 NetConnectChannel();
                                 DrawWindow();
@@ -1233,6 +1354,16 @@ static void HandleMouseDown(EventRecord *evt)
                         DrawWindow();
                         return;
                     }
+                    return;
+                }
+
+                /* Ready View: Click on Status row -> Open Server IP configuration */
+                if (!gTransferActive && gConnState == CONN_READY && PtInRect(localPt, &gStatusRowRect)) {
+                    gConnErrorMsg[0] = '\0';
+                    PrepareServerIpInput();
+                    gConnState = CONN_FAILED;
+                    DrawWindow();
+                    return;
                 }
 
                 /* Ready View: Click on Download Folder row -> Open Folder Picker */
@@ -1324,7 +1455,10 @@ static void HandleKeyDown(EventRecord *evt)
         if (key == '\r' || key == 3) {
             ip_addr parsed = 0;
             if (ParseIPAddress(gServerIpInput, &parsed)) {
+                strcpy(gConnErrorMsg, "Connecting to server...");
+                DrawWindow();
                 if (NetVerifyServer(parsed, DEFAULT_HTTP_PORT)) {
+                    gConnErrorMsg[0] = '\0';
                     gConnState = CONN_READY;
                     NetConnectChannel();
                     DrawWindow();
@@ -1388,6 +1522,7 @@ int main(void)
     gMenuOptions = GetMenuHandle(MENU_OPTIONS);
 
     InitFileManager();
+    RefreshCachedDownloadPath();
     ConnectSharedData();
 
     /* Create status window (centered horizontally) - initially hidden */
@@ -1402,32 +1537,32 @@ int main(void)
     /* Initialize Apple Events (handle system quit/restart signals) */
     SetupAppleEvents();
 
-    /* Initialize Network */
+    /* Initialize Network & Port 6803 Passive Listener immediately */
     NetInit();
     NetStartListener();
 
-    /* Startup Server Connection Flow:
-     * 1. If saved server IP exists in preferences, verify it.
-     * 2. If valid, connect reverse channel and set CONN_READY.
-     * 3. If no saved server IP or unreachable, run UDP discovery.
-     * 4. If UDP discovery fails, display CONN_FAILED manual IP entry screen.
+    /* Non-blocking Startup Server Connection Flow:
+     * 1. If a saved server IP exists (from MacDrop Prefs, SpotiMac Prefs, or MacAI Prefs),
+     *    set it immediately and start an asynchronous reverse channel connection in 0ms.
+     * 2. Otherwise try a quick 1-second UDP broadcast discovery; if not found, show the
+     *    manual IP screen when the user opens the window while continuing background listening.
      */
     if (gSavedServerIP != 0) {
-        FormatIP(gSavedServerIP, gServerIpInput);
-        if (NetVerifyServer(gSavedServerIP, gSavedServerPort)) {
-            gConnState = CONN_READY;
-            NetConnectChannel();
-        } else {
-            /* Try auto-discovery */
-            if (NetDiscoverServer()) {
-                FormatIP(gServerIP, gServerIpInput);
-                gConnState = CONN_READY;
-                NetConnectChannel();
-            } else {
-                gConnState = CONN_FAILED;
+        /* When running inside Basilisk II SLIRP (10.0.2.15), prefer the on-subnet SLIRP host
+         * gateway (10.0.2.2) via quick UDP probe so MacTCP uses 1460-byte Ethernet MSS
+         * instead of 536-byte off-subnet MSS! */
+        if ((gOurIP & 0xFFFFFF00UL) == 0x0A000200UL && (gSavedServerIP & 0xFFFFFF00UL) != 0x0A000200UL) {
+            if (!NetDiscoverServer()) {
+                NetSetServer(gSavedServerIP, gSavedServerPort ? gSavedServerPort : DEFAULT_HTTP_PORT);
             }
+        } else {
+            NetSetServer(gSavedServerIP, gSavedServerPort ? gSavedServerPort : DEFAULT_HTTP_PORT);
         }
+        FormatIP(gServerIP, gServerIpInput);
+        gConnState = CONN_READY;
+        NetConnectChannel();
     } else {
+        PrepareServerIpInput();
         if (NetDiscoverServer()) {
             FormatIP(gServerIP, gServerIpInput);
             gConnState = CONN_READY;
@@ -1441,14 +1576,14 @@ int main(void)
 
     while (!gDone) {
         EventRecord event;
-        short sleep = gTransferActive ? 0 : 20;
+        short sleep = gTransferActive ? 0 : 10;
         Boolean gotEvent;
 
         ProcessSharedCommand();
 
         /* If inbound transfer begins, reveal and raise window */
         if (gTransferActive && !lastActive) {
-            SetFrontProcess(&gMacDropPSN);
+            EnsureFrontProcess();
             if (gWindow) {
                 ShowWindow(gWindow);
                 SelectWindow(gWindow);
@@ -1463,29 +1598,40 @@ int main(void)
 
         ProcessSharedCommand();
 
-        if (gConnState == CONN_READY) {
-            NetIdle();
+        /* Always run NetIdle regardless of gConnState so port 6803 listener & background pairing stay live! */
+        NetIdle();
+
+        /* If background auto-discovery / MACDROP_HELLO connected our reverse channel, exit CONN_FAILED automatically */
+        if (gChannelConnected && !lastChannel && gConnState != CONN_READY) {
+            FormatIP(gServerIP, gServerIpInput);
+            gConnState = CONN_READY;
         }
 
-        Boolean needDraw = false;
+        Boolean needFullDraw = false;
+        Boolean needProgressDraw = false;
         if (gTransferActive != lastActive || gChannelConnected != lastChannel) {
-            needDraw = true;
+            needFullDraw = true;
             SyncSharedData();
             UpdateMenuStates();
         } else if (gTransferActive && (gActiveTransferBytes != lastTransferBytes)) {
             unsigned long nowTick = TickCount();
-            if (nowTick - lastDrawTick >= 15) {
-                needDraw = true;
+            if (nowTick - lastDrawTick >= 12) {
+                needProgressDraw = true;
                 lastDrawTick = nowTick;
             }
         }
 
-        if (needDraw) {
+        if (needFullDraw) {
             if (gWindow && IsWindowVisible(gWindow)) {
                 DrawWindow();
             }
             lastActive = gTransferActive;
             lastChannel = gChannelConnected;
+            lastTransferBytes = gActiveTransferBytes;
+        } else if (needProgressDraw) {
+            if (gWindow && IsWindowVisible(gWindow)) {
+                DrawTransferProgressOnly();
+            }
             lastTransferBytes = gActiveTransferBytes;
         }
 

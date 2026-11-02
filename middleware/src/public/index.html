@@ -2207,7 +2207,10 @@
       // Check for incoming staged file from 68k Mac (AirDrop prompt)
       const inboundBox = document.getElementById('macdrop-inbound-box');
       const inbounds = macdrop.inboundTransfers || [];
-      const pendingInbound = inbounds.find(t => t.status === 'STREAMING' || t.status === 'READY' || t.status === 'PENDING');
+      const pendingInbound = inbounds.find(t =>
+        !dismissedInboundIds.has(t.id) &&
+        (t.status === 'STREAMING' || t.status === 'READY' || t.status === 'PENDING' || t.status === 'DOWNLOADING' || t.status === 'COMPLETED')
+      );
 
       if (pendingInbound) {
         currentPendingInboundId = pendingInbound.id;
@@ -2218,19 +2221,31 @@
           const fileEl = document.getElementById('macdrop-inbound-filename');
           const metaEl = document.getElementById('macdrop-inbound-meta');
           const timerEl = document.getElementById('macdrop-inbound-timer');
+          const declineBtn = document.getElementById('macdrop-decline-btn');
+          const acceptBtn = document.getElementById('macdrop-accept-btn');
 
-          const isStreaming = pendingInbound.status === 'STREAMING';
+          const isCompleted = pendingInbound.status === 'COMPLETED';
+          const isAccepted = Boolean(pendingInbound.accepted || pendingInbound.status === 'DOWNLOADING' || acceptedInboundIds.has(pendingInbound.id));
+          const isStreaming = pendingInbound.status === 'STREAMING' || pendingInbound.status === 'DOWNLOADING';
           const formatDesc = pendingInbound.isRawData ? 'Direct Document' : 'MacBinary II (.bin)';
           const totalSize = pendingInbound.downloadSize || pendingInbound.fileSize;
 
           if (titleEl) {
-            titleEl.textContent = isStreaming
-              ? `Incoming: ${pendingInbound.clientName} (Streaming...)`
-              : `Incoming: ${pendingInbound.clientName}`;
+            if (isCompleted) {
+              titleEl.textContent = '✓ File transfer complete';
+            } else if (isAccepted) {
+              titleEl.textContent = `Downloading from ${pendingInbound.clientName}...`;
+            } else if (isStreaming) {
+              titleEl.textContent = `Incoming: ${pendingInbound.clientName} (Streaming...)`;
+            } else {
+              titleEl.textContent = `Incoming: ${pendingInbound.clientName}`;
+            }
           }
           if (fileEl) fileEl.textContent = pendingInbound.downloadName;
           if (metaEl) {
-            if (isStreaming) {
+            if (isCompleted) {
+              metaEl.textContent = `${formatBytes(totalSize)} • Transfer complete`;
+            } else if (isStreaming) {
               const speedStr = pendingInbound.speedFormatted ? ` at ${pendingInbound.speedFormatted}` : '';
               metaEl.textContent = `${formatBytes(pendingInbound.bytesReceived || 0)} / ${formatBytes(totalSize)} (${pendingInbound.percent || 0}%${speedStr}) • ${formatDesc}`;
             } else {
@@ -2238,15 +2253,19 @@
             }
           }
           if (timerEl) {
-            if (isStreaming) {
+            if (isCompleted) {
+              timerEl.textContent = '100%';
+            } else if (isStreaming || isAccepted) {
               timerEl.textContent = `${pendingInbound.percent || 0}%`;
             } else {
               timerEl.textContent = pendingInbound.remainingSec != null ? `${pendingInbound.remainingSec}s` : '30s';
             }
           }
-          const declineBtn = document.getElementById('macdrop-decline-btn');
           if (declineBtn) {
-            declineBtn.textContent = isStreaming ? 'Cancel' : 'Decline';
+            declineBtn.textContent = isCompleted ? 'Done' : (isStreaming || isAccepted ? 'Cancel' : 'Decline');
+          }
+          if (acceptBtn) {
+            acceptBtn.style.display = (isCompleted || isAccepted) ? 'none' : '';
           }
         }
 
@@ -2260,11 +2279,15 @@
     }
 
     let currentPendingInboundId = null;
+    const acceptedInboundIds = new Set();
+    const dismissedInboundIds = new Set();
 
     async function acceptInboundTransfer(event, id = null) {
       if (event) event.stopPropagation();
       const targetId = id || currentPendingInboundId;
       if (!targetId) return;
+
+      acceptedInboundIds.add(targetId);
 
       const downloadUrl = `/api/macdrop/inbound/download/${encodeURIComponent(targetId)}`;
       const a = document.createElement('a');
@@ -2274,12 +2297,10 @@
       a.click();
       a.remove();
 
-      hideGlobalInboundToast();
-      const inboundBox = document.getElementById('macdrop-inbound-box');
-      const devicesWrap = document.getElementById('macdrop-devices-wrap');
-      if (inboundBox) inboundBox.classList.add('hidden');
-      if (devicesWrap) devicesWrap.style.display = 'flex';
-      currentPendingInboundId = null;
+      const acceptBtn = document.getElementById('macdrop-accept-btn');
+      if (acceptBtn) acceptBtn.style.display = 'none';
+      const titleEl = document.getElementById('macdrop-inbound-title');
+      if (titleEl) titleEl.textContent = 'Downloading to browser...';
       pollStatus();
     }
 
@@ -2287,6 +2308,8 @@
       if (event) event.stopPropagation();
       const targetId = id || currentPendingInboundId;
       if (!targetId) return;
+
+      dismissedInboundIds.add(targetId);
 
       try {
         await fetch(`/api/macdrop/inbound/cancel/${encodeURIComponent(targetId)}`, { method: 'POST' });
@@ -2315,21 +2338,32 @@
         document.body.appendChild(toast);
       }
 
-      const isStreaming = transfer.status === 'STREAMING';
+      const isCompleted = transfer.status === 'COMPLETED';
+      const isAccepted = Boolean(transfer.accepted || transfer.status === 'DOWNLOADING' || acceptedInboundIds.has(transfer.id));
+      const isStreaming = transfer.status === 'STREAMING' || transfer.status === 'DOWNLOADING';
       const formatDesc = transfer.isRawData ? 'Direct Document' : 'MacBinary II (.bin)';
       const totalSize = transfer.downloadSize || transfer.fileSize;
-      const badgeText = isStreaming
-        ? `${transfer.percent || 0}% (${transfer.speedFormatted || '0 kB/s'})`
-        : (transfer.remainingSec != null ? `${transfer.remainingSec}s` : '30s');
-      const metaText = isStreaming
-        ? `${formatBytes(transfer.bytesReceived || 0)} / ${formatBytes(totalSize)} (${transfer.percent || 0}%) • ${formatDesc}`
-        : `${formatBytes(totalSize)} • ${formatDesc}`;
+      const badgeText = isCompleted
+        ? '100% Complete'
+        : ((isStreaming || isAccepted)
+          ? `${transfer.percent || 0}% (${transfer.speedFormatted || '0 kB/s'})`
+          : (transfer.remainingSec != null ? `${transfer.remainingSec}s` : '30s'));
+      const metaText = isCompleted
+        ? `${formatBytes(totalSize)} • Transfer complete`
+        : (isStreaming
+          ? `${formatBytes(transfer.bytesReceived || 0)} / ${formatBytes(totalSize)} (${transfer.percent || 0}%) • ${formatDesc}`
+          : `${formatBytes(totalSize)} • ${formatDesc}`);
+      const headerLabel = isCompleted
+        ? '✓ File transfer complete'
+        : (isAccepted
+          ? `Downloading from ${escapeHtml(transfer.clientName)}:`
+          : `${escapeHtml(transfer.clientName)} is ${isStreaming ? 'streaming' : 'sending'}:`);
 
       toast.innerHTML = `
         <div style="display:flex; align-items:center; justify-content:space-between; border-bottom:1px dotted #000; padding-bottom:6px; margin-bottom:8px;">
           <div style="display:flex; align-items:center; gap:6px; font-weight:bold; font-size:12px;">
-            <span>📥</span>
-            <span>${escapeHtml(transfer.clientName)} is ${isStreaming ? 'streaming' : 'sending'}:</span>
+            <span>${isCompleted ? '✅' : '📥'}</span>
+            <span>${headerLabel}</span>
           </div>
           <span style="font-size:11px; background:#000; color:#fff; padding:1px 6px; font-weight:bold;">${badgeText}</span>
         </div>
@@ -2340,8 +2374,8 @@
           ${metaText}
         </div>
         <div style="display:flex; justify-content:flex-end; gap:8px;">
-          <button type="button" class="action-btn-sm pixel-pill-clip" onclick="declineInboundTransfer(event, '${escapeHtml(transfer.id)}')">${isStreaming ? 'Cancel' : 'Decline'}</button>
-          <button type="button" class="action-btn-sm pixel-pill-clip" style="background:#000; color:#fff;" onclick="acceptInboundTransfer(event, '${escapeHtml(transfer.id)}')">Accept &amp; Download</button>
+          <button type="button" class="action-btn-sm pixel-pill-clip" onclick="declineInboundTransfer(event, '${escapeHtml(transfer.id)}')">${isCompleted ? 'Done' : (isStreaming || isAccepted ? 'Cancel' : 'Decline')}</button>
+          ${(isCompleted || isAccepted) ? '' : `<button type="button" class="action-btn-sm pixel-pill-clip" style="background:#000; color:#fff;" onclick="acceptInboundTransfer(event, '${escapeHtml(transfer.id)}')">Accept &amp; Download</button>`}
         </div>
       `;
       toast.style.display = isDashboardVisible ? 'none' : 'block';

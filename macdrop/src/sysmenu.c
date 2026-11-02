@@ -357,25 +357,28 @@ static void UpdateMenuContents(void)
     /* Item 7: Set client name */
     AddMenuItem(glob.mHdl, "\pSet Client Name...", true);
 
-    /* Item 8: Separator */
+    /* Item 8: Set server IP */
+    AddMenuItem(glob.mHdl, "\pSet Server IP...", true);
+
+    /* Item 9: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 9: Play Sound Chime */
+    /* Item 10: Play Sound Chime */
     AddMenuItem(glob.mHdl, "\pPlay Sound Chime", true);
     if (sharedData.SoundEnabled) {
-        SetItemMark(glob.mHdl, 9, checkMark);
-    }
-
-    /* Item 10: Notification Alert */
-    AddMenuItem(glob.mHdl, "\pNotification Alert", true);
-    if (sharedData.NotifyEnabled) {
         SetItemMark(glob.mHdl, 10, checkMark);
     }
 
-    /* Item 11: Separator */
+    /* Item 11: Notification Alert */
+    AddMenuItem(glob.mHdl, "\pNotification Alert", true);
+    if (sharedData.NotifyEnabled) {
+        SetItemMark(glob.mHdl, 11, checkMark);
+    }
+
+    /* Item 12: Separator */
     AppendMenu(glob.mHdl, "\p-");
 
-    /* Item 12: About */
+    /* Item 13: About */
     AddMenuItem(glob.mHdl, "\pAbout MacDrop...", true);
 }
 
@@ -409,6 +412,7 @@ static pascal void Patched_SystemMenu(long result)
     SystemMenuProcPtr proc;
 
     if (menuID == glob.menuID) {
+        Boolean bringToFront = false;
         InitCursor();
 
         if (!sharedData.DaemonRunning) {
@@ -417,33 +421,49 @@ static pascal void Patched_SystemMenu(long result)
 
         switch (itemID) {
             case 3: /* Window toggle */
-                sharedData.PendingCommand = sharedData.WindowVisible ? CMD_HIDE_WINDOW : CMD_OPEN_WINDOW;
+                if (sharedData.WindowVisible) {
+                    sharedData.PendingCommand = CMD_HIDE_WINDOW;
+                } else {
+                    sharedData.PendingCommand = CMD_OPEN_WINDOW;
+                    bringToFront = true;
+                }
                 break;
             case 4: /* Send file */
                 sharedData.PendingCommand = CMD_SEND_FILE;
+                bringToFront = true;
                 break;
             case 6: /* Download folder */
                 sharedData.PendingCommand = CMD_CHOOSE_FOLDER;
+                bringToFront = true;
                 break;
             case 7: /* Client name */
                 sharedData.PendingCommand = CMD_SET_NAME;
+                bringToFront = true;
                 break;
-            case 9: /* Sound */
+            case 8: /* Server IP */
+                sharedData.PendingCommand = CMD_FIND_SERVER;
+                bringToFront = true;
+                break;
+            case 10: /* Sound */
                 sharedData.SoundEnabled = !sharedData.SoundEnabled;
                 sharedData.PendingCommand = CMD_TOGGLE_SOUND;
                 sharedData.UpdateUI = true;
                 break;
-            case 10: /* Notify */
+            case 11: /* Notify */
                 sharedData.NotifyEnabled = !sharedData.NotifyEnabled;
                 sharedData.PendingCommand = CMD_TOGGLE_NOTIFY;
                 sharedData.UpdateUI = true;
                 break;
-            case 12: /* About */
+            case 13: /* About */
                 sharedData.PendingCommand = CMD_ABOUT;
+                bringToFront = true;
                 break;
         }
 
         if (sharedData.DaemonRunning && sharedData.DaemonPSN.lowLongOfPSN != 0) {
+            if (bringToFront) {
+                SetFrontProcess(&sharedData.DaemonPSN);
+            }
             WakeUpProcess(&sharedData.DaemonPSN);
         }
 

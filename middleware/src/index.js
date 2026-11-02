@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const registry = require('./core/registry');
 const { ensureDataDir, DATA_DIR } = require('./core/storage');
-const { startDiscoveryServer, getLocalIpAddress, DEFAULT_UDP_PORT, DISCOVERY_MAGIC } = require('./core/discovery');
+const { startDiscoveryServer, getLocalIpAddress, recordObservedHost, DEFAULT_UDP_PORT, DISCOVERY_MAGIC } = require('./core/discovery');
 
 // Service Modules & Versioning
 const { SERVER_NAME, SERVER_VERSION_SLUG, SERVER_CODENAME } = require('./version');
@@ -21,6 +21,19 @@ function createApp() {
   app.set('etag', false);
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
+
+  // Passively learn host LAN IP from Host header and cross-pollinate 68k peer IPs across modules
+  app.use((req, res, next) => {
+    if (req.headers && req.headers.host) {
+      recordObservedHost(req.headers.host);
+    }
+    if (req.path && (req.path === '/api/ping' || req.path.startsWith('/api/spotify') || req.path.startsWith('/api/macai'))) {
+      if (macdropModule && typeof macdropModule.notifyPeerRequest === 'function') {
+        macdropModule.notifyPeerRequest(req);
+      }
+    }
+    next();
+  });
 
   // Register standalone modules
   registry.register(spotifyModule);

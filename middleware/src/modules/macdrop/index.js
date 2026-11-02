@@ -20,8 +20,10 @@ const os = require('os');
 const { EventEmitter } = require('events');
 const { createMacBinary, isMacBinary, parseMacBinaryHeader, getTypeCreatorForFilename, sanitizeMacFilename } = require('./macbinary');
 const { createModuleStore } = require('../../core/storage');
+const { getLocalIpAddress } = require('../../core/discovery');
 
 const DEFAULT_MACDROP_PORT = 6803;
+const HTTP_PORT = parseInt(process.env.PORT || '6800', 10);
 const TCP_CONNECT_TIMEOUT_MS = 6000;
 const MAX_TRANSFER_LOGS = 30;
 
@@ -117,6 +119,9 @@ class MacDropModule {
 
     // Cache of manual target ping statuses: `${ip}:${port}` -> { online: boolean, checkedAt: timestamp }
     this.pingCache = new Map();
+    this.inFlightPings = new Map();
+    this.lastPongByIp = new Map();
+    this.peerProbeTimestamps = new Map();
 
     this.store = createModuleStore('macdrop', {
       targets: [],
@@ -310,6 +315,21 @@ class MacDropModule {
   }
 
   /**
+   * Safely closes a reverse-channel response socket so the 68k client immediately
+   * detects disconnect and reconnects instead of hanging on an orphaned stream.
+   */
+  _closeClientSocket(c) {
+    if (c && c.res && !c.res.writableEnded && !c.res.destroyed) {
+      try {
+        c.res.writeHead(204, { 'X-MacDrop-Status': 'POLL', 'Connection': 'close' });
+        c.res.end();
+      } catch (_) {
+        try { c.res.destroy(); } catch (_) {}
+      }
+    }
+  }
+
+  /**
    * Sweeps active clients to purge dead or closed sockets immediately.
    * Clients in active probing/scanning or active transfers are protected.
    */
@@ -335,6 +355,7 @@ class MacDropModule {
       // If client is currently in a probe/scan cycle, protect it until probe expires
       if (c.probing) {
         if (now - c.probeSentAt > 2500) {
+          this._closeClientSocket(c);
           this.activeClients.delete(id);
           console.log(`[MacDrop] Cleaned up timed out probing client: ${c.name} (${id})`);
         }
@@ -350,20 +371,23 @@ class MacDropModule {
 
       // If socket is dead and client has not reconnected in > 2000ms, delete
       if (isSocketDead && !c.writingDisk && (now - c.lastSeen > 2000)) {
+        this._closeClientSocket(c);
         this.activeClients.delete(id);
         console.log(`[MacDrop] Cleaned up dead client socket: ${c.name} (${id})`);
         continue;
       }
 
-      // If client has not been seen in > 20 seconds, delete
+      // If client has not been seen in > 20 seconds, close socket and delete
       if (!c.writingDisk && (now - c.lastSeen > 20000)) {
+        this._closeClientSocket(c);
         this.activeClients.delete(id);
         console.log(`[MacDrop] Cleaned up timed out client: ${c.name} (${id})`);
         continue;
       }
 
-      // If client was writing disk but timed out after 120s without ACK, delete
+      // If client was writing disk but timed out after 120s without ACK, close socket and delete
       if (c.writingDisk && (now - c.lastSeen > 120000)) {
+        this._closeClientSocket(c);
         this.activeClients.delete(id);
         console.log(`[MacDrop] Cleaned up client timed out on disk write: ${c.name} (${id})`);
         continue;
@@ -372,7 +396,7 @@ class MacDropModule {
 
     // Sweep expired staged inbound transfers (30s timeout per user requirement) or stalled streams (>60s without data)
     for (const [id, t] of this.inboundTransfers.entries()) {
-      if (t.expiresAt && now > t.expiresAt && t.status !== 'DOWNLOADING') {
+      if (t.expiresAt && now > t.expiresAt && t.status !== 'DOWNLOADING' && t.status !== 'COMPLETED') {
         this.cleanupInboundTransfer(id, 'TIMED_OUT_30S');
       } else if (t.status === 'STREAMING' && (now - t.lastProgressAt > 60000)) {
         this.cleanupInboundTransfer(id, 'STALLED_60S');
@@ -475,31 +499,194 @@ class MacDropModule {
   }
 
   /**
-   * Fast TCP ping for manually configured vintage Mac targets on LAN.
+   * Resolves the true LAN IPv4 of a connecting 68k Macintosh client,
+   * preferring the client's self-reported LAN IP when sitting behind Docker NAT.
    */
-  pingTarget(ip, port = DEFAULT_MACDROP_PORT) {
-    return new Promise((resolve) => {
-      if (!ip) return resolve(false);
+  resolveClientIp(req) {
+    const remoteIp = ((req.socket && req.socket.remoteAddress) || '').replace(/^.*:/, '').trim();
+    const reportedIp = ((req.query && req.query.ip) || (req.headers && req.headers['x-client-ip']) || '').trim();
+
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(reportedIp) &&
+        reportedIp !== '0.0.0.0' &&
+        reportedIp !== '127.0.0.1' &&
+        !reportedIp.startsWith('10.0.2.')) {
+      const isDockerNatOrLoopback =
+        !remoteIp ||
+        remoteIp === '127.0.0.1' ||
+        remoteIp.startsWith('192.168.97.') ||
+        remoteIp.startsWith('192.168.65.') ||
+        /^172\.(1[6-9]|2\d|3[0-1])\./.test(remoteIp);
+
+      if (isDockerNatOrLoopback) {
+        return reportedIp;
+      }
+    }
+    return remoteIp || reportedIp || '127.0.0.1';
+  }
+
+  /**
+   * Passively discovers 68k Macintosh peers that communicate with other MacCompanion modules
+   * (e.g. SpotiMac, MacAI, /api/ping) across WiFi bridges where UDP broadcast is filtered.
+   */
+  notifyPeerRequest(req) {
+    try {
+      const peerIp = this.resolveClientIp(req);
+      if (!peerIp ||
+          peerIp === '127.0.0.1' ||
+          peerIp === '0.0.0.0' ||
+          peerIp.startsWith('10.0.2.') ||
+          peerIp.startsWith('192.168.97.') ||
+          peerIp.startsWith('192.168.65.') ||
+          /^172\.(1[6-9]|2\d|3[0-1])\./.test(peerIp)) {
+        return;
+      }
+
+      // Skip if already connected via reverse channel
+      for (const c of this.activeClients.values()) {
+        if (c.ip === peerIp) return;
+      }
+
+      const now = Date.now();
+      const lastProbe = this.peerProbeTimestamps.get(peerIp) || 0;
+      if (now - lastProbe < 15000) return;
+      this.peerProbeTimestamps.set(peerIp, now);
+
+      this.pingTarget(peerIp, DEFAULT_MACDROP_PORT, 1500).then((online) => {
+        if (online) {
+          this.pingCache.set(`${peerIp}:${DEFAULT_MACDROP_PORT}`, { online: true, checkedAt: Date.now() });
+        }
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  /**
+   * Fast TCP ping & auto-discovery handshake for vintage Mac targets on LAN.
+   * Sends MACDROP_HELLO|<serverIp>|<httpPort> so bridged 68k Macs automatically learn
+   * the server IP and reply with MACDROP_PONG|<id>|<name>|<machine>|<ver>|<ip>.
+   * Concurrent pings to the same IP:port are deduplicated to protect the 68k single-stream listener.
+   */
+  pingTarget(ip, port = DEFAULT_MACDROP_PORT, timeoutMs = 1800) {
+    if (!ip) return Promise.resolve(false);
+    const cleanIp = ip.trim();
+    const key = `${cleanIp}:${port}`;
+
+    // If client is already connected live via reverse channel, it is online
+    for (const c of this.activeClients.values()) {
+      if (c.ip === cleanIp) {
+        this.pingCache.set(key, { online: true, checkedAt: Date.now() });
+        return Promise.resolve(true);
+      }
+    }
+
+    if (this.inFlightPings.has(key)) {
+      return this.inFlightPings.get(key);
+    }
+
+    const pingPromise = new Promise((resolve) => {
       const socket = new net.Socket();
-      socket.setTimeout(1500);
+      let settled = false;
+      let connected = false;
+      let pongTimer = null;
+      let rxBuf = '';
+
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        if (pongTimer) clearTimeout(pongTimer);
+        try { socket.destroy(); } catch (_) {}
+        this.inFlightPings.delete(key);
+        this.pingCache.set(key, { online: result, checkedAt: Date.now() });
+        resolve(result);
+      };
+
+      socket.setTimeout(timeoutMs);
 
       socket.on('connect', () => {
-        socket.destroy();
-        resolve(true);
+        connected = true;
+        try {
+          const serverIp = getLocalIpAddress();
+          socket.write(`MACDROP_HELLO|${serverIp}|${HTTP_PORT}\n`);
+        } catch (_) {}
+
+        // Wait up to 350ms for optional MACDROP_PONG metadata from MacDrop v0.2.7+
+        pongTimer = setTimeout(() => {
+          finish(true);
+        }, 350);
+      });
+
+      socket.on('data', (chunk) => {
+        rxBuf += chunk.toString('utf8');
+        if (rxBuf.includes('MACDROP_PONG|')) {
+          const line = rxBuf.split(/\r?\n/).find(l => l.startsWith('MACDROP_PONG|')) || rxBuf;
+          const parts = line.trim().split('|');
+          // MACDROP_PONG|<id>|<name>|<machine>|<ver>|<ourIp>
+          const pongId = (parts[1] || '').trim();
+          const pongName = (parts[2] || '').trim();
+          const pongMachine = (parts[3] || '').trim();
+          const pongVer = (parts[4] || '').trim();
+
+          const meta = {
+            id: pongId || `device_${cleanIp.replace(/\./g, '_')}`,
+            name: pongName || `Macintosh (${cleanIp})`,
+            machine: pongMachine || 'Vintage Macintosh',
+            version: pongVer || '',
+            ip: cleanIp,
+            port,
+            lastSeen: Date.now(),
+          };
+          this.lastPongByIp.set(cleanIp, meta);
+          this.recordKnownDevice({ ...meta, source: 'manual' });
+
+          // Also update saved targets if present
+          try {
+            const data = this.store.load();
+            if (Array.isArray(data.targets)) {
+              let updated = false;
+              const targets = data.targets.map(t => {
+                if (t && t.ip === cleanIp) {
+                  updated = true;
+                  return {
+                    ...t,
+                    name: meta.name || t.name,
+                    machine: meta.machine || t.machine,
+                    version: meta.version || t.version,
+                    lastSeen: Date.now(),
+                    online: true,
+                  };
+                }
+                return t;
+              });
+              if (updated) {
+                this.store.save({ targets });
+              }
+            }
+          } catch (_) {}
+
+          finish(true);
+        }
+      });
+
+      socket.on('end', () => {
+        finish(connected);
+      });
+
+      socket.on('close', () => {
+        finish(connected);
       });
 
       socket.on('timeout', () => {
-        socket.destroy();
-        resolve(false);
+        finish(connected);
       });
 
       socket.on('error', () => {
-        socket.destroy();
-        resolve(false);
+        finish(connected);
       });
 
-      socket.connect(port, ip);
+      socket.connect(port, cleanIp);
     });
+
+    this.inFlightPings.set(key, pingPromise);
+    return pingPromise;
   }
 
   /**
@@ -561,7 +748,7 @@ class MacDropModule {
 
     // 1. REVERSE PUSH CHANNEL: Vintage Mac connects outbound and waits for file pushes
     this.router.get('/channel', (req, res) => {
-      const remoteIp = (req.socket.remoteAddress || '').replace(/^.*:/, '');
+      const remoteIp = this.resolveClientIp(req);
       const rawId = (req.query.id || req.headers['x-client-id'] || '').trim();
       const name = (req.query.name || req.headers['x-client-name'] || `Macintosh (${remoteIp})`).trim();
       const machine = (req.query.machine || req.headers['x-machine-model'] || 'Macintosh 68k').trim();
@@ -625,22 +812,31 @@ class MacDropModule {
         waiter();
       }
 
-      // Idle poll timer: cleanly end response after 8s with 204 No Content so client reconnects and proves liveness
-      const pollTimer = setTimeout(() => {
+      // Idle poll timer: cleanly end response after 8s with 204 No Content so client reconnects and proves liveness.
+      // Uses setInterval so that if a multi-minute transfer is active when 8s elapses, the timer keeps running
+      // and refreshes lastSeen until the transfer finishes, then triggers a clean 204 POLL reconnect.
+      const pollTimer = setInterval(() => {
         const curr = this.activeClients.get(clientId);
-        if (curr && curr.res === res && !curr.transferInProgress && !curr.writingDisk && !this.hasActiveTransfer() && !res.writableEnded) {
-          try {
-            curr.probing = true;
-            curr.probeSentAt = Date.now();
-            res.writeHead(204, { 'X-MacDrop-Status': 'POLL', 'Connection': 'close' });
-            res.end();
-          } catch (_) {}
+        if (!curr || curr.res !== res || res.writableEnded || res.destroyed) {
+          clearInterval(pollTimer);
+          return;
         }
+        if (curr.transferInProgress || curr.writingDisk || this.hasActiveTransfer()) {
+          curr.lastSeen = Date.now();
+          return;
+        }
+        clearInterval(pollTimer);
+        try {
+          curr.probing = true;
+          curr.probeSentAt = Date.now();
+          res.writeHead(204, { 'X-MacDrop-Status': 'POLL', 'Connection': 'close' });
+          res.end();
+        } catch (_) {}
       }, 8000);
 
       // Cleanup when connection closes or aborts
       const onDisconnect = () => {
-        clearTimeout(pollTimer);
+        clearInterval(pollTimer);
         const curr = this.activeClients.get(clientId);
         if (curr && curr.res === res) {
           if (curr.transferInProgress) {
@@ -708,10 +904,30 @@ class MacDropModule {
 
     // 2c. Real-Time Active File Transfer Progress Endpoint
     this.router.get('/progress', (req, res) => {
-      if (this.activeTransfer && this.activeTransfer.status === 'WRITING_DISK') {
-        const elapsedMs = Date.now() - (this.activeTransfer.writingDiskStartedAt || Date.now());
-        const steppedPct = 89 + Math.floor(elapsedMs / 350);
-        this.activeTransfer.percent = Math.min(99, Math.max(this.activeTransfer.percent || 89, steppedPct));
+      if (this.activeTransfer) {
+        const now = Date.now();
+        if (this.activeTransfer.status === 'STREAMING' && this.activeTransfer.drainStartedAt) {
+          const drainElapsedSec = Math.max(0, (now - this.activeTransfer.drainStartedAt) / 1000);
+          const drainSpeed = this.activeTransfer.drainSpeedBps || 650000;
+          const totalBytes = this.activeTransfer.totalBytes || 1;
+          const estBytes = Math.min(
+            totalBytes,
+            Math.round((this.activeTransfer.drainStartBytes || 0) + drainElapsedSec * drainSpeed)
+          );
+          this.activeTransfer.bytesSent = estBytes;
+          this.activeTransfer.percent = Math.min(96, Math.max(this.activeTransfer.percent || 0, Math.round((estBytes / totalBytes) * 96)));
+          if (estBytes >= totalBytes) {
+            this.activeTransfer.status = 'WRITING_DISK';
+            this.activeTransfer.writingDiskStartedAt = now;
+            this.activeTransfer.percent = Math.max(this.activeTransfer.percent, 97);
+            this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
+          }
+        } else if (this.activeTransfer.status === 'WRITING_DISK') {
+          const elapsedMs = now - (this.activeTransfer.writingDiskStartedAt || now);
+          const startPct = this.activeTransfer.writingDiskStartPct || 97;
+          const steppedPct = startPct + Math.floor(elapsedMs / 350);
+          this.activeTransfer.percent = Math.min(99, Math.max(this.activeTransfer.percent || startPct, steppedPct));
+        }
       }
       res.json({
         ok: true,
@@ -727,7 +943,10 @@ class MacDropModule {
     // 3b. INBOUND TRANSFER ENDPOINTS (68k Vintage Mac -> Server & Modern Web UI)
     // - 68k Mac uploads MacBinary payload (streaming & simultaneous pass-through)
     this.router.post('/inbound/upload', (req, res) => {
-      const remoteIp = (req.socket.remoteAddress || '').replace(/^.*:/, '');
+      if (req.socket && typeof req.socket.setNoDelay === 'function') {
+        req.socket.setNoDelay(true);
+      }
+      const remoteIp = this.resolveClientIp(req);
       const clientId = (req.query.id || req.headers['x-client-id'] || '').trim();
       const clientName = (req.query.name || req.headers['x-client-name'] || `Macintosh (${remoteIp})`).trim();
       const transferId = 'in_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
@@ -839,6 +1058,7 @@ class MacDropModule {
               speedBps: 0,
               speedFormatted: '0 kB/s',
               status: 'STREAMING',
+              accepted: false,
               filePath: stagingPath,
               fd,
               events: ev,
@@ -889,12 +1109,17 @@ class MacDropModule {
         }
 
         transferObj.fd = null;
+        const wasAccepted = Boolean(
+          transferObj.accepted ||
+          transferObj.status === 'DOWNLOADING' ||
+          transferObj.status === 'COMPLETED'
+        );
         transferObj.events.emit('end');
 
         console.log(`[MacDrop] Inbound upload stream completed: "${transferObj.downloadName}" (${totalReceived} B)`);
 
-        if (transferObj.status === 'DOWNLOADING') {
-          console.log(`[MacDrop] Simultaneous download in progress for "${transferObj.downloadName}"; awaiting download completion.`);
+        if (wasAccepted || transferObj.accepted || transferObj.status === 'DOWNLOADING' || transferObj.status === 'COMPLETED') {
+          console.log(`[MacDrop] Inbound transfer "${transferObj.downloadName}" already accepted (${transferObj.status}); skipping READY re-prompt.`);
         } else {
           transferObj.status = 'READY';
           transferObj.expiresAt = Date.now() + 30000;
@@ -960,9 +1185,10 @@ class MacDropModule {
         dataLength: t.dataLength,
         rsrcLength: t.rsrcLength,
         bytesReceived: t.bytesReceived,
-        percent: t.totalExpected > 0 ? Math.min(99, Math.round((t.bytesReceived / t.totalExpected) * 100)) : 0,
-        speedFormatted: t.speedFormatted,
+        percent: t.status === 'COMPLETED' ? 100 : (t.totalExpected > 0 ? Math.min(99, Math.round((t.bytesReceived / t.totalExpected) * 100)) : 0),
+        speedFormatted: t.status === 'COMPLETED' ? 'Complete' : t.speedFormatted,
         status: t.status,
+        accepted: Boolean(t.accepted),
         expiresAt: t.expiresAt,
         remainingSec: t.expiresAt ? Math.max(0, Math.ceil((t.expiresAt - now) / 1000)) : null,
       }));
@@ -978,7 +1204,9 @@ class MacDropModule {
         return res.status(404).send('File not found or transfer expired.');
       }
 
-      // Cancel 30s timeout so download stream is protected
+      // Mark transfer as accepted immediately so req.on('end') never re-prompts with a 30s READY timer
+      transfer.accepted = true;
+      transfer.expiresAt = null;
       if (transfer.timer) {
         clearTimeout(transfer.timer);
         transfer.timer = null;
@@ -1008,8 +1236,21 @@ class MacDropModule {
         }
       };
 
+      const markDownloadCompleted = (reason) => {
+        transfer.status = 'COMPLETED';
+        transfer.accepted = true;
+        transfer.expiresAt = null;
+        if (transfer.timer) {
+          clearTimeout(transfer.timer);
+          transfer.timer = null;
+        }
+        setTimeout(() => {
+          this.cleanupInboundTransfer(transferId, reason);
+        }, 4500);
+      };
+
       // Mode A: File has ALREADY finished uploading to server
-      if (transfer.status === 'READY' || transfer.status === 'COMPLETED') {
+      if (transfer.status === 'READY' || transfer.status === 'COMPLETED' || !transfer.fd) {
         transfer.status = 'DOWNLOADING';
         let readStream;
         if (transfer.isRawData) {
@@ -1022,10 +1263,7 @@ class MacDropModule {
         readStream.pipe(res);
 
         readStream.on('end', () => {
-          transfer.status = 'COMPLETED';
-          setTimeout(() => {
-            this.cleanupInboundTransfer(transferId, 'DOWNLOAD_COMPLETED');
-          }, 10000);
+          markDownloadCompleted('DOWNLOAD_COMPLETED');
         });
 
         readStream.on('error', (err) => {
@@ -1052,10 +1290,7 @@ class MacDropModule {
       const onEnd = () => {
         if (!isCatchingUp) {
           try { res.end(); } catch (_) {}
-          transfer.status = 'COMPLETED';
-          setTimeout(() => {
-            this.cleanupInboundTransfer(transferId, 'SIMULTANEOUS_DOWNLOAD_COMPLETED');
-          }, 10000);
+          markDownloadCompleted('SIMULTANEOUS_DOWNLOAD_COMPLETED');
         }
       };
 
@@ -1097,10 +1332,7 @@ class MacDropModule {
       // If upload finished while reading catch-up buffer
       if (transfer.bytesReceived >= transfer.totalExpected && (transfer.status === 'READY' || transfer.status === 'COMPLETED' || !transfer.fd)) {
         try { res.end(); } catch (_) {}
-        transfer.status = 'COMPLETED';
-        setTimeout(() => {
-          this.cleanupInboundTransfer(transferId, 'SIMULTANEOUS_DOWNLOAD_COMPLETED');
-        }, 10000);
+        markDownloadCompleted('SIMULTANEOUS_DOWNLOAD_COMPLETED');
       }
     });
 
@@ -1180,9 +1412,33 @@ class MacDropModule {
       const numPort = parseInt(port || DEFAULT_MACDROP_PORT, 10);
 
       // Check if client is already known or connected live to read its name directly
-      const activeClient = Array.from(this.activeClients.values()).find(c => c.ip === cleanIp);
+      let activeClient = Array.from(this.activeClients.values()).find(c => c.ip === cleanIp);
+
+      // Test ping before saving (or if already connected live via reverse channel, it's online)
+      // Note: pingTarget sends MACDROP_HELLO|<serverIp>|<httpPort>, which also triggers
+      // bridged 68k clients (v0.2.7+) to reply with MACDROP_PONG and connect their reverse channel!
+      let isOnline = Boolean(activeClient);
+      if (!isOnline) {
+        isOnline = await this.pingTarget(cleanIp, numPort, 2500);
+        this.pingCache.set(`${cleanIp}:${numPort}`, { online: isOnline, checkedAt: Date.now() });
+      }
+
+      if (!isOnline) {
+        return res.status(400).json({
+          ok: false,
+          error: `Ping timed out to ${cleanIp}:${numPort}. Device did not respond to MacDrop pings.`,
+        });
+      }
+
+      // Give a brief window for MACDROP_HELLO auto-pairing to establish reverse channel if not yet connected
+      if (!activeClient) {
+        await new Promise(r => setTimeout(r, 250));
+        activeClient = Array.from(this.activeClients.values()).find(c => c.ip === cleanIp);
+      }
+
       const data = this.store.load();
       const known = (data.knownDevices || []).find(d => d.ip === cleanIp);
+      const pongMeta = this.lastPongByIp.get(cleanIp);
 
       let targetName = (name || '').trim();
       let targetMachine = 'Vintage Macintosh';
@@ -1192,6 +1448,10 @@ class MacDropModule {
         targetName = activeClient.name;
         targetMachine = activeClient.machine;
         targetVersion = activeClient.version;
+      } else if (pongMeta && pongMeta.name) {
+        targetName = pongMeta.name;
+        targetMachine = pongMeta.machine || targetMachine;
+        targetVersion = pongMeta.version || targetVersion;
       } else if (known && known.name) {
         targetName = known.name;
         targetMachine = known.machine || targetMachine;
@@ -1200,20 +1460,6 @@ class MacDropModule {
 
       if (!targetName) {
         targetName = `Macintosh (${cleanIp})`;
-      }
-
-      // Test ping before saving (or if already connected live via reverse channel, it's online)
-      let isOnline = Boolean(activeClient);
-      if (!isOnline) {
-        isOnline = await this.pingTarget(cleanIp, numPort);
-        this.pingCache.set(`${cleanIp}:${numPort}`, { online: isOnline, checkedAt: Date.now() });
-      }
-
-      if (!isOnline) {
-        return res.status(400).json({
-          ok: false,
-          error: `Ping timed out to ${cleanIp}:${numPort}. Device did not respond to MacDrop pings.`,
-        });
       }
 
       const targets = Array.isArray(data.targets) ? [...data.targets] : [];
@@ -1489,22 +1735,53 @@ class MacDropModule {
   resolveTargets(targetQuery) {
     this.sweepDeadClients();
     const activeList = Array.from(this.activeClients.values());
+    const data = this.store.load();
 
     if (targetQuery === 'all') {
       return activeList.length > 0 ? activeList : [];
     }
 
     if (targetQuery && targetQuery !== 'auto') {
-      if (this.activeClients.has(targetQuery)) {
-        return [this.activeClients.get(targetQuery)];
-      }
-      const data = this.store.load();
-      const saved = (data.targets || []).find(t => t.id === targetQuery || t.ip === targetQuery);
-      if (saved) {
-        const isOnline = Boolean(this.pingCache.get(`${saved.ip}:${saved.port || DEFAULT_MACDROP_PORT}`)?.online);
-        if (isOnline) {
-          return [{ ...saved, mode: 'DIRECT' }];
+      // 1. Check active reverse-channel clients by id, ip, device_<ip>, or manual_<ip>_<port>
+      for (const c of activeList) {
+        const cleanIp = (c.ip || '').trim();
+        const ipSlug = cleanIp.replace(/\./g, '_');
+        if (c.id === targetQuery ||
+            cleanIp === targetQuery ||
+            `device_${ipSlug}` === targetQuery ||
+            targetQuery.startsWith(`manual_${ipSlug}_`)) {
+          return [c];
         }
+      }
+
+      // 2. Check saved manual targets & knownDevices
+      const allSaved = [...(data.targets || []), ...(data.knownDevices || [])];
+      const saved = allSaved.find(t => {
+        if (!t || !t.ip) return false;
+        const cleanIp = t.ip.trim();
+        const ipSlug = cleanIp.replace(/\./g, '_');
+        return t.id === targetQuery ||
+               cleanIp === targetQuery ||
+               `device_${ipSlug}` === targetQuery ||
+               targetQuery.startsWith(`manual_${ipSlug}_`);
+      });
+
+      if (saved && saved.ip) {
+        const cleanIp = saved.ip.trim();
+        // Check if an active reverse channel exists for this IP
+        const activeByIp = activeList.find(c => c.ip === cleanIp);
+        if (activeByIp) {
+          return [activeByIp];
+        }
+        const isOnline = Boolean(this.pingCache.get(`${cleanIp}:${saved.port || DEFAULT_MACDROP_PORT}`)?.online);
+        if (isOnline) {
+          return [{ ...saved, ip: cleanIp, mode: 'DIRECT' }];
+        }
+      }
+
+      // 3. Fallback: if the stored selectedTargetId is offline/stale, fall back to any online client
+      if (targetQuery === this.selectedTargetId && activeList.length > 0) {
+        return [activeList[0]];
       }
       return [];
     }
@@ -1514,13 +1791,21 @@ class MacDropModule {
       return [activeList[0]];
     }
 
-    // fallback to saved manual target IF online
-    const data = this.store.load();
+    // fallback to saved manual target or any known device IF online in pingCache
     if (data.activeTarget && data.activeTarget.ip) {
       const saved = data.activeTarget;
       const isOnline = Boolean(this.pingCache.get(`${saved.ip}:${saved.port || DEFAULT_MACDROP_PORT}`)?.online);
       if (isOnline) {
         return [{ ...saved, mode: 'DIRECT' }];
+      }
+    }
+
+    for (const t of [...(data.targets || []), ...(data.knownDevices || [])]) {
+      if (t && t.ip) {
+        const isOnline = Boolean(this.pingCache.get(`${t.ip}:${t.port || DEFAULT_MACDROP_PORT}`)?.online);
+        if (isOnline) {
+          return [{ ...t, mode: 'DIRECT' }];
+        }
       }
     }
 
@@ -1567,8 +1852,11 @@ class MacDropModule {
             'X-Transfer-Id': transferId,
           });
 
-          const CHUNK_SIZE = 32768; // 32 KB chunk streaming
+          const CHUNK_SIZE = 32768; // 32 KB chunk streaming for smooth progress & low socket buffer inflation
           let offset = 0;
+          let firstDrainOffset = 0;
+          let firstDrainAt = 0;
+          let trueSpeedBps = 0;
           let lastSpeedSampleTime = Date.now();
           let lastSpeedSampleBytes = 0;
 
@@ -1582,25 +1870,42 @@ class MacDropModule {
             const ok = clientRes.write(chunk);
             offset = chunkEnd;
 
+            if (!ok && firstDrainOffset === 0) {
+              firstDrainOffset = offset;
+              firstDrainAt = Date.now();
+              lastSpeedSampleTime = firstDrainAt;
+              lastSpeedSampleBytes = offset;
+            }
+
             target.lastSeen = Date.now();
             const now = Date.now();
 
             if (this.activeTransfer) {
-              this.activeTransfer.bytesSent = offset;
-              // Map streaming to 0-88% so the remaining 89-99% smoothly tracks
-              // TCP socket drain + HFS disk finalization on the 68k Mac.
-              this.activeTransfer.percent = Math.min(88, Math.round((offset / buffer.length) * 88));
+              // Account for Docker/OrbStack kernel TCP send buffer (~4MB) so the Web UI
+              // reports true bytes received by the 68k Mac rather than jumping ahead and
+              // waiting 7s at "Finalizing on Macintosh..." while the kernel drains.
+              const kernelBuffered = firstDrainOffset > 0 ? firstDrainOffset : 0;
+              const estimatedMacBytes = firstDrainOffset > 0
+                ? Math.max(Math.min(offset, CHUNK_SIZE), offset - kernelBuffered)
+                : offset;
+
+              this.activeTransfer.bytesSent = estimatedMacBytes;
+              this.activeTransfer.percent = Math.min(95, Math.round((estimatedMacBytes / buffer.length) * 95));
               this.activeTransfer.lastProgressAt = now;
 
               const speedElapsed = (now - lastSpeedSampleTime) / 1000;
-              if (speedElapsed >= 0.4) {
+              if (speedElapsed >= 0.35) {
                 const bytesDelta = offset - lastSpeedSampleBytes;
                 const currentBps = Math.round(bytesDelta / speedElapsed);
-                this.activeTransfer.speedBps = currentBps;
-                if (currentBps >= 1048576) {
-                  this.activeTransfer.speedFormatted = `${(currentBps / 1048576).toFixed(2)} MB/s`;
+                if (firstDrainAt > 0 && (now - firstDrainAt) >= 250) {
+                  trueSpeedBps = Math.round((offset - firstDrainOffset) / ((now - firstDrainAt) / 1000));
+                }
+                const displayBps = trueSpeedBps > 0 ? trueSpeedBps : currentBps;
+                this.activeTransfer.speedBps = displayBps;
+                if (displayBps >= 1048576) {
+                  this.activeTransfer.speedFormatted = `${(displayBps / 1048576).toFixed(2)} MB/s`;
                 } else {
-                  this.activeTransfer.speedFormatted = `${(currentBps / 1024).toFixed(1)} kB/s`;
+                  this.activeTransfer.speedFormatted = `${(displayBps / 1024).toFixed(1)} kB/s`;
                 }
                 lastSpeedSampleTime = now;
                 lastSpeedSampleBytes = offset;
@@ -1647,12 +1952,28 @@ class MacDropModule {
           target.lastSeen = Date.now();
 
           if (this.activeTransfer) {
-            this.activeTransfer.bytesSent = buffer.length;
-            this.activeTransfer.percent = 89;
-            this.activeTransfer.status = 'WRITING_DISK';
-            this.activeTransfer.writingDiskStartedAt = Date.now();
-            this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
-            this.activeTransfer.lastProgressAt = Date.now();
+            const kernelBuffered = firstDrainOffset > 0 ? Math.min(firstDrainOffset, buffer.length) : 0;
+            const estimatedMacBytes = Math.max(0, buffer.length - kernelBuffered);
+            if (kernelBuffered > 65536 && estimatedMacBytes < buffer.length) {
+              // Kernel TCP buffer still holds ~kernelBuffered bytes draining to the 68k Mac.
+              // Keep status = 'STREAMING' in the Web UI and let /api/macdrop/progress advance smoothly
+              // at the measured wire speed until all bytes reach the Mac!
+              this.activeTransfer.bytesSent = estimatedMacBytes;
+              this.activeTransfer.percent = Math.min(95, Math.round((estimatedMacBytes / buffer.length) * 95));
+              this.activeTransfer.status = 'STREAMING';
+              this.activeTransfer.drainStartedAt = Date.now();
+              this.activeTransfer.drainStartBytes = estimatedMacBytes;
+              this.activeTransfer.drainSpeedBps = trueSpeedBps > 0 ? trueSpeedBps : 750000;
+              this.activeTransfer.lastProgressAt = Date.now();
+            } else {
+              this.activeTransfer.bytesSent = buffer.length;
+              this.activeTransfer.percent = 97;
+              this.activeTransfer.writingDiskStartPct = 97;
+              this.activeTransfer.status = 'WRITING_DISK';
+              this.activeTransfer.writingDiskStartedAt = Date.now();
+              this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
+              this.activeTransfer.lastProgressAt = Date.now();
+            }
           }
 
           // Complete HTTP stream and send TCP FIN immediately (Connection: close)
@@ -1688,20 +2009,88 @@ class MacDropModule {
         }
       }
 
-      // 2. Direct TCP push fallback
+      // 2. Direct TCP push fallback (streams in 64 KB chunks with real-time progress)
       if (target.ip) {
         const socket = new net.Socket();
-        socket.setTimeout(TCP_CONNECT_TIMEOUT_MS);
+        socket.setTimeout(Math.max(TCP_CONNECT_TIMEOUT_MS, 45000));
+        socket.setNoDelay(true);
         let ackReceived = false;
 
-        socket.on('connect', () => {
-          socket.write(buffer);
+        socket.on('connect', async () => {
+          try {
+            const CHUNK_SIZE = 65536;
+            let offset = 0;
+            let lastSpeedSampleTime = Date.now();
+            let lastSpeedSampleBytes = 0;
+
+            while (offset < buffer.length) {
+              if (socket.destroyed) break;
+              const chunkEnd = Math.min(offset + CHUNK_SIZE, buffer.length);
+              const chunk = buffer.subarray(offset, chunkEnd);
+              const ok = socket.write(chunk);
+              offset = chunkEnd;
+
+              const now = Date.now();
+              if (this.activeTransfer) {
+                this.activeTransfer.bytesSent = offset;
+                this.activeTransfer.percent = Math.min(88, Math.round((offset / buffer.length) * 88));
+                this.activeTransfer.lastProgressAt = now;
+
+                const speedElapsed = (now - lastSpeedSampleTime) / 1000;
+                if (speedElapsed >= 0.4) {
+                  const bytesDelta = offset - lastSpeedSampleBytes;
+                  const currentBps = Math.round(bytesDelta / speedElapsed);
+                  this.activeTransfer.speedBps = currentBps;
+                  this.activeTransfer.speedFormatted = currentBps >= 1048576
+                    ? `${(currentBps / 1048576).toFixed(2)} MB/s`
+                    : `${(currentBps / 1024).toFixed(1)} kB/s`;
+                  lastSpeedSampleTime = now;
+                  lastSpeedSampleBytes = offset;
+                }
+              }
+
+              if (!ok) {
+                await new Promise((resolveDrain, rejectDrain) => {
+                  const onDrain = () => { cleanup(); resolveDrain(); };
+                  const onErr = (e) => { cleanup(); rejectDrain(e); };
+                  const onClose = () => { cleanup(); rejectDrain(new Error('Connection closed during transfer')); };
+                  const cleanup = () => {
+                    socket.removeListener('drain', onDrain);
+                    socket.removeListener('error', onErr);
+                    socket.removeListener('close', onClose);
+                  };
+                  socket.once('drain', onDrain);
+                  socket.once('error', onErr);
+                  socket.once('close', onClose);
+                });
+              }
+            }
+
+            if (this.activeTransfer) {
+              this.activeTransfer.bytesSent = buffer.length;
+              this.activeTransfer.percent = 89;
+              this.activeTransfer.status = 'WRITING_DISK';
+              this.activeTransfer.writingDiskStartedAt = Date.now();
+              this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
+              this.activeTransfer.lastProgressAt = Date.now();
+            }
+          } catch (writeErr) {
+            if (!ackReceived) {
+              socket.destroy();
+              reject(writeErr);
+            }
+          }
         });
 
         socket.on('data', (chunk) => {
           const text = chunk.toString('utf8');
           if (text.includes('MACDROP_ACK')) {
             ackReceived = true;
+            if (this.activeTransfer) {
+              this.activeTransfer.percent = 100;
+              this.activeTransfer.status = 'DELIVERED';
+              this.activeTransfer.speedFormatted = 'Complete';
+            }
             socket.destroy();
             resolve({ ok: true, bytesSent: buffer.length });
           }
@@ -1709,7 +2098,7 @@ class MacDropModule {
 
         socket.on('timeout', () => {
           socket.destroy();
-          reject(new Error(`Timed out connecting to ${target.ip}:${target.port || DEFAULT_MACDROP_PORT}`));
+          reject(new Error(`Timed out communicating with ${target.ip}:${target.port || DEFAULT_MACDROP_PORT}`));
         });
 
         socket.on('close', () => {
@@ -1729,6 +2118,99 @@ class MacDropModule {
 
       reject(new Error('Target client is offline'));
     });
+  }
+
+  /**
+   * Scans the local /24 LAN subnet for 68k Macintosh clients listening on port 6803
+   * (e.g. sitting behind a WiFi bridge where UDP broadcast is blocked).
+   */
+  async scanSubnetForBridgedClients() {
+    try {
+      const now = Date.now();
+      if (this.lastSubnetScanAt && (now - this.lastSubnetScanAt < 8000)) {
+        return;
+      }
+      this.lastSubnetScanAt = now;
+
+      const prefixes = new Set();
+      const hostIp = getLocalIpAddress();
+      const addPrefixFromIp = (ipStr) => {
+        if (!ipStr || typeof ipStr !== 'string') return;
+        const m = ipStr.trim().match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/);
+        if (!m) return;
+        const p = m[1];
+        if (p === '127.0.0' || p === '0.0.0' || p === '10.0.2' ||
+            p === '192.168.97' || p === '192.168.65' ||
+            /^172\.(1[7-9]|2\d|3[0-1])$/.test(p.split('.').slice(0, 2).join('.'))) {
+          return;
+        }
+        prefixes.add(p);
+      };
+
+      addPrefixFromIp(hostIp);
+      const data = this.store.load();
+      for (const d of [...(data.knownDevices || []), ...(data.targets || [])]) {
+        if (d && d.ip) addPrefixFromIp(d.ip);
+      }
+
+      for (const prefix of prefixes) {
+        const probeHost = (ip) => new Promise((resolve) => {
+          if (ip === hostIp) return resolve(false);
+          for (const c of this.activeClients.values()) {
+            if (c.ip === ip) return resolve(true);
+          }
+          const s = new net.Socket();
+          let done = false;
+          const finish = (ok) => {
+            if (done) return;
+            done = true;
+            try { s.destroy(); } catch (_) {}
+            resolve(ok);
+          };
+          s.setTimeout(220);
+          s.on('connect', () => {
+            try {
+              s.write(`MACDROP_HELLO|${hostIp}|${HTTP_PORT}\n`);
+            } catch (_) {}
+            setTimeout(() => finish(true), 180);
+          });
+          s.on('data', (chunk) => {
+            const rx = chunk.toString('utf8');
+            if (rx.includes('MACDROP_PONG|')) {
+              const line = rx.split(/\r?\n/).find(l => l.startsWith('MACDROP_PONG|')) || rx;
+              const parts = line.trim().split('|');
+              const meta = {
+                id: (parts[1] || '').trim() || `device_${ip.replace(/\./g, '_')}`,
+                name: (parts[2] || '').trim() || `Macintosh (${ip})`,
+                machine: (parts[3] || '').trim() || 'Vintage Macintosh',
+                version: (parts[4] || '').trim() || '',
+                ip,
+                port: DEFAULT_MACDROP_PORT,
+                lastSeen: Date.now(),
+                source: 'manual',
+              };
+              this.lastPongByIp.set(ip, meta);
+              this.pingCache.set(`${ip}:${DEFAULT_MACDROP_PORT}`, { online: true, checkedAt: Date.now() });
+              this.recordKnownDevice(meta);
+              finish(true);
+            }
+          });
+          s.on('timeout', () => finish(false));
+          s.on('error', () => finish(false));
+          s.on('close', () => finish(false));
+          s.connect(DEFAULT_MACDROP_PORT, ip);
+        });
+
+        // Sweep 1..254 in 3 fast parallel batches (~220ms each)
+        for (let start = 1; start <= 254; start += 85) {
+          const batch = [];
+          for (let i = start; i < start + 85 && i <= 254; i++) {
+            batch.push(probeHost(`${prefix}.${i}`));
+          }
+          await Promise.all(batch);
+        }
+      }
+    } catch (_) {}
   }
 
   /**
@@ -1755,15 +2237,30 @@ class MacDropModule {
       }
     }
 
-    // 2. Ping all manual LAN targets in parallel
+    // 2. Ping all known & manual LAN targets in parallel
     const data = this.store.load();
-    const pingPromises = (data.targets || []).map(async (t) => {
-      const isOnline = await this.pingTarget(t.ip, t.port || DEFAULT_MACDROP_PORT);
-      this.pingCache.set(`${t.ip}:${t.port || DEFAULT_MACDROP_PORT}`, { online: isOnline, checkedAt: Date.now() });
-      return { ip: t.ip, online: isOnline };
+    const ipsToPing = new Map();
+    for (const t of [...(data.targets || []), ...(data.knownDevices || [])]) {
+      if (t && t.ip) {
+        const cleanIp = t.ip.trim();
+        if (!cleanIp.startsWith('192.168.97.') && !cleanIp.startsWith('192.168.65.') && cleanIp !== '127.0.0.1') {
+          ipsToPing.set(cleanIp, t.port || DEFAULT_MACDROP_PORT);
+        }
+      }
+    }
+
+    const pingPromises = Array.from(ipsToPing.entries()).map(async ([ip, port]) => {
+      const isOnline = await this.pingTarget(ip, port);
+      this.pingCache.set(`${ip}:${port}`, { online: isOnline, checkedAt: Date.now() });
+      return { ip, online: isOnline };
     });
 
     await Promise.all(pingPromises);
+
+    // If no clients are connected yet, trigger a non-blocking subnet sweep for bridged 68k Macs
+    if (this.activeClients.size === 0) {
+      this.scanSubnetForBridgedClients().catch(() => {});
+    }
 
     // 3. Wait briefly for active reverse channel clients to reconnect (living clients reconnect in ~150-250ms)
     await new Promise(r => setTimeout(r, 800));
@@ -1829,31 +2326,36 @@ class MacDropModule {
     // Unified devices map: strictly one entry per IP
     const deviceByIp = new Map();
 
-    // 1. Add known devices (offline by default; only manual LAN targets are pinged)
+    // 1. Add known devices (check pingCache for any LAN device and refresh in background if needed)
     for (const kd of knownDevices) {
       if (!kd || !kd.ip) continue;
       const cleanIp = kd.ip.trim();
+      const port = kd.port || DEFAULT_MACDROP_PORT;
+      const key = `${cleanIp}:${port}`;
+      const pingEntry = this.pingCache.get(key);
+      const isOnline = Boolean(pingEntry && pingEntry.online);
 
-      let isOnline = false;
-      if (kd.source === 'manual') {
-        const key = `${cleanIp}:${kd.port || DEFAULT_MACDROP_PORT}`;
-        const pingEntry = this.pingCache.get(key);
-        isOnline = Boolean(pingEntry && pingEntry.online);
+      const isDockerInternal = cleanIp === '127.0.0.1' ||
+                               cleanIp.startsWith('192.168.97.') ||
+                               cleanIp.startsWith('192.168.65.');
+      const isReverseConnected = activeClientsList.some(c => c.ip === cleanIp);
 
+      if (!isDockerInternal && !isReverseConnected && !this.hasActiveTransfer()) {
         if (!pingEntry || (Date.now() - pingEntry.checkedAt > 10000)) {
-          this.pingTarget(cleanIp, kd.port || DEFAULT_MACDROP_PORT).then(resOnline => {
+          this.pingTarget(cleanIp, port).then(resOnline => {
             this.pingCache.set(key, { online: resOnline, checkedAt: Date.now() });
-          });
+          }).catch(() => {});
         }
       }
 
+      const pongMeta = this.lastPongByIp.get(cleanIp);
       deviceByIp.set(cleanIp, {
         id: `device_${cleanIp.replace(/\./g, '_')}`,
-        name: kd.name,
-        machine: kd.machine || 'Vintage Macintosh',
+        name: (pongMeta && pongMeta.name) || kd.name,
+        machine: (pongMeta && pongMeta.machine) || kd.machine || 'Vintage Macintosh',
         ip: cleanIp,
-        port: kd.port || DEFAULT_MACDROP_PORT,
-        version: kd.version || '',
+        port,
+        version: (pongMeta && pongMeta.version) || kd.version || '',
         online: isOnline,
         lastSeen: kd.lastSeen || 0,
       });
@@ -1914,9 +2416,10 @@ class MacDropModule {
       dataLength: t.dataLength,
       rsrcLength: t.rsrcLength,
       bytesReceived: t.bytesReceived,
-      percent: t.totalExpected > 0 ? Math.min(99, Math.round((t.bytesReceived / t.totalExpected) * 100)) : 0,
-      speedFormatted: t.speedFormatted,
+      percent: t.status === 'COMPLETED' ? 100 : (t.totalExpected > 0 ? Math.min(99, Math.round((t.bytesReceived / t.totalExpected) * 100)) : 0),
+      speedFormatted: t.status === 'COMPLETED' ? 'Complete' : t.speedFormatted,
       status: t.status,
+      accepted: Boolean(t.accepted),
       expiresAt: t.expiresAt,
       remainingSec: t.expiresAt ? Math.max(0, Math.ceil((t.expiresAt - now) / 1000)) : null,
     }));

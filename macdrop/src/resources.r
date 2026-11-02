@@ -424,7 +424,7 @@ resource 'SIZE' (-1) {
     canBackground,
     doesActivateOnFGSwitch,
     backgroundAndForeground,
-    dontGetFrontClicks,
+    getFrontClicks,
     ignoreAppDiedEvents,
     is32BitCompatible,
     isHighLevelEventAware,
@@ -434,7 +434,7 @@ resource 'SIZE' (-1) {
     notDisplayManagerAware,
     reserved,
     reserved,
-    1024 * 1024,
+    1536 * 1024,
     512 * 1024
 };
 
@@ -462,6 +462,7 @@ resource 'MENU' (129, "File") {
         "-", noIcon, noKey, noMark, plain,
         "Set Download Dir.", noIcon, "F", noMark, plain,
         "Set Client Name...", noIcon, "M", noMark, plain,
+        "Set Server IP...", noIcon, "I", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Close Window", noIcon, "W", noMark, plain,
         "Quit", noIcon, "Q", noMark, plain
