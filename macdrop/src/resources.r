@@ -546,3 +546,49 @@ resource 'DITL' (131, "Send File", purgeable) {
         {138, 252, 158, 332}, Button { enabled, "Send" }
     }
 };
+
+/*
+ * Standard System 7 Modal Dialog for "Set Client Name" ('DLOG' 132 & 'DITL' 132)
+ */
+resource 'DLOG' (132, "Set Macintosh Name", purgeable) {
+    {80, 100, 196, 412}, dBoxProc, invisible, noGoAway, 0,
+    132, "Set Client Name", alertPositionMainScreen
+};
+
+resource 'DITL' (132, "Set Macintosh Name", purgeable) {
+    {
+        /* [1] Save button (default) */
+        {80, 224, 100, 296}, Button { enabled, "Save" },
+        /* [2] Cancel button */
+        {80, 138, 100, 210}, Button { enabled, "Cancel" },
+        /* [3] Prompt label */
+        {14, 16, 30, 296}, StaticText { disabled, "Enter a name for this Mac on MacCompanion:" },
+        /* [4] Client Name EditText */
+        {40, 18, 56, 294}, EditText { enabled, "" }
+    }
+};
+
+/*
+ * Standard System 7 Modal Dialog for "Set Server IP" ('DLOG' 133 & 'DITL' 133)
+ */
+resource 'DLOG' (133, "Set Server IP", purgeable) {
+    {75, 96, 219, 416}, dBoxProc, invisible, noGoAway, 0,
+    133, "Set Server IP", alertPositionMainScreen
+};
+
+resource 'DITL' (133, "Set Server IP", purgeable) {
+    {
+        /* [1] Connect button (default) */
+        {108, 228, 128, 304}, Button { enabled, "Connect" },
+        /* [2] Cancel button */
+        {108, 142, 128, 216}, Button { enabled, "Cancel" },
+        /* [3] Scan LAN button */
+        {108, 16, 128, 104}, Button { enabled, "Scan LAN" },
+        /* [4] Prompt label */
+        {14, 16, 30, 304}, StaticText { disabled, "MacCompanion Server IP Address:" },
+        /* [5] Server IP EditText */
+        {40, 18, 56, 302}, EditText { enabled, "" },
+        /* [6] Status / Error feedback label */
+        {70, 16, 98, 304}, StaticText { disabled, "" }
+    }
+};

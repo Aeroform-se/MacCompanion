@@ -66,7 +66,9 @@ static unsigned long gLastSiblingCheckTick   = 0;
 static unsigned long gRxLastSpeedTicks       = 0;
 static unsigned long gRxLastSpeedBytes       = 0;
 static MacBinaryRx  gChannelRx;
-static unsigned char gChanChunkBuf[CHUNK_BUF_SIZE];
+static unsigned char gChanChunkBufA[CHUNK_BUF_SIZE];
+static unsigned char gChanChunkBufB[CHUNK_BUF_SIZE];
+static unsigned char *gChanActiveRcvBuf = gChanChunkBufA;
 
 /* Header buffer for HTTP parsing on reverse channel */
 static char         gHttpHeaderBuf[1024];
@@ -898,7 +900,7 @@ static void StartChannelRcv(void)
     gChanRcvPB.ioCRefNum                  = gMacTCPRef;
     gChanRcvPB.csCode                     = TCPRcv;
     gChanRcvPB.tcpStream                  = gChannelStream;
-    gChanRcvPB.csParam.receive.rcvBuff    = (Ptr)gChanChunkBuf;
+    gChanRcvPB.csParam.receive.rcvBuff    = (Ptr)gChanActiveRcvBuf;
     gChanRcvPB.csParam.receive.rcvBuffLen = askLen;
     gChanRcvPB.csParam.receive.commandTimeoutValue = 0; /* non-blocking background wait */
     gChanRcvPB.csParam.receive.secondTimeStamp = 0;
@@ -1210,7 +1212,7 @@ void NetIdle(void)
 
             if (gChanRcvPB.ioResult == noErr && gChanRcvPB.csParam.receive.rcvBuffLen > 0) {
                 long nBytes = (unsigned short)gChanRcvPB.csParam.receive.rcvBuffLen;
-                unsigned char *pData = gChanChunkBuf;
+                unsigned char *pData = gChanActiveRcvBuf;
 
                 if (!gHeaderParsed) {
                     long copyLen = nBytes;
@@ -1263,6 +1265,10 @@ void NetIdle(void)
                             }
                         }
 
+                        /* Swap receive buffer and issue the next async TCPRcv BEFORE writing to SCSI/HFS disk! */
+                        gChanActiveRcvBuf = (pData == gChanChunkBufA) ? gChanChunkBufB : gChanChunkBufA;
+                        StartChannelRcv();
+
                         long headerBytes = (delim - gHttpHeaderBuf) + delimLen;
                         if (headerBytes < nBytes) {
                             long payloadBytes = nBytes - headerBytes;
@@ -1274,14 +1280,18 @@ void NetIdle(void)
                             gActiveTransferBytes = gChannelRx.dataBytesWritten + gChannelRx.rsrcBytesWritten;
                         }
 
-                        if (gWindow && !IsWindowVisible(gWindow)) {
-                            ShowWindow(gWindow);
-                            SelectWindow(gWindow);
-                        }
                         UpdateProgressUI();
                         lastUiTick = TickCount();
+                    } else {
+                        StartChannelRcv();
                     }
                 } else {
+                    /* Pipelined double-buffering: flip to alternate buffer and issue next async TCPRcv
+                     * immediately so MacTCP drains its 64KB ring buffer and advertises window to the
+                     * WiFi bridge while the 68030 CPU writes pData to the SCSI disk! */
+                    gChanActiveRcvBuf = (pData == gChanChunkBufA) ? gChanChunkBufB : gChanChunkBufA;
+                    StartChannelRcv();
+
                     MacBinaryRx_ProcessBytes(&gChannelRx, pData, nBytes);
                     if (gChannelRx.fileName[0] != '\0') {
                         snprintf(gActiveTransferName, sizeof(gActiveTransferName), "%s", gChannelRx.fileName);
@@ -1344,7 +1354,9 @@ void NetIdle(void)
                     return;
                 }
 
-                StartChannelRcv();
+                if (!gChanRcvPending) {
+                    StartChannelRcv();
+                }
             } else {
                 /* Connection closed by server or error occurred */
                 if (gTransferActive) {

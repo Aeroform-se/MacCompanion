@@ -110,6 +110,7 @@ static void InitSharedData(void)
 {
     memset(&sharedData, 0, sizeof(sharedData));
     sharedData.DaemonRunning    = false;
+    sharedData.DaemonQuitting   = false;
     sharedData.ChannelConnected = false;
     sharedData.TransferActive   = false;
     sharedData.WindowVisible    = false;
@@ -173,7 +174,7 @@ static void TryLaunchDaemon(void)
     long osAttr = 0;
     unsigned long nowTicks;
 
-    if (sharedData.DaemonRunning) {
+    if (sharedData.DaemonRunning || sharedData.DaemonQuitting) {
         sLaunchInProgress = false;
         return;
     }
@@ -388,7 +389,9 @@ static pascal long Patched_MenuSelect(Point where)
     MenuSelectProcPtr proc;
     THz saveZone;
 
+    /* If user clicked the MacDrop menu after manual quit, allow relaunching */
     if (!sharedData.DaemonRunning) {
+        sharedData.DaemonQuitting = false;
         TryLaunchDaemon();
     }
 
@@ -416,6 +419,7 @@ static pascal void Patched_SystemMenu(long result)
         InitCursor();
 
         if (!sharedData.DaemonRunning) {
+            sharedData.DaemonQuitting = false;
             TryLaunchDaemon();
         }
 

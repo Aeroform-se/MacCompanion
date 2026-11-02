@@ -22,6 +22,7 @@ typedef enum {
 
 typedef struct {
     Boolean             DaemonRunning;      /* true when background daemon is active */
+    Boolean             DaemonQuitting;     /* true when daemon received Quit / System Shutdown */
     Boolean             ChannelConnected;   /* true if connected to server */
     Boolean             TransferActive;     /* true during file transfer */
     Boolean             WindowVisible;      /* true if main window is open */
