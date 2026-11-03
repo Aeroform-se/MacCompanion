@@ -10,6 +10,9 @@ Classic Macs are timeless, but the modern web left them behind around 1998. **Ma
 ## Client Apps
 
 ### SpotiMac
+
+![The SpotiMac client](docs/screens/spotimac.gif)
+
 Spotify for your 68k Mac. Supports local playback and multitasking so you can get that real work done and delivered to your favorite tunes. Throwing a party? There might be a nice feature for that built in too.
 
 **Requirements:**
