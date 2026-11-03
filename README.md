@@ -11,9 +11,9 @@ Classic Macs are timeless, but the modern web left them behind around 1998. **Ma
 
 ### SpotiMac
 
-![The SpotiMac client](docs/screens/spotimac.gif)
+![The SpotiMac client](docs/screens/spotimac-slideshow.gif)
 
-Spotify for your 68k Mac. Supports local playback and multitasking so you can get that real work done and delivered to your favorite tunes. Throwing a party? There might be a nice feature for that built in too.
+Spotify for your 68k Mac. **Supports local playback** and multitasking with a mini player, all so you can get that real work done and delivered to your favorite tunes. Throwing a party? There might be a nice feature for that built in too.
 
 **Requirements:**
 - **Account:** Spotify Premium + a free Spotify Developer Client ID.
@@ -25,6 +25,9 @@ Spotify for your 68k Mac. Supports local playback and multitasking so you can ge
 ---
 
 ### MacAI
+
+![The MacAI client](docs/screens/spotimac-slideshow.gif)
+
 AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq right from within System 7. Featuring image generation, bi-directional voice, and an ominous sentient mainframe.
 
 **Requirements:**
@@ -36,6 +39,9 @@ AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq rig
 ---
 
 ### MacDrop
+
+![The MacDrop extension](docs/screens/macdrop-slideshow.gif)
+
 Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. Ever wanted to drop files from your phone straight to your 68k Mac? We'll, now you can (Yes, it also works from other devices :).
 
 **Requirements:**
