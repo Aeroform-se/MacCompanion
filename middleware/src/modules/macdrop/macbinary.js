@@ -123,14 +123,170 @@ function getTypeCreatorForFilename(filename) {
 }
 
 /**
+ * Mapping of common Unicode characters (Latin-1 + typographical symbols) to
+ * Classic Mac OS Roman byte values (0x80..0xFF), with ASCII transliteration fallback
+ * for characters outside Mac OS Roman.
+ */
+const UNICODE_TO_MAC_ROMAN = {
+  0x00C4: 0x80, // Ä
+  0x00C5: 0x81, // Å
+  0x00C7: 0x82, // Ç
+  0x00C9: 0x83, // É
+  0x00D1: 0x84, // Ñ
+  0x00D6: 0x85, // Ö
+  0x00DC: 0x86, // Ü
+  0x00E1: 0x87, // á
+  0x00E0: 0x88, // à
+  0x00E2: 0x89, // â
+  0x00E4: 0x8A, // ä
+  0x00E3: 0x8B, // ã
+  0x00E5: 0x8C, // å
+  0x00E7: 0x8D, // ç
+  0x00E9: 0x8E, // é
+  0x00E8: 0x8F, // è
+  0x00EA: 0x90, // ê
+  0x00EB: 0x91, // ë
+  0x00ED: 0x92, // í
+  0x00EC: 0x93, // ì
+  0x00EE: 0x94, // î
+  0x00EF: 0x95, // ï
+  0x00F1: 0x96, // ñ
+  0x00F3: 0x97, // ó
+  0x00F2: 0x98, // ò
+  0x00F4: 0x99, // ô
+  0x00F6: 0x9A, // ö
+  0x00F5: 0x9B, // õ
+  0x00FA: 0x9C, // ú
+  0x00F9: 0x9D, // ù
+  0x00FB: 0x9E, // û
+  0x00FC: 0x9F, // ü
+  0x2020: 0xA0, // †
+  0x00B0: 0xA1, // °
+  0x00A2: 0xA2, // ¢
+  0x00A3: 0xA3, // £
+  0x00A7: 0xA4, // §
+  0x2022: 0xA5, // •
+  0x00B6: 0xA6, // ¶
+  0x00DF: 0xA7, // ß
+  0x00AE: 0xA8, // ®
+  0x00A9: 0xA9, // ©
+  0x2122: 0xAA, // ™
+  0x00B4: 0xAB, // ´
+  0x00A8: 0xAC, // ¨
+  0x00C6: 0xAE, // Æ
+  0x00D8: 0xAF, // Ø
+  0x00F8: 0xBF, // ø
+  0x00BF: 0xC0, // ¿
+  0x00A1: 0xC1, // ¡
+  0x00AB: 0xC7, // «
+  0x00BB: 0xC8, // »
+  0x2026: 0xC9, // …
+  0x00A0: 0xCA, // non-breaking space
+  0x00C0: 0xCB, // À
+  0x00C3: 0xCC, // Ã
+  0x00D5: 0xCD, // Õ
+  0x0152: 0xCE, // Œ
+  0x0153: 0xCF, // œ
+  0x2013: 0xD0, // –
+  0x2014: 0xD1, // —
+  0x201C: 0xD2, // “
+  0x201D: 0xD3, // ”
+  0x2018: 0xD4, // ‘
+  0x2019: 0xD5, // ’
+  0x00F7: 0xD6, // ÷
+  0x00FF: 0xD8, // ÿ
+  0x0178: 0xD9, // Ÿ
+  0x00E6: 0xBE, // æ
+  0x00C2: 0xE5, // Â
+  0x00CA: 0xE6, // Ê
+  0x00C1: 0xE7, // Á
+  0x00CB: 0xE8, // Ë
+  0x00C8: 0xE9, // È
+  0x00CD: 0xEA, // Í
+  0x00CE: 0xEB, // Î
+  0x00CF: 0xEC, // Ï
+  0x00CC: 0xED, // Ì
+  0x00D3: 0xEE, // Ó
+  0x00D4: 0xEF, // Ô
+  0x00D2: 0xF1, // Ò
+  0x00DA: 0xF2, // Ú
+  0x00DB: 0xF3, // Û
+  0x00D9: 0xF4, // Ù
+};
+
+const MAC_ROMAN_TO_UNICODE = {};
+for (const [uni, mac] of Object.entries(UNICODE_TO_MAC_ROMAN)) {
+  MAC_ROMAN_TO_UNICODE[mac] = Number(uni);
+}
+
+/**
+ * Encodes a Unicode JavaScript string into a Classic Mac OS Roman Buffer (max `maxBytes` bytes).
+ * Normalizes macOS NFD decomposed accents (`a\u030a` -> `å`) to NFC first so Swedish/European
+ * characters (`å`, `ä`, `ö`, `Å`, `Ä`, `Ö`, `é`, `ü`, etc.) map cleanly to single Mac Roman bytes!
+ */
+function encodeMacRoman(str, maxBytes = 31) {
+  const normalized = String(str || '').normalize('NFC');
+  const bytes = [];
+  for (const ch of normalized) {
+    if (bytes.length >= maxBytes) break;
+    const code = ch.codePointAt(0);
+    if (code >= 0x20 && code <= 0x7E) {
+      bytes.push(code);
+    } else if (UNICODE_TO_MAC_ROMAN[code] !== undefined) {
+      bytes.push(UNICODE_TO_MAC_ROMAN[code]);
+    } else {
+      // Strip combining marks to fall back to base ASCII letter if outside Mac OS Roman
+      const base = ch.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      if (base && base.length > 0) {
+        for (const bch of base) {
+          if (bytes.length >= maxBytes) break;
+          const bcode = bch.codePointAt(0);
+          if (bcode >= 0x20 && bcode <= 0x7E) {
+            bytes.push(bcode);
+          } else {
+            bytes.push(0x5F); // '_'
+          }
+        }
+      } else {
+        bytes.push(0x5F); // '_'
+      }
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+/**
+ * Decodes a Classic Mac OS Roman byte slice into a modern UTF-8 JavaScript string.
+ */
+function decodeMacRoman(buf, start = 0, end = buf.length) {
+  let out = '';
+  const limit = Math.min(buf.length, end);
+  for (let i = start; i < limit; i++) {
+    const b = buf[i];
+    if (b < 0x80) {
+      out += String.fromCharCode(b);
+    } else if (MAC_ROMAN_TO_UNICODE[b] !== undefined) {
+      out += String.fromCharCode(MAC_ROMAN_TO_UNICODE[b]);
+    } else {
+      out += String.fromCharCode(b);
+    }
+  }
+  return out;
+}
+
+/**
  * Sanitizes a filename for Classic Mac OS HFS:
- * - Max length 31 characters
- * - No colons (':') which are path separators in classic Mac OS
+ * - Normalizes NFD/NFC Unicode (so macOS Finder filenames with å, ä, ö work seamlessly)
+ * - Replaces colons (':') and control chars
+ * - Max length 31 characters (preserving file extension)
  */
 function sanitizeMacFilename(name) {
   if (!name) return 'Untitled';
-  // Replace colons with dashes or underscores
-  let clean = name.replace(/:/g, '-').trim();
+  let clean = String(name)
+    .normalize('NFC')
+    .replace(/[:/\\]/g, '-')
+    .replace(/[\x00-\x1F\x7F]/g, '')
+    .trim();
   if (clean.length > 31) {
     const extIdx = clean.lastIndexOf('.');
     if (extIdx > 0 && clean.length - extIdx <= 8) {
@@ -150,7 +306,7 @@ function parseMacBinaryHeader(buf) {
   if (!buf || buf.length < 128) return null;
 
   const nameLen = Math.min(buf[1], 63);
-  const fileName = buf.toString('latin1', 2, 2 + nameLen);
+  const fileName = decodeMacRoman(buf, 2, 2 + nameLen);
   const type = buf.toString('latin1', 65, 69);
   const creator = buf.toString('latin1', 69, 73);
   const flags = (buf[73] << 8) | buf[101];
@@ -204,12 +360,13 @@ function createMacBinary(opts) {
   // Byte 0: Must be 0
   header[0] = 0x00;
 
-  // Byte 1: Filename length (max 31 chars for classic HFS)
-  const pNameLen = Math.min(Buffer.byteLength(fileName, 'latin1'), 31);
+  // Byte 1: Filename length (max 31 chars for classic HFS, encoded in Mac OS Roman)
+  const macRomanName = encodeMacRoman(fileName, 31);
+  const pNameLen = Math.min(macRomanName.length, 31);
   header[1] = pNameLen;
 
-  // Bytes 2..64: Filename characters
-  header.write(fileName, 2, pNameLen, 'latin1');
+  // Bytes 2..64: Filename characters in Mac OS Roman
+  macRomanName.copy(header, 2, 0, pNameLen);
 
   // Bytes 65..68: File Type (4 ASCII chars)
   header.write(fileType, 65, 4, 'ascii');

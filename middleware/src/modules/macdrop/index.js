@@ -1586,7 +1586,11 @@ class MacDropModule {
           }
         } else if (req.rawBuffer && req.rawBuffer.length > 0) {
           fileBuffer = req.rawBuffer;
-          originalName = req.headers['x-filename'] || req.query.filename || 'PushedFile.bin';
+          let rawHeaderName = req.headers['x-filename'] || req.query.filename || 'PushedFile.bin';
+          try {
+            rawHeaderName = decodeURIComponent(rawHeaderName);
+          } catch (_) {}
+          originalName = rawHeaderName;
         }
 
         if (!fileBuffer || fileBuffer.length === 0) {
@@ -1848,7 +1852,7 @@ class MacDropModule {
             'Content-Length': buffer.length,
             'Connection': 'close',
             'X-MacDrop-Status': 'STREAM',
-            'X-Filename': macInfo.fileName,
+            'X-Filename': encodeURIComponent(macInfo.fileName),
             'X-Transfer-Id': transferId,
           });
 

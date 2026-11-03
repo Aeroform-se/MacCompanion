@@ -90,8 +90,8 @@
     }
 
     .logo-img {
-      width: 184px;
-      height: 130px;
+      width: 149px;
+      height: 88px;
       display: block;
       image-rendering: pixelated;
       object-fit: contain;
@@ -158,6 +158,68 @@
       align-items: center;
       width: 100%;
       min-height: 410px;
+      position: relative;
+    }
+
+    .macdrop-popup-btn {
+      position: absolute;
+      top: 18px;
+      right: 22px;
+      background: transparent;
+      border: none;
+      padding: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
+      opacity: 0.9;
+      transition: opacity 0.12s, transform 0.12s;
+      z-index: 15;
+    }
+
+    .macdrop-popup-btn:hover {
+      opacity: 1;
+      transform: translate(1px, -1px);
+    }
+
+    .macdrop-popup-icon {
+      width: 16px;
+      height: 16px;
+      display: block;
+      image-rendering: pixelated;
+      object-fit: contain;
+    }
+
+    .macdrop-inbound-icon {
+      width: 16px;
+      height: 16px;
+      display: inline-block;
+      vertical-align: middle;
+      image-rendering: pixelated;
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+
+    /* Standalone #drop view (MacDrop-card only) */
+    body.drop-only-mode {
+      padding: 16px;
+      justify-content: center;
+      align-items: center;
+    }
+
+    body.drop-only-mode .platform-header,
+    body.drop-only-mode .platform-footer,
+    body.drop-only-mode #spotify-card-wrap,
+    body.drop-only-mode #macai-card-wrap,
+    body.drop-only-mode #macdrop-popup-btn {
+      display: none !important;
+    }
+
+    body.drop-only-mode .services-grid {
+      grid-template-columns: minmax(320px, 420px);
+      max-width: 420px;
+      gap: 0;
     }
 
     /* MacDrop AirDrop-Style Interactive Dropzone on Card */
@@ -941,9 +1003,9 @@
       <img
         id="mac-icon"
         class="logo-img"
-        src="/img/maccompanionLogo.png"
-        width="184"
-        height="130"
+        src="/img/maccompanionLogo-New.png"
+        width="149"
+        height="88"
         alt="MacCompanion"
       />
     </a>
@@ -960,8 +1022,79 @@
 
   <!-- VIEW 1: Main Status Dashboard -->
   <main id="view-dashboard" class="services-grid">
-    <!-- Card 1: SpotiMac -->
-    <div class="service-card-wrap">
+    <!-- Card 1: MacDrop -->
+    <div class="service-card-wrap" id="macdrop-card-wrap">
+      <section class="service-card pixel-card-clip" id="macdrop-card">
+        <a href="#drop" id="macdrop-popup-btn" class="macdrop-popup-btn" onclick="openMacDropPopup(event)" title="Open MacDrop in compact popup window">
+          <img src="/img/popup-icon.png" class="macdrop-popup-icon" width="16" height="16" alt="Open MacDrop Popup" />
+        </a>
+        <div class="card-icon-wrap">
+          <img
+            src="/img/MacDrop-serviceIcon-2.png"
+            class="card-icon"
+            width="86"
+            height="88"
+            alt="MacDrop"
+          />
+        </div>
+
+        <!-- Big AirDrop-Style Drop Zone -->
+        <div class="macdrop-dropzone" id="macdrop-dropzone">
+          <button type="button" id="macdrop-refresh-btn" class="macdrop-refresh-btn action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)" title="Scan & refresh connected Macs">
+            <img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh
+          </button>
+          <input type="file" id="macdrop-file-input" style="display:none;" multiple onchange="handleFileSelect(event)" />
+          
+          <div class="macdrop-devices-wrap" id="macdrop-devices-wrap">
+            <!-- Dynamically populated connected devices (AirDrop style) -->
+          </div>
+
+          <!-- Inbound Transfer Prompt Box (68k -> Modern Web UI) -->
+          <div class="macdrop-inbound-box hidden" id="macdrop-inbound-box">
+            <div class="macdrop-inbound-header">
+              <div class="macdrop-inbound-title-wrap" style="display:flex; align-items:center; gap:6px;">
+                <img src="/img/download-icon.png" class="macdrop-inbound-icon" width="16" height="16" alt="" />
+                <span class="macdrop-inbound-title" id="macdrop-inbound-title">Incoming File</span>
+              </div>
+              <span class="macdrop-inbound-timer" id="macdrop-inbound-timer">30s</span>
+            </div>
+            <div class="macdrop-inbound-body">
+              <div class="macdrop-inbound-filename" id="macdrop-inbound-filename">Document.bin</div>
+              <div class="macdrop-inbound-meta" id="macdrop-inbound-meta">0 B • MacBinary II</div>
+            </div>
+            <div class="macdrop-inbound-actions">
+              <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-decline-btn" onclick="declineInboundTransfer(event)">Decline</button>
+              <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-accept-btn" style="background:#000; color:#fff;" onclick="acceptInboundTransfer(event)">Accept &amp; Download</button>
+            </div>
+          </div>
+
+          <!-- Live Transfer Progress Box -->
+          <div class="macdrop-progress-box hidden" id="macdrop-progress-box">
+            <div class="macdrop-progress-header">
+              <span class="macdrop-progress-name" id="macdrop-progress-name">File.sit</span>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="macdrop-progress-pct" id="macdrop-progress-pct">0%</span>
+                <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-cancel-outbound-btn" onclick="cancelOutboundTransfer(event)">Cancel</button>
+              </div>
+            </div>
+            <div class="macdrop-bar-wrap">
+              <div class="macdrop-bar-fill" id="macdrop-bar-fill"></div>
+            </div>
+            <div class="macdrop-progress-sub" id="macdrop-progress-sub">Streaming to Macintosh...</div>
+          </div>
+        </div>
+
+        <div class="configure-btn-wrap">
+          <a href="#macdrop" class="configure-btn pixel-btn-clip">
+            <span>Configure MacDrop</span>
+            <span>&gt;</span>
+          </a>
+        </div>
+      </section>
+    </div>
+
+    <!-- Card 2: SpotiMac -->
+    <div class="service-card-wrap" id="spotify-card-wrap">
       <section class="service-card pixel-card-clip" id="spotify-card">
         <div class="card-icon-wrap">
           <img
@@ -1033,8 +1166,8 @@
       </section>
     </div>
 
-    <!-- Card 2: MacAI -->
-    <div class="service-card-wrap">
+    <!-- Card 3: MacAI -->
+    <div class="service-card-wrap" id="macai-card-wrap">
       <section class="service-card pixel-card-clip" id="macai-card">
         <div class="card-icon-wrap">
           <img
@@ -1091,74 +1224,6 @@
         <div class="configure-btn-wrap">
           <a href="#macai" class="configure-btn pixel-btn-clip">
             <span>Configure MacAI</span>
-            <span>&gt;</span>
-          </a>
-        </div>
-      </section>
-    </div>
-
-    <!-- Card 3: MacDrop -->
-    <div class="service-card-wrap">
-      <section class="service-card pixel-card-clip" id="macdrop-card">
-        <div class="card-icon-wrap">
-          <img
-            src="/img/MacDrop-serviceIcon-2.png"
-            class="card-icon"
-            width="86"
-            height="88"
-            alt="MacDrop"
-          />
-        </div>
-
-        <!-- Big AirDrop-Style Drop Zone -->
-        <div class="macdrop-dropzone" id="macdrop-dropzone">
-          <button type="button" id="macdrop-refresh-btn" class="macdrop-refresh-btn action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)" title="Scan & refresh connected Macs">
-            <img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh
-          </button>
-          <input type="file" id="macdrop-file-input" style="display:none;" multiple onchange="handleFileSelect(event)" />
-          
-          <div class="macdrop-devices-wrap" id="macdrop-devices-wrap">
-            <!-- Dynamically populated connected devices (AirDrop style) -->
-          </div>
-
-          <!-- Inbound Transfer Prompt Box (68k -> Modern Web UI) -->
-          <div class="macdrop-inbound-box hidden" id="macdrop-inbound-box">
-            <div class="macdrop-inbound-header">
-              <div class="macdrop-inbound-title-wrap" style="display:flex; align-items:center; gap:6px;">
-                <span>📥</span>
-                <span class="macdrop-inbound-title" id="macdrop-inbound-title">Incoming File</span>
-              </div>
-              <span class="macdrop-inbound-timer" id="macdrop-inbound-timer">30s</span>
-            </div>
-            <div class="macdrop-inbound-body">
-              <div class="macdrop-inbound-filename" id="macdrop-inbound-filename">Document.bin</div>
-              <div class="macdrop-inbound-meta" id="macdrop-inbound-meta">0 B • MacBinary II</div>
-            </div>
-            <div class="macdrop-inbound-actions">
-              <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-decline-btn" onclick="declineInboundTransfer(event)">Decline</button>
-              <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-accept-btn" style="background:#000; color:#fff;" onclick="acceptInboundTransfer(event)">Accept &amp; Download</button>
-            </div>
-          </div>
-
-          <!-- Live Transfer Progress Box -->
-          <div class="macdrop-progress-box hidden" id="macdrop-progress-box">
-            <div class="macdrop-progress-header">
-              <span class="macdrop-progress-name" id="macdrop-progress-name">File.sit</span>
-              <div style="display:flex; align-items:center; gap:8px;">
-                <span class="macdrop-progress-pct" id="macdrop-progress-pct">0%</span>
-                <button type="button" class="action-btn-sm pixel-pill-clip" id="macdrop-cancel-outbound-btn" onclick="cancelOutboundTransfer(event)">Cancel</button>
-              </div>
-            </div>
-            <div class="macdrop-bar-wrap">
-              <div class="macdrop-bar-fill" id="macdrop-bar-fill"></div>
-            </div>
-            <div class="macdrop-progress-sub" id="macdrop-progress-sub">Streaming to Macintosh...</div>
-          </div>
-        </div>
-
-        <div class="configure-btn-wrap">
-          <a href="#macdrop" class="configure-btn pixel-btn-clip">
-            <span>Configure MacDrop</span>
             <span>&gt;</span>
           </a>
         </div>
@@ -1632,13 +1697,15 @@
     };
     let lastSpotifyData = null;
 
-    // View Routing (#spotimac, #macai, #macdrop, or default #overview)
+    // View Routing (#spotimac, #macai, #macdrop, #drop, or default #overview)
     function updateRoute() {
       const hash = window.location.hash.toLowerCase();
       const viewDash = document.getElementById('view-dashboard');
       const viewSpoti = document.getElementById('view-spotimac');
       const viewMacAI = document.getElementById('view-macai');
       const viewMacDrop = document.getElementById('view-macdrop');
+
+      document.body.classList.toggle('drop-only-mode', hash === '#drop');
 
       if (hash === '#spotimac') {
         viewDash.classList.add('hidden');
@@ -1663,6 +1730,23 @@
         viewSpoti.classList.add('hidden');
         viewMacAI.classList.add('hidden');
         if (viewMacDrop) viewMacDrop.classList.add('hidden');
+      }
+    }
+
+    function openMacDropPopup(event) {
+      if (event) event.preventDefault();
+      const popupUrl = `${window.location.origin}${window.location.pathname}#drop`;
+      const width = 440;
+      const height = 470;
+      const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+      const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+      const win = window.open(
+        popupUrl,
+        'MacDropPopup',
+        `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=no`
+      );
+      if (!win) {
+        window.location.hash = '#drop';
       }
     }
 
@@ -2287,8 +2371,6 @@
               titleEl.textContent = '✓ File transfer complete';
             } else if (isAccepted) {
               titleEl.textContent = `Downloading from ${pendingInbound.clientName}...`;
-            } else if (isStreaming) {
-              titleEl.textContent = `Incoming: ${pendingInbound.clientName} (Streaming...)`;
             } else {
               titleEl.textContent = `Incoming: ${pendingInbound.clientName}`;
             }
@@ -2409,12 +2491,12 @@
         ? '✓ File transfer complete'
         : (isAccepted
           ? `Downloading from ${escapeHtml(transfer.clientName)}:`
-          : `${escapeHtml(transfer.clientName)} is ${isStreaming ? 'streaming' : 'sending'}:`);
+          : `Incoming: ${escapeHtml(transfer.clientName)}`);
 
       toast.innerHTML = `
         <div style="display:flex; align-items:center; justify-content:space-between; border-bottom:1px dotted #000; padding-bottom:6px; margin-bottom:8px;">
           <div style="display:flex; align-items:center; gap:6px; font-weight:bold; font-size:12px;">
-            <span>${isCompleted ? '✅' : '📥'}</span>
+            <img src="/img/download-icon.png" class="macdrop-inbound-icon" width="16" height="16" alt="" />
             <span>${headerLabel}</span>
           </div>
           <span style="font-size:11px; background:#000; color:#fff; padding:1px 6px; font-weight:bold;">${badgeText}</span>
@@ -2674,9 +2756,9 @@
             const uploadUrl = targetId ? `/api/macdrop/upload?target_id=${encodeURIComponent(targetId)}` : '/api/macdrop/upload';
             xhr.open('POST', uploadUrl, true);
             xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-            xhr.setRequestHeader('x-filename', file.name);
+            xhr.setRequestHeader('x-filename', encodeURIComponent(file.name));
             if (targetId) {
-              xhr.setRequestHeader('x-target-id', targetId);
+              xhr.setRequestHeader('x-target-id', encodeURIComponent(targetId));
             }
 
             xhr.upload.onprogress = (evt) => {
