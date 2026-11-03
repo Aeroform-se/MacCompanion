@@ -1,16 +1,16 @@
 # MacCompanion
 
-Classic Macs are timeless, but the modern web left them behind around 1998. **MacCompanion** is a lightweight bridge server that lets your vintage 68k Macintosh party like it's 1984.
+Classic Macs are timeless, but the modern web left them behind around 1998. **MacCompanion** is a lightweight bridge server and a selection of client apps that lets your vintage 68k Macintosh party like it's 1984.
 
 **Requirements:**
-- Any always-on computer, NAS, or Raspberry Pi on your local network capable of running **Docker** with an internet connection.
+- Any always-on computer, NAS, Raspberry Pi or similar on your local network capable of running **Docker** with an internet connection.
 
 ---
 
 ## Client Apps
 
 ### SpotiMac
-Spotify for your 68k Mac. Supports local playback and multitasking so you can get that real work done and delivered to your favorite tunes.
+Spotify for your 68k Mac. Supports local playback and multitasking so you can get that real work done and delivered to your favorite tunes. Throwing a party? There might be a nice feature for that built in too.
 
 **Requirements:**
 - **Account:** Spotify Premium + a free Spotify Developer Client ID.
@@ -33,7 +33,7 @@ AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq rig
 ---
 
 ### MacDrop
-Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. 
+Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. Ever wanted to drop files from your phone straight to your 68k Mac? We'll, now you can (Yes, it also works from other devices :).
 
 **Requirements:**
 - **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
@@ -65,6 +65,8 @@ This project is built with the help of the following open-source projects and li
 - **[eSpeak NG](https://github.com/espeak-ng/espeak-ng)** — Open-source compact formant text-to-speech synthesizer powering local server-side TTS and synthetic computer voices ([GPLv3 License](https://github.com/espeak-ng/espeak-ng/blob/master/COPYING))
 - **[SoX (Sound eXchange)](https://sourceforge.net/projects/sox/)** — Open-source command-line audio processing utility used for GLaDOS chorus, overdrive, and reverb voice synthesis ([GPLv2+ / LGPLv2.1+ License](https://sourceforge.net/p/sox/code/ci/master/tree/COPYING))
 - **[Retro68](https://github.com/autc04/Retro68)** by Wolfgang Thaller — GCC-based cross-compiler toolchain targeting 68k and PowerPC Macintosh systems ([GPLv3 with GCC Runtime Library Exception](https://github.com/autc04/Retro68/blob/master/COPYING))
+
+A Special thanks to  **[Antscode](https://github.com/antscode)** who inspired this project and got me into 68k macs by writing the first Spotify 68k client back in 2018.
 
 ---
 
