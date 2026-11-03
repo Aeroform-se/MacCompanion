@@ -29,6 +29,33 @@ cmake -S "$MACAI_DIR" -B "$BUILD_DIR" \
     -G Ninja
 ninja -C "$BUILD_DIR"
 
+# Patch Finder flags (0x2400 = kHasBundle | kHasCustomIcon) into MacAI.bin and MacAI.dsk
+python3 - "$BUILD_DIR/$APP_NAME.bin" "$BUILD_DIR/$APP_NAME.dsk" <<'PYEOF'
+import binascii, struct, sys
+
+bin_path, dsk_path = sys.argv[1], sys.argv[2]
+
+with open(bin_path, "rb") as f:
+    bdata = bytearray(f.read())
+if len(bdata) >= 128 and bdata[65:73] == b"APPLMCAI":
+    bdata[73] = 0x24   # fdFlags high byte: kHasBundle (0x20) | kHasCustomIcon (0x04)
+    bdata[101] = 0x00  # fdFlags low byte
+    crc = binascii.crc_hqx(bytes(bdata[:124]), 0)
+    struct.pack_into(">H", bdata, 124, crc)
+    with open(bin_path, "wb") as f:
+        f.write(bdata)
+
+with open(dsk_path, "rb") as f:
+    ddata = bytearray(f.read())
+pat = b"\x02\x00\x00\x00APPLMCAI\x00\x00"
+idx = ddata.find(pat)
+if idx != -1:
+    ddata[idx + 12] = 0x24
+    ddata[idx + 13] = 0x00
+    with open(dsk_path, "wb") as f:
+        f.write(ddata)
+PYEOF
+
 echo "==> Built artifacts in $BUILD_DIR:"
 ls -lh "$BUILD_DIR/$APP_NAME.bin" "$BUILD_DIR/$APP_NAME.dsk"
 
@@ -70,7 +97,7 @@ deploy_appl_to_folder() {
     python3 - "$target_appl" "$dst_dir/.finf/$dst_name" "$creator" <<'PYEOF'
 import subprocess, sys
 target_appl, finf_file, creator = sys.argv[1], sys.argv[2], sys.argv[3]
-finfo = ("APPL" + creator[:4]).encode("ascii") + b"\x20\x00" + (b"\x00" * 22)
+finfo = ("APPL" + creator[:4]).encode("ascii") + b"\x24\x00" + (b"\x00" * 22)
 hex_finfo = finfo.hex()
 with open(finf_file, "wb") as f:
     f.write(finfo)

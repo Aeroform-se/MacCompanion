@@ -162,6 +162,117 @@ resource 'ics#' (128, "SpotiMac Small", purgeable) {
     }
 };
 
+/* Custom Finder Icon resources (-16455) for immediate icon display on all volumes */
+resource 'ICN#' (-16455, "Custom Icon", purgeable) {
+    {
+        /* Icon Bits */
+        $"000FF000"
+        $"007C3E00"
+        $"01C00380"
+        $"030000C0"
+        $"06000060"
+        $"09FFFF90"
+        $"1A000058"
+        $"12000048"
+        $"123FFC48"
+        $"12400248"
+        $"1E400278"
+        $"7E44A27E"
+        $"4E408272"
+        $"4E418272"
+        $"4E400272"
+        $"4E442272"
+        $"4E43C272"
+        $"3E40027C"
+        $"1E3FFC78"
+        $"02000040"
+        $"02000040"
+        $"02000040"
+        $"02000040"
+        $"0241FE40"
+        $"02000040"
+        $"02000040"
+        $"02000040"
+        $"03FFFFC0"
+        $"01000080"
+        $"01000080"
+        $"01000080"
+        $"01FFFF80",
+        /* Mask Bits */
+        $"000FF000"
+        $"007C3E00"
+        $"01C00380"
+        $"030000C0"
+        $"06000060"
+        $"09FFFF90"
+        $"1BFFFFD8"
+        $"13FFFFC8"
+        $"13FFFFC8"
+        $"13FFFFC8"
+        $"1FFFFFF8"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"7FFFFFFE"
+        $"3FFFFFFC"
+        $"1FFFFFF8"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"01FFFF80"
+        $"01FFFF80"
+        $"01FFFF80"
+        $"01FFFF80"
+    }
+};
+
+resource 'ics#' (-16455, "Custom Small Icon", purgeable) {
+    {
+        /* Small Icon Bits */
+        $"1FF0"
+        $"2008"
+        $"5FF4"
+        $"600C"
+        $"67CC"
+        $"E82E"
+        $"AAAA"
+        $"A28A"
+        $"682C"
+        $"27C8"
+        $"2008"
+        $"29E8"
+        $"2008"
+        $"3FF8"
+        $"1010"
+        $"1FF0",
+        /* Small Mask Bits */
+        $"1FF0"
+        $"2008"
+        $"5FF4"
+        $"7FFC"
+        $"7FFC"
+        $"FFFE"
+        $"FFFE"
+        $"FFFE"
+        $"7FFC"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"1FF0"
+        $"1FF0"
+    }
+};
+
 /*
  * SIZE -1 resource:
  * - acceptSuspendResumeEvents & canBackground: keeps TCP audio & timeline alive in background

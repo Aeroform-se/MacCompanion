@@ -8,16 +8,16 @@
 #define APP_NAME               "MacAI"
 #define APP_CODENAME           "Mainframe"
 
-/* Numeric BCD fields for Mac OS 'vers' resource (0.2.9 Beta) */
+/* Numeric BCD fields for Mac OS 'vers' resource (0.2.10 Beta) */
 #define APP_VERSION_MAJOR_BCD  0x00
-#define APP_VERSION_MINOR_BCD  0x29
+#define APP_VERSION_MINOR_BCD  0x2A
 #define APP_VERSION_STAGE      0x60   /* beta */
 #define APP_VERSION_NONFINAL   0x00
 
 /* Human-readable strings */
-#define APP_VERSION_STR        "0.2.9"
-#define APP_VERSION_TAG        "v0.2.9-beta"
-#define APP_VERSION_SHORT      "0.2.9 Beta"
-#define APP_VERSION_LONG       "0.2.9 Beta (Mainframe)"
+#define APP_VERSION_STR        "0.2.10"
+#define APP_VERSION_TAG        "v0.2.10-beta"
+#define APP_VERSION_SHORT      "0.2.10 Beta"
+#define APP_VERSION_LONG       "0.2.10 Beta (Mainframe)"
 
 #endif /* MACAI_VERSION_H */

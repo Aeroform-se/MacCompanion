@@ -162,6 +162,117 @@ resource 'ics#' (128, "MacAI Small", purgeable) {
     }
 };
 
+/* Custom Finder Icon resources (-16455) for immediate icon display on all volumes */
+resource 'ICN#' (-16455, "Custom Icon", purgeable) {
+    {
+        /* Icon Bits */
+        $"00000880"
+        $"00200140"
+        $"00502140"
+        $"00880630"
+        $"0050180C"
+        $"0127E630"
+        $"02000140"
+        $"02000148"
+        $"023FFC88"
+        $"02400294"
+        $"02400248"
+        $"024C3248"
+        $"02565A40"
+        $"02524A40"
+        $"024C3240"
+        $"02400240"
+        $"0243C240"
+        $"02400240"
+        $"023FFC40"
+        $"02000040"
+        $"02000040"
+        $"02000040"
+        $"02000040"
+        $"0241FE40"
+        $"02000040"
+        $"02000040"
+        $"02000040"
+        $"03FFFFC0"
+        $"01000080"
+        $"01000080"
+        $"01000080"
+        $"01FFFF80",
+        /* Mask Bits */
+        $"00000F80"
+        $"003FFFC0"
+        $"007FFFC0"
+        $"00FFFFF0"
+        $"007FFFFC"
+        $"01FFFFF0"
+        $"03FFFFC0"
+        $"03FFFFF8"
+        $"03FFFFF8"
+        $"03FFFFFC"
+        $"03FFFFF8"
+        $"03FFFFF8"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"03FFFFC0"
+        $"01FFFF80"
+        $"01FFFF80"
+        $"01FFFF80"
+        $"01FFFF80"
+    }
+};
+
+resource 'ics#' (-16455, "Custom Small Icon", purgeable) {
+    {
+        /* Small Icon Bits */
+        $"0045"
+        $"00A4"
+        $"1E4A"
+        $"2004"
+        $"27C4"
+        $"2820"
+        $"2AA8"
+        $"2008"
+        $"2828"
+        $"27C8"
+        $"2008"
+        $"29E8"
+        $"2008"
+        $"3FF8"
+        $"1010"
+        $"1FF0",
+        /* Small Mask Bits */
+        $"007F"
+        $"00FC"
+        $"1FFE"
+        $"3FFC"
+        $"3FFC"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"3FF8"
+        $"1FF0"
+        $"1FF0"
+    }
+};
+
 resource 'SIZE' (-1) {
     reserved,
     acceptSuspendResumeEvents,
