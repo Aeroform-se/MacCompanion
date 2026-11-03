@@ -29,6 +29,34 @@ cmake -S "$MACDROP_DIR" -B "$BUILD_DIR" \
     -G Ninja
 ninja -C "$BUILD_DIR"
 
+# Patch Finder flags (0x2400 = kHasBundle | kHasCustomIcon) into MacDrop.bin and MacDrop.dsk
+# so Finder displays 'ICN#' (-16455 / 128) immediately instead of stale Desktop DB cache.
+python3 - "$BUILD_DIR/$APP_NAME.bin" "$BUILD_DIR/$APP_NAME.dsk" <<'PYEOF'
+import binascii, struct, sys
+
+bin_path, dsk_path = sys.argv[1], sys.argv[2]
+
+with open(bin_path, "rb") as f:
+    bdata = bytearray(f.read())
+if len(bdata) >= 128 and bdata[65:73] == b"appeMDRO":
+    bdata[73] = 0x24   # fdFlags high byte: kHasBundle (0x20) | kHasCustomIcon (0x04)
+    bdata[101] = 0x00  # fdFlags low byte
+    crc = binascii.crc_hqx(bytes(bdata[:124]), 0)
+    struct.pack_into(">H", bdata, 124, crc)
+    with open(bin_path, "wb") as f:
+        f.write(bdata)
+
+with open(dsk_path, "rb") as f:
+    ddata = bytearray(f.read())
+pat = b"\x02\x00\x00\x00appeMDRO\x00\x00"
+idx = ddata.find(pat)
+if idx != -1:
+    ddata[idx + 12] = 0x24
+    ddata[idx + 13] = 0x00
+    with open(dsk_path, "wb") as f:
+        f.write(ddata)
+PYEOF
+
 echo "==> Built artifacts in $BUILD_DIR:"
 ls -lh "$BUILD_DIR/$APP_NAME.bin" "$BUILD_DIR/$APP_NAME.dsk"
 
