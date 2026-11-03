@@ -19,31 +19,7 @@ Thumbs.db
 *.swo
 *~
 
-# Local Project Planning, Design, SDKs & Private Testing Tools
-plan/
-ui/
-rescources/
-resources/
-emulator/
-toolchain/
-releases/
-*.psd
-*.rom
-*.ROM
-*.hfv
-*.dsk
-*.img
-middleware/src/public/test.html
-middleware/scripts/
-scripts/deploy-basilisk.sh
-macwifi/
-
 # Logs & Temporary Files
 logs/
 *.log
 npm-debug.log*
-
-# Local AI Agent Configuration
-AGENTS.md
-GEMINI.md
-.agents/

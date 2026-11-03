@@ -28,7 +28,7 @@ Spotify for your 68k Mac. **Supports local playback** and multitasking with a mi
 
 ![The MacDrop extension](docs/screens/macdrop-overview.gif)
 
-Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. Ever wanted to drop files from your phone straight to your 68k Mac? We'll, now you can (Yes, it also works from other devices :).
+Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. Ever wanted to drop files from your phone straight to your 68k Mac? Well, now you can (Yes, it also works from other devices :).
 
 **Requirements:**
 - **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
