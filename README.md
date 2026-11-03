@@ -24,20 +24,6 @@ Spotify for your 68k Mac. **Supports local playback** and multitasking with a mi
 
 ---
 
-### MacAI
-
-![The MacAI client](docs/screens/spotimac-slideshow.gif)
-
-AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq right from within System 7. Featuring image generation, bi-directional voice, and an ominous sentient mainframe.
-
-**Requirements:**
-- **Account:** Free or paid API key for Google Gemini, Groq, OpenAI, or Anthropic Claude.
-- **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
-- **CPU:** 68000 minimum; 68020+ recommended for faster 1-bit image dithering.
-- **Networking:** MacTCP 2.0.6+ or Open Transport with an active local network connection.
-
----
-
 ### MacDrop
 
 ![The MacDrop extension](docs/screens/macdrop-slideshow.gif)
@@ -49,6 +35,20 @@ Like Airdrop, if it was invented in the 1990's. Biderectional file transfers wit
 - **CPU:** 68000 minimum (Macintosh Plus, SE, Classic, and up).
 - **RAM:** 512 KB minimum / 1024 KB preferred.
 - **Networking:** MacTCP 2.0.6+ or Open Transport (zero-configuration reverse-push channel & UDP auto-discovery).
+
+---
+
+### MacAI
+
+![The MacAI client](docs/screens/macai-slideshow.gif)
+
+AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq right from within System 7. Featuring image generation, bi-directional voice, and an ominous sentient mainframe.
+
+**Requirements:**
+- **Account:** Free or paid API key for Google Gemini, Groq, OpenAI, or Anthropic Claude.
+- **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
+- **CPU:** 68000 minimum; 68020+ recommended for faster 1-bit image dithering.
+- **Networking:** MacTCP 2.0.6+ or Open Transport with an active local network connection.
 
 ---
 
