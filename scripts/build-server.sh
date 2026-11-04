@@ -32,7 +32,40 @@ mkdir -p "$RELEASE_DIR"
 # 1. Snapshot Dockerfile
 cp "$MIDDLEWARE_DIR/Dockerfile" "$RELEASE_DIR/Dockerfile"
 
-# 2. Save release metadata
+# 2. Create ready-to-use QNAP / Docker Compose file
+cat <<EOF > "$RELEASE_DIR/docker-compose.qnap.yml"
+services:
+  maccompanion:
+    image: ghcr.io/aeroform-se/maccompanion:${VERSION_SLUG}
+    container_name: maccompanion
+    environment:
+      - TZ=Europe/Stockholm
+    volumes:
+      - /share/CACHEDEV1_DATA/Container/maccompanion/data:/app/data
+    restart: unless-stopped
+    ports:
+      - 6800:6800 # Web GUI & HTTP API
+      - 6801:6801/udp # Local LAN Discovery
+      - 6802:6802 # 68k PCM Audio Stream
+EOF
+
+# 3. Create clean, standalone source archive (zero personal data / API keys)
+SRC_ARCHIVE="$RELEASE_DIR/maccompanion-server-src-${VERSION_SLUG}.tar.gz"
+echo "==> Archiving clean server source code to $(basename "$SRC_ARCHIVE")..."
+COPYFILE_DISABLE=1 tar -czf "$SRC_ARCHIVE" \
+    -C "$MIDDLEWARE_DIR" \
+    Dockerfile \
+    .dockerignore \
+    package.json \
+    package-lock.json \
+    src
+
+# 4. Save complete offline Docker container image archive (.tar.gz)
+IMAGE_ARCHIVE="$RELEASE_DIR/maccompanion-docker-${VERSION_SLUG}.tar.gz"
+echo "==> Saving complete offline Docker image to $(basename "$IMAGE_ARCHIVE")..."
+docker save "${IMAGE_NAME}:${VERSION_SLUG}" | gzip -c > "$IMAGE_ARCHIVE"
+
+# 5. Save release metadata
 cat <<EOF > "$RELEASE_DIR/release-info.json"
 {
   "version": "$VERSION",
@@ -41,7 +74,9 @@ cat <<EOF > "$RELEASE_DIR/release-info.json"
   "gitCommit": "$GIT_COMMIT",
   "builtAt": "$BUILD_TIME",
   "dockerImageId": "$IMAGE_ID",
-  "dockerTag": "${IMAGE_NAME}:$VERSION_SLUG"
+  "dockerTag": "${IMAGE_NAME}:$VERSION_SLUG",
+  "sourceArchive": "maccompanion-server-src-${VERSION_SLUG}.tar.gz",
+  "dockerImageArchive": "maccompanion-docker-${VERSION_SLUG}.tar.gz"
 }
 EOF
 
