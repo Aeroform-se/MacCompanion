@@ -84,7 +84,7 @@ docker compose up -d
 
 2. **Configure your settings:** Open `http://<your-server-ip>:6800` in a modern browser to configure your client services.
 
-3. **Compute!** Simply drag, drop and launch any client app you wish to use from the .dsk release files.
+3. **Compute!** Simply drag, drop and launch any client app you wish to use from the .dsk files found in **[Releases](https://github.com/Aeroform-se/MacCompanion/releases)**.
 
 ---
 
