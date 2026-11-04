@@ -2,6 +2,7 @@
 #include "SysTypes.r"
 #include "Icons.r"
 #include "Finder.r"
+#include "Dialogs.r"
 #include "version.h"
 
 /*
@@ -319,6 +320,7 @@ resource 'MENU' (129, "File") {
         "About SpotiMac...", noIcon, noKey, noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Server Connection...", noIcon, "R", noMark, plain,
+        "Set Client Name...", noIcon, "M", noMark, plain,
         "Find / Search...", noIcon, "F", noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Quit", noIcon, "Q", noMark, plain
@@ -336,5 +338,26 @@ resource 'MENU' (130, "Playback") {
         "-", noIcon, noKey, noMark, plain,
         "Like / Unlike Track", noIcon, "L", noMark, plain,
         "Choose Speaker...", noIcon, "K", noMark, plain
+    }
+};
+
+/*
+ * Standard System 7 Modal Dialog for "Set Client Name" ('DLOG' 132 & 'DITL' 132)
+ */
+resource 'DLOG' (132, "Set Macintosh Name", purgeable) {
+    {80, 100, 196, 412}, dBoxProc, invisible, noGoAway, 0,
+    132, "Set Client Name", alertPositionMainScreen
+};
+
+resource 'DITL' (132, "Set Macintosh Name", purgeable) {
+    {
+        /* [1] Save button (default) */
+        {80, 224, 100, 296}, Button { enabled, "Save" },
+        /* [2] Cancel button */
+        {80, 138, 100, 210}, Button { enabled, "Cancel" },
+        /* [3] Prompt label */
+        {14, 16, 30, 296}, StaticText { disabled, "Enter a name for this Mac on MacCompanion:" },
+        /* [4] Client Name EditText */
+        {40, 18, 56, 294}, EditText { enabled, "" }
     }
 };

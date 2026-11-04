@@ -23,6 +23,7 @@
 #include <Memory.h>
 #include <Files.h>
 #include <Folders.h>
+#include <Gestalt.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,8 +46,9 @@
 #define mFile               129
 #define iAbout              1
 #define iServerIP           3
-#define iFindSearch         4
-#define iQuit               6
+#define iSetClientName      4
+#define iFindSearch         5
+#define iQuit               7
 
 #define mPlayback           130
 #define iPlayPause          1
@@ -305,12 +307,24 @@ static void RenderTimelineOnly(void);
 static void VisualizerNetworkIdlePump(void);
 static long GetCurrentInterpolatedProgressMs(void);
 static void ConnectAndLoadAll(void);
+static void InitMyMacSpeakerName(void);
+static Boolean IsThisMacSelectedSpeaker(void);
+static Boolean IsDeviceThisMac(const char *devId, const char *devName);
+
+/* Per-Mac network identity so multiple Macs on the same LAN each have their own speaker name */
+static char gMySpeakerName[40]    = "Macintosh 68k";
+static char gMyClientId[32]       = "mac68k";
+static char gEncMySpeakerName[96] = "Macintosh%2068k";
+static char gEncMyClientId[64]    = "mac68k";
+static char gCustomClientName[48] = "";
+static char gSavedClientId[32]    = "";
 
 /* ============================================================================
  * Persistent Server Preferences ("SpotiMac Prefs" in System Folder:Preferences)
  * ============================================================================ */
 
 #define PREFS_MAGIC         0x4D435331UL /* 'MCS1' */
+#define PREFS_V1_SIZE       364L
 
 typedef struct {
     unsigned long magic;
@@ -322,6 +336,8 @@ typedef struct {
     char          lastSpeakerId[64];
     char          lastSpeakerName[48];
     char          searchHistory[MAX_SEARCH_HISTORY][48];
+    char          clientId[32];
+    char          clientName[48];
 } SpotiMacPrefs;
 
 static void ApplyLoadedPrefs(const SpotiMacPrefs *prefs, long bytesRead, ip_addr *outServerIp)
@@ -331,7 +347,7 @@ static void ApplyLoadedPrefs(const SpotiMacPrefs *prefs, long bytesRead, ip_addr
     if (prefs->lastVizMode < VIZ_MODE_COUNT) {
         gVizMode = prefs->lastVizMode;
     }
-    if (bytesRead >= (long)sizeof(SpotiMacPrefs)) {
+    if (bytesRead >= PREFS_V1_SIZE) {
         if (prefs->lastSpeakerId[0] != '\0') {
             memcpy(gSavedSpeakerId, prefs->lastSpeakerId, sizeof(gSavedSpeakerId) - 1);
             gSavedSpeakerId[sizeof(gSavedSpeakerId) - 1] = '\0';
@@ -350,6 +366,17 @@ static void ApplyLoadedPrefs(const SpotiMacPrefs *prefs, long bytesRead, ip_addr
             }
         }
     }
+    if (bytesRead >= (long)sizeof(SpotiMacPrefs)) {
+        if (prefs->clientId[0] != '\0') {
+            memcpy(gSavedClientId, prefs->clientId, sizeof(gSavedClientId) - 1);
+            gSavedClientId[sizeof(gSavedClientId) - 1] = '\0';
+        }
+        if (prefs->clientName[0] != '\0') {
+            memcpy(gCustomClientName, prefs->clientName, sizeof(gCustomClientName) - 1);
+            gCustomClientName[sizeof(gCustomClientName) - 1] = '\0';
+        }
+    }
+    InitMyMacSpeakerName();
 }
 
 static Boolean GetPrefsFileSpec(FSSpec *outSpec, Boolean legacyName)
@@ -388,11 +415,9 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
                 FSClose(refNum);
                 if ((err == noErr || err == eofErr) &&
                     count >= 12 &&
-                    prefs.magic == PREFS_MAGIC &&
-                    prefs.seenServerScreen != 0 &&
-                    prefs.serverIp != 0) {
+                    prefs.magic == PREFS_MAGIC) {
                     ApplyLoadedPrefs(&prefs, count, outServerIp);
-                    return true;
+                    return (prefs.seenServerScreen != 0 && prefs.serverIp != 0);
                 }
             }
         }
@@ -407,11 +432,9 @@ static Boolean LoadSavedServerPrefs(ip_addr *outServerIp)
         nRead = fread(&prefs, 1, sizeof(SpotiMacPrefs), fp);
         fclose(fp);
         if (nRead >= 12 &&
-            prefs.magic == PREFS_MAGIC &&
-            prefs.seenServerScreen != 0 &&
-            prefs.serverIp != 0) {
+            prefs.magic == PREFS_MAGIC) {
             ApplyLoadedPrefs(&prefs, (long)nRead, outServerIp);
-            return true;
+            return (prefs.seenServerScreen != 0 && prefs.serverIp != 0);
         }
     }
     return false;
@@ -427,12 +450,10 @@ static void SaveServerPrefs(ip_addr serverIp)
     FILE         *fp;
     short         i;
 
-    if (serverIp == 0) return;
-
     memset(&prefs, 0, sizeof(prefs));
     prefs.magic            = PREFS_MAGIC;
     prefs.serverIp         = serverIp;
-    prefs.seenServerScreen = 1;
+    prefs.seenServerScreen = (serverIp != 0) ? 1 : 0;
     prefs.lastVizMode      = (unsigned char)(gVizMode % VIZ_MODE_COUNT);
     prefs.historyCount     = (unsigned char)gSearchHistoryCount;
     memcpy(prefs.lastSpeakerId,   gSavedSpeakerId,   sizeof(prefs.lastSpeakerId) - 1);
@@ -440,6 +461,8 @@ static void SaveServerPrefs(ip_addr serverIp)
     for (i = 0; i < gSearchHistoryCount && i < MAX_SEARCH_HISTORY; i++) {
         memcpy(prefs.searchHistory[i], gSearchHistory[i], 47);
     }
+    memcpy(prefs.clientId,   gMyClientId,       sizeof(prefs.clientId) - 1);
+    memcpy(prefs.clientName, gCustomClientName, sizeof(prefs.clientName) - 1);
 
     if (GetPrefsFileSpec(&spec, false)) {
         FSpCreate(&spec, 'MCSP', 'pref', smSystemScript);
@@ -948,9 +971,15 @@ static void DrawButtonHoverDots(short xFirstDot, short y, Boolean isHover)
 /* Helper to compute Speaker button right edge based on active speaker label width */
 static short GetSpeakerButtonRightX(void)
 {
-    const char *label = (gNowPlaying.deviceName[0] != '\0') ? gNowPlaying.deviceName : "Choose Speaker";
-    short len = (short)strlen(label);
+    const char *label;
+    short len;
     short w;
+    if (gNowPlaying.deviceName[0] != '\0') {
+        label = IsThisMacSelectedSpeaker() ? "This Mac" : gNowPlaying.deviceName;
+    } else {
+        label = "Choose Speaker";
+    }
+    len = (short)strlen(label);
     if (len > 18) len = 18;
     w = len * 6; /* Monaco 9 is 6px per char */
     return 359 + w + 6;
@@ -1742,6 +1771,47 @@ static void DrawFullscreenMiniPlayerCached(void)
     CopyBits(&gFsMiniCachePort.portBits, &gOffscreenPort.portBits, &srcRect, &dstRect, srcOr, NULL);
 }
 
+static void RenderMiniPlayerTimeOnly(void)
+{
+    GrafPtr savePort;
+    Rect timeRect;
+    char timeLine[32];
+
+    if (!gMiniWindow || !gMiniPlayerMode) return;
+    GetPort(&savePort);
+
+    sprintf(
+        timeLine,
+        "%s/%s",
+        gNowPlaying.progressMmSs[0] ? gNowPlaying.progressMmSs : "00:00",
+        gNowPlaying.durationMmSs[0] ? gNowPlaying.durationMmSs : "00:00"
+    );
+    SetRect(&timeRect, 10, 48, 108, 62);
+
+    if (gOffscreenReady) {
+        SetPort(&gOffscreenPort);
+    } else {
+        SetPort(gMiniWindow);
+    }
+
+    TextFont(kFontIDMonaco);
+    TextSize(9);
+    TextFace(normal);
+    TextMode(srcOr);
+    PenNormal();
+
+    EraseRect(&timeRect);
+    MoveTo(12, 59);
+    DrawCStringTruncated(timeLine, 11);
+
+    if (gOffscreenReady) {
+        SetPort(gMiniWindow);
+        CopyBits(&gOffscreenPort.portBits, &gMiniWindow->portBits, &timeRect, &timeRect, srcCopy, NULL);
+    }
+
+    SetPort(savePort);
+}
+
 static void RenderMiniPlayer(void)
 {
     GrafPtr savePort;
@@ -1973,7 +2043,7 @@ static void DrawBottomTransportBar(void)
         DrawButtonHoverDots(347, 298, hov);
         MoveTo(359, 293);
         if (gNowPlaying.deviceName[0] != '\0') {
-            DrawCStringTruncated(gNowPlaying.deviceName, 18);
+            DrawCStringTruncated(IsThisMacSelectedSpeaker() ? "This Mac" : gNowPlaying.deviceName, 18);
         } else {
             DrawCStringTruncated("Choose Speaker", 18);
         }
@@ -2086,7 +2156,7 @@ static void RenderTimelineOnly(void)
     Rect tlRect;
 
     if (gMiniPlayerMode) {
-        RenderMiniPlayer();
+        RenderMiniPlayerTimeOnly();
         return;
     }
     if (gVisualizerOpen && gVizFullscreen && !gSearchViewOpen && !gAboutModalOpen) {
@@ -2537,7 +2607,7 @@ static void RenderCanvas(void)
             }
 
             MoveTo(356, yTop + 12);
-            DrawCStringTruncated(dev->name, 16);
+            DrawCStringTruncated(IsDeviceThisMac(dev->id, dev->name) ? "This Mac" : dev->name, 16);
         }
         TextMode(srcOr);
     }
@@ -2818,16 +2888,53 @@ static void LockOptimisticTrackSelection(const char *id, const char *name, const
     ResetPollTimersAfterAction();
 }
 
-/* Per-Mac network identity so multiple Macs on the same LAN each have their own speaker name */
-static char gMySpeakerName[40]    = "Macintosh 68k";
-static char gMyClientId[32]       = "mac68k";
-static char gEncMySpeakerName[96] = "Macintosh%2068k";
-static char gEncMyClientId[64]    = "mac68k";
+static const char *GetMacMachineName(void)
+{
+    long mach = 0;
+    if (Gestalt(gestaltMachineType, &mach) == noErr) {
+        switch (mach) {
+            case gestaltClassic:          return "Macintosh Classic (128k)";
+            case gestaltMacXL:            return "Macintosh XL";
+            case gestaltMac512KE:         return "Macintosh 512Ke";
+            case gestaltMacPlus:          return "Macintosh Plus";
+            case gestaltMacSE:            return "Macintosh SE";
+            case gestaltMacII:            return "Macintosh II";
+            case gestaltMacIIx:           return "Macintosh IIx";
+            case gestaltMacIIcx:          return "Macintosh IIcx";
+            case gestaltMacSE030:         return "Macintosh SE/30";
+            case gestaltPortable:         return "Macintosh Portable";
+            case gestaltMacIIci:          return "Macintosh IIci";
+            case gestaltMacIIfx:          return "Macintosh IIfx";
+            case gestaltMacClassic:       return "Macintosh Classic";
+            case gestaltMacIIsi:          return "Macintosh IIsi";
+            case gestaltMacLC:            return "Macintosh LC";
+            case gestaltMacQuadra900:     return "Macintosh Quadra 900";
+            case gestaltPowerBook170:     return "PowerBook 170";
+            case gestaltMacQuadra700:     return "Macintosh Quadra 700";
+            case gestaltClassicII:        return "Macintosh Classic II";
+            case gestaltPowerBook100:     return "PowerBook 100";
+            case gestaltPowerBook140:     return "PowerBook 140";
+            case gestaltMacQuadra950:     return "Macintosh Quadra 950";
+            case gestaltMacLCIII:         return "Macintosh LC III";
+            case gestaltPowerBookDuo210:  return "PowerBook Duo 210";
+            case gestaltMacCentris650:    return "Macintosh Centris 650";
+            case gestaltPowerBookDuo230:  return "PowerBook Duo 230";
+            case gestaltPowerBook180:     return "PowerBook 180";
+            case gestaltPowerBook160:     return "PowerBook 160";
+            case gestaltMacQuadra800:     return "Macintosh Quadra 800";
+            case gestaltMacQuadra650:     return "Macintosh Quadra 650";
+            case gestaltMacLCII:          return "Macintosh LC II";
+            default:                      return "Macintosh 68k";
+        }
+    }
+    return "Macintosh 68k";
+}
 
 /*
- * Reads the Macintosh's own Machine Name ('STR ' -16413 in System 7 Sharing Setup)
- * or Chooser User Name ('STR ' -16096 in System 6/7) to give each Mac on a LAN its
- * own speaker name in MaciSpot's speaker chooser.
+ * Resolves this Mac's speaker name and unique client ID:
+ * 1. Uses the user's custom Client Name (`gCustomClientName` from "Set Client Name...") if set.
+ * 2. Otherwise checks System 7 Sharing Setup Computer Name ('STR ' -16413).
+ * 3. Otherwise uses the Gestalt Macintosh hardware model name (`GetMacMachineName()`).
  */
 static void InitMyMacSpeakerName(void)
 {
@@ -2836,67 +2943,100 @@ static void InitMyMacSpeakerName(void)
     short i, len = 0;
 
     rawName[0] = '\0';
-    sh = GetString(-16413); /* Machine Name */
-    if (!sh || *sh == NULL || (*sh)[0] == 0) {
-        sh = GetString(-16096); /* Chooser User Name */
-    }
-    if (sh && *sh != NULL && (*sh)[0] > 0) {
-        short pLen = (unsigned char)(*sh)[0];
-        if (pLen > 31) pLen = 31;
-        for (i = 1; i <= pLen; i++) {
-            unsigned char c = (unsigned char)(*sh)[i];
-            if (c >= 32 && c < 127 && c != '|') {
-                rawName[len++] = (char)c;
-            } else if (c == 0xD4 || c == 0xD5) {
-                /* MacRoman curly apostrophe -> ASCII apostrophe */
-                rawName[len++] = '\'';
+    if (gCustomClientName[0] != '\0') {
+        SafeCopy(rawName, gCustomClientName, sizeof(rawName));
+    } else {
+        sh = GetString(-16413); /* System 7 Sharing Setup Machine Name */
+        if (sh && *sh != NULL && (*sh)[0] > 0) {
+            short pLen = (unsigned char)(*sh)[0];
+            if (pLen > 31) pLen = 31;
+            for (i = 1; i <= pLen; i++) {
+                unsigned char c = (unsigned char)(*sh)[i];
+                if (c >= 32 && c < 127 && c != '|') {
+                    rawName[len++] = (char)c;
+                } else if (c == 0xD4 || c == 0xD5) {
+                    /* MacRoman curly apostrophe -> ASCII apostrophe */
+                    rawName[len++] = '\'';
+                }
             }
+            rawName[len] = '\0';
         }
-        rawName[len] = '\0';
+        if (rawName[0] == '\0' || strcmp(rawName, "Macintosh") == 0 || strcmp(rawName, "Macintosh 68k") == 0) {
+            SafeCopy(rawName, GetMacMachineName(), sizeof(rawName));
+        }
     }
 
     if (rawName[0] != '\0') {
         SafeCopy(gMySpeakerName, rawName, sizeof(gMySpeakerName));
     } else {
-        SafeCopy(gMySpeakerName, "Macintosh 68k", sizeof(gMySpeakerName));
+        SafeCopy(gMySpeakerName, GetMacMachineName(), sizeof(gMySpeakerName));
     }
 
-    if (NetGetOurIP() != 0) {
-        FormatIPAddress(NetGetOurIP(), gMyClientId);
+    if (gSavedClientId[0] != '\0') {
+        SafeCopy(gMyClientId, gSavedClientId, sizeof(gMyClientId));
     } else {
-        SafeCopy(gMyClientId, "mac68k", sizeof(gMyClientId));
+        unsigned long secs = 0;
+        unsigned long mix;
+        GetDateTime(&secs);
+        mix = (secs ^ (TickCount() << 8) ^ NetGetOurIP()) & 0xFFFFFFFFUL;
+        sprintf(gMyClientId, "mac_%08lX", mix);
+        SafeCopy(gSavedClientId, gMyClientId, sizeof(gSavedClientId));
     }
 
     UrlEncode(gMyClientId, gEncMyClientId, sizeof(gEncMyClientId));
     UrlEncode(gMySpeakerName, gEncMySpeakerName, sizeof(gEncMySpeakerName));
 }
 
-static Boolean IsThisMacSelectedSpeaker(void)
+static Boolean IsDeviceThisMac(const char *devId, const char *devName)
 {
     char suffix[16];
     unsigned char lastOctet = (unsigned char)(NetGetOurIP() & 0xFF);
+    size_t myLen;
 
-    if (gNowPlaying.deviceName[0] == '\0') return false;
+    if (devId && devId[0] != '\0') {
+        if (strncmp(devId, "mac68k:", 7) == 0) {
+            return (strcmp(devId + 7, gMyClientId) == 0);
+        }
+        if (strcmp(devId, gMyClientId) == 0) {
+            return true;
+        }
+    }
 
-    if (strcmp(gNowPlaying.deviceName, gMySpeakerName) == 0) {
+    if (!devName || devName[0] == '\0') return false;
+
+    if (strcmp(devName, gMySpeakerName) == 0) {
         return true;
     }
 
-    /* Check disambiguated name when two Macs share the same base name: "<Name> (.<octet>)" */
-    sprintf(suffix, " (.%u)", (unsigned int)lastOctet);
-    if (strncmp(gNowPlaying.deviceName, gMySpeakerName, strlen(gMySpeakerName)) == 0 &&
-        strstr(gNowPlaying.deviceName, suffix) != NULL) {
-        return true;
+    /* Check disambiguated name when two Macs share the same base name: "<Name> (.<octet>)" or "<Name> (1)" */
+    myLen = strlen(gMySpeakerName);
+    if (strncmp(devName, gMySpeakerName, myLen) == 0 &&
+        devName[myLen] == ' ' && devName[myLen + 1] == '(') {
+        sprintf(suffix, " (.%u)", (unsigned int)lastOctet);
+        if (strstr(devName, suffix) != NULL) {
+            return true;
+        }
+        /* If no other Mac ID was explicitly provided, treat "<MySpeakerName> (<n>)" as this Mac */
+        if (!devId || devId[0] == '\0') {
+            return true;
+        }
     }
 
-    /* Fallback if server reports generic "Macintosh 68k" and we are using default name */
-    if (strcmp(gMySpeakerName, "Macintosh 68k") == 0 &&
-        (strcmp(gNowPlaying.deviceName, "Macintosh 68k") == 0 ||
-         strcmp(gNowPlaying.deviceName, "macintosh 68k") == 0)) {
+    if (strcmp(devName, "Macintosh 68k") == 0 || strcmp(devName, "macintosh 68k") == 0) {
         return true;
     }
 
     return false;
+}
+
+static Boolean IsThisMacSelectedSpeaker(void)
+{
+    if (gNowPlaying.deviceName[0] == '\0') return false;
+    if (gSavedSpeakerId[0] != '\0' && strncmp(gSavedSpeakerId, "mac68k:", 7) == 0 &&
+        strcmp(gNowPlaying.deviceName, gSavedSpeakerName) == 0) {
+        return (strcmp(gSavedSpeakerId + 7, gMyClientId) == 0);
+    }
+    return IsDeviceThisMac(NULL, gNowPlaying.deviceName);
 }
 
 static void SyncLocalAudioWithSpeaker(void)
@@ -5371,6 +5511,112 @@ static void HandleKeyPress(char ch)
     }
 }
 
+static void PascalToCStr(ConstStr255Param pStr, char *cStr, short maxLen)
+{
+    short len = pStr[0];
+    if (len > maxLen - 1) len = maxLen - 1;
+    memcpy(cStr, &pStr[1], len);
+    cStr[len] = '\0';
+}
+
+static void CToPascalStr(const char *cStr, Str255 pStr)
+{
+    short len = cStr ? (short)strlen(cStr) : 0;
+    if (len > 255) len = 255;
+    pStr[0] = (unsigned char)len;
+    if (len > 0) {
+        memcpy(&pStr[1], cStr, len);
+    }
+}
+
+static void OutlineDialogDefaultButton(DialogPtr dlg)
+{
+    short iType;
+    Handle iHdl;
+    Rect iRect;
+    GrafPtr savePort;
+
+    if (!dlg) return;
+    GetPort(&savePort);
+    SetPort(dlg);
+    GetDialogItem(dlg, 1, &iType, &iHdl, &iRect);
+    InsetRect(&iRect, -4, -4);
+    PenSize(3, 3);
+    FrameRoundRect(&iRect, 16, 16);
+    PenNormal();
+    SetPort(savePort);
+}
+
+/*
+ * Standard System 7 Modal Dialog for "Set Client Name" (DLOG 132)
+ * Identical to MacDrop's "Set Client Name..." OS dialog, allowing the user to set a custom
+ * speaker / client name that other Spotify clients see while this Mac displays "This Mac".
+ */
+static void ShowSetClientNameDialog(void)
+{
+    DialogPtr dlg;
+    short itemHit = 0;
+    short iType;
+    Handle iHdl;
+    Rect iRect;
+    Str255 pText;
+    char newName[48];
+    Boolean wasThisMacActive = IsThisMacSelectedSpeaker();
+
+    dlg = GetNewDialog(132, NULL, (WindowPtr)-1L);
+    if (!dlg) return;
+
+    GetDialogItem(dlg, 4, &iType, &iHdl, &iRect);
+    CToPascalStr(gMySpeakerName, pText);
+    SetDialogItemText(iHdl, pText);
+    SelectDialogItemText(dlg, 4, 0, 32767);
+
+    ShowWindow(dlg);
+    SelectWindow(dlg);
+    OutlineDialogDefaultButton(dlg);
+
+    while (itemHit != 1 && itemHit != 2) {
+        ModalDialog(NULL, &itemHit);
+    }
+
+    if (itemHit == 1) {
+        short i, outIdx = 0;
+        GetDialogItem(dlg, 4, &iType, &iHdl, &iRect);
+        GetDialogItemText(iHdl, pText);
+        PascalToCStr(pText, newName, sizeof(newName));
+
+        /* Strip control characters and pipe delimiter */
+        for (i = 0; newName[i] != '\0' && outIdx < (short)(sizeof(gCustomClientName) - 1); i++) {
+            unsigned char c = (unsigned char)newName[i];
+            if (c >= 32 && c < 127 && c != '|') {
+                gCustomClientName[outIdx++] = (char)c;
+            }
+        }
+        gCustomClientName[outIdx] = '\0';
+
+        InitMyMacSpeakerName();
+        if (wasThisMacActive) {
+            SafeCopy(gNowPlaying.deviceName, gMySpeakerName, sizeof(gNowPlaying.deviceName));
+            SafeCopy(gSavedSpeakerName, gMySpeakerName, sizeof(gSavedSpeakerName));
+        }
+        SaveServerPrefs(NetGetServerIP());
+
+        if (NetHasServer() && gHttpBuf) {
+            char path[256];
+            sprintf(
+                path,
+                "/api/spotify/set-client-name?client_id=%s&client_name=%s",
+                gEncMyClientId,
+                gEncMySpeakerName
+            );
+            NetHttpGet(path, gHttpBuf, HTTP_BUF_SIZE);
+        }
+    }
+
+    DisposeDialog(dlg);
+    RenderCanvas();
+}
+
 static void HandleMenuChoice(long menuChoice)
 {
     short menuID = HiWord(menuChoice);
@@ -5397,6 +5643,8 @@ static void HandleMenuChoice(long menuChoice)
                 }
                 gConnState = CONN_FAILED;
                 RenderCanvas();
+            } else if (itemID == iSetClientName) {
+                ShowSetClientNameDialog();
             } else if (itemID == iFindSearch) {
                 if (gConnState == CONN_READY) {
                     if (gMiniPlayerMode) ExitMiniPlayerMode();
@@ -5864,27 +6112,31 @@ int main(void)
             if ((curMs / 1000L) != (gNowPlaying.progressMs / 1000L)) {
                 gNowPlaying.progressMs = curMs;
                 FormatMmSs(gNowPlaying.progressMs, gNowPlaying.progressMmSs);
-                if (!gInBackground && !gSpeakerPopupOpen && !gAboutModalOpen) {
+                if ((!gInBackground || gMiniPlayerMode) && !gSpeakerPopupOpen && !gAboutModalOpen) {
                     RenderTimelineOnly();
                 }
-                /* If a playing track reaches its end, trigger an immediate poll so the next track loads fast */
-                if (gNowPlaying.durationMs > 0 && curMs >= gNowPlaying.durationMs &&
-                    (nowTicks - gLastPollTicks) >= 30) {
-                    gLastPollTicks = nowTicks - 900;
-                }
+            }
+            /* If a playing track reaches its end, trigger a rapid poll (<0.5s) so the next track & artwork load fast */
+            if (gNowPlaying.durationMs > 0 && curMs >= (gNowPlaying.durationMs - 400L) &&
+                (nowTicks - gLastPollTicks) >= 24UL) {
+                gLastPollTicks = 0;
             }
         }
 
         /* Poll /api/spotify/poll every ~3s (180 ticks) when playing in foreground, ~12s (720 ticks)
          * when streaming in background so MultiFinder foreground apps (e.g. MacAI) aren't interrupted
-         * by frequent blocking HTTP polls, or ~0.6s (36 ticks) when paused with this Mac as speaker
-         * so SpotiMac reconnects immediately after a "Pause SpotiMac on Speech" TTS utterance ends! */
+         * by frequent blocking HTTP polls, ~0.5s (30 ticks) when approaching the end of a track so
+         * automatic track advance updates selection & artwork in <1s, or ~0.6s (36 ticks) when paused
+         * with this Mac as speaker so SpotiMac reconnects immediately after TTS speech ends! */
         {
-            Boolean nearTrackEnd = (gNowPlaying.durationMs > 0 && gNowPlaying.progressMs >= (gNowPlaying.durationMs - 4000L));
+            long curInterpMs = GetCurrentInterpolatedProgressMs();
+            Boolean nearTrackEnd = (gNowPlaying.durationMs > 0 && curInterpMs >= (gNowPlaying.durationMs - 2000L));
             unsigned long pollIntervalTicks;
             if (!gNowPlaying.isPlaying) {
                 pollIntervalTicks = IsThisMacSelectedSpeaker() ? 36UL : 360UL;
-            } else if (gInBackground && !nearTrackEnd) {
+            } else if (nearTrackEnd) {
+                pollIntervalTicks = 30UL;
+            } else if (gInBackground) {
                 pollIntervalTicks = 720UL;
             } else if (gVisualizerOpen && !gMiniPlayerMode && !gSearchViewOpen) {
                 pollIntervalTicks = 240UL;
@@ -5927,7 +6179,7 @@ int main(void)
         }
     }
 
-    AudioStreamStop();
+    AudioStreamShutdown();
     if (gHttpBuf) DisposePtr(gHttpBuf);
     if (gOffscreenBits) DisposePtr(gOffscreenBits);
     return 0;

@@ -348,10 +348,11 @@ class RealTimePacer extends Transform {
       const durationMs = (slice.length / LIBRESPOT_BYTES_PER_SEC) * 1000;
       const now = performance.now();
 
-      // If starting fresh or resuming after a pause (> 500ms gap), allow an 80ms pre-fill burst
-      // so the 68k client's double-buffer starts promptly without injecting extra pipe latency
+      // If starting fresh or resuming after a pause (> 500ms gap), allow a 300ms pre-fill burst
+      // (~6.6 KB of 8-bit PCM) so the 68k client's Sound Manager buffers fill immediately on resume
+      // without starving or micro-stuttering during the first second of playback.
       if (now - this.nextFrameTimeMs > 500) {
-        this.nextFrameTimeMs = now - 80;
+        this.nextFrameTimeMs = now - 300;
       }
 
       const delayMs = Math.max(0, this.nextFrameTimeMs - now);
@@ -420,6 +421,8 @@ class AudioStreamEngine extends EventEmitter {
     // Multi-Mac network speaker registry: Map<clientId, { id, ip, baseName, lastSeen }>
     this.macClients = new Map();
     this.activeMacClientId = null;
+    this.librespotReceiverName = null;
+    this._renameRestartTimer = null;
 
     // Cache of Linux kernel TCP send buffer (`tx_queue` in `/proc/net/tcp`) per remotePort
     this._procTcpCacheAt = 0;
@@ -518,7 +521,7 @@ class AudioStreamEngine extends EventEmitter {
    * Registers or refreshes an active 68k Mac client on the network so multiple Macs
    * each appear with their own speaker name in the speaker chooser.
    */
-  registerMacClient({ id, ip, name }) {
+  registerMacClient({ id, ip, name, forceRename = false }) {
     const cleanIp = cleanIpAddress(ip);
     const baseName = String(name || '').trim() || DEVICE_NAME;
     const clientId = String(id || cleanIp || baseName)
@@ -535,6 +538,9 @@ class AudioStreamEngine extends EventEmitter {
       }
     }
 
+    const prevEntry = this.macClients.get(clientId);
+    const nameChanged = Boolean(prevEntry && prevEntry.baseName !== baseName);
+
     this.macClients.set(clientId, {
       id: clientId,
       ip: cleanIp,
@@ -546,7 +552,28 @@ class AudioStreamEngine extends EventEmitter {
       this.activeMacClientId = clientId;
     }
 
-    return this.getMacClientList().find((m) => m.id === clientId) || null;
+    const activeEntry = this.getMacClientList().find((m) => m.id === clientId) || null;
+    if (this.activeMacClientId === clientId && activeEntry) {
+      const desiredReceiverName = activeEntry.name || baseName;
+      const stored = this.store.load();
+      if (stored.speakerDeviceName !== desiredReceiverName) {
+        this.store.save({ speakerDeviceName: desiredReceiverName });
+      }
+      if (
+        this.librespotProc &&
+        this.librespotReceiverName &&
+        this.librespotReceiverName !== desiredReceiverName &&
+        (forceRename || nameChanged || (this.librespotReceiverName === DEVICE_NAME && desiredReceiverName !== DEVICE_NAME))
+      ) {
+        if (this._renameRestartTimer) clearTimeout(this._renameRestartTimer);
+        this._renameRestartTimer = setTimeout(() => {
+          this._renameRestartTimer = null;
+          this.ensureStarted({ forceRestart: true }).catch(() => {});
+        }, 250);
+      }
+    }
+
+    return activeEntry;
   }
 
   /**
@@ -556,15 +583,25 @@ class AudioStreamEngine extends EventEmitter {
   getMacClientList() {
     const entries = Array.from(this.macClients.values());
     const nameCounts = new Map();
+    const nameIpSets = new Map();
     for (const e of entries) {
       const key = e.baseName.toLowerCase();
       nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+      if (!nameIpSets.has(key)) nameIpSets.set(key, new Set());
+      if (e.ip) nameIpSets.get(key).add(e.ip);
     }
 
+    const nameIndexCounter = new Map();
     return entries.map((e) => {
-      const duplicate = (nameCounts.get(e.baseName.toLowerCase()) || 0) > 1;
-      let suffix = e.id;
-      if (e.ip && e.ip.includes('.')) {
+      const key = e.baseName.toLowerCase();
+      const totalWithSameName = nameCounts.get(key) || 0;
+      const duplicate = totalWithSameName > 1;
+      const uniqueIpsForName = nameIpSets.get(key) ? nameIpSets.get(key).size : 0;
+      const idx = (nameIndexCounter.get(key) || 0) + 1;
+      nameIndexCounter.set(key, idx);
+
+      let suffix = String(idx);
+      if (e.ip && e.ip.includes('.') && uniqueIpsForName === totalWithSameName) {
         suffix = `.${e.ip.split('.').pop()}`;
       }
       const displayName = duplicate ? `${e.baseName} (${suffix})` : e.baseName;
@@ -597,6 +634,18 @@ class AudioStreamEngine extends EventEmitter {
 
     if (found) {
       this.activeMacClientId = found.id;
+      const desiredName = found.name || found.baseName || DEVICE_NAME;
+      const stored = this.store.load();
+      if (stored.speakerDeviceName !== desiredName) {
+        this.store.save({ speakerDeviceName: desiredName });
+      }
+      if (this.librespotProc && this.librespotReceiverName && this.librespotReceiverName !== desiredName) {
+        if (this._renameRestartTimer) clearTimeout(this._renameRestartTimer);
+        this._renameRestartTimer = setTimeout(() => {
+          this._renameRestartTimer = null;
+          this.ensureStarted({ forceRestart: true }).catch(() => {});
+        }, 250);
+      }
       return found;
     }
     return null;
@@ -608,9 +657,33 @@ class AudioStreamEngine extends EventEmitter {
     return list.find((m) => m.id === this.activeMacClientId) || list[0];
   }
 
-  getActiveMacSpeakerName() {
+  getLibrespotDeviceName() {
     const active = this.getActiveMacClient();
-    return active ? active.name : DEVICE_NAME;
+    if (active && active.name) return active.name;
+    const stored = this.store.load();
+    if (stored && stored.speakerDeviceName && String(stored.speakerDeviceName).trim()) {
+      return String(stored.speakerDeviceName).trim();
+    }
+    return DEVICE_NAME;
+  }
+
+  getActiveMacSpeakerName() {
+    return this.getLibrespotDeviceName();
+  }
+
+  isLibrespotDeviceName(rawName) {
+    if (!rawName) return false;
+    const lower = String(rawName).trim().toLowerCase();
+    if (!lower) return false;
+    if (lower.includes('macintosh 68k')) return true;
+    if (this.librespotReceiverName && lower === this.librespotReceiverName.toLowerCase()) return true;
+    const targetName = this.getLibrespotDeviceName().toLowerCase();
+    if (targetName && lower === targetName) return true;
+    for (const m of this.getMacClientList()) {
+      if (m.name && m.name.toLowerCase() === lower) return true;
+      if (m.baseName && m.baseName.toLowerCase() === lower) return true;
+    }
+    return false;
   }
 
   clearTcpPending() {
@@ -650,13 +723,6 @@ class AudioStreamEngine extends EventEmitter {
     for (const sock of this.tcpClients) {
       if (!sock.destroyed && sock.writable && !sock._isTemporaryTtsSocket) {
         if (hasMatchingSocket && cleanIpAddress(sock.remoteAddress) !== targetIp) {
-          continue;
-        }
-        // Real-time TCP backpressure guard: if the 68k Mac is temporarily busy in a
-        // foreground app (e.g. MacAI rendering or HTTP polling) and > 3.5 KB (~160ms) of
-        // audio has accumulated in flight across the proxy/TCP pipe, drop this music frame
-        // rather than letting stale music pile up ahead of future TTS speech!
-        if (!audioHub.hasActiveDuckMix() && this.getSocketQueuedBytes(sock) > 3584) {
           continue;
         }
         sock._receivedSpotifyBytes = (sock._receivedSpotifyBytes || 0) + payload.length;
@@ -951,8 +1017,11 @@ class AudioStreamEngine extends EventEmitter {
       fs.mkdirSync(cacheDir, { recursive: true });
     }
 
+    const receiverName = this.getLibrespotDeviceName();
+    this.librespotReceiverName = receiverName;
+
     const librespotArgs = [
-      '--name', DEVICE_NAME,
+      '--name', receiverName,
       '--device-type', 'computer',
       '--backend', 'pipe',
       '--bitrate', '320',
@@ -966,7 +1035,7 @@ class AudioStreamEngine extends EventEmitter {
       '--access-token', speakerToken,
     ];
 
-    console.log(`[AudioEngine] Starting librespot ("${DEVICE_NAME}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
+    console.log(`[AudioEngine] Starting librespot ("${receiverName}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
     const lsProc = spawn('librespot', librespotArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -1000,6 +1069,9 @@ class AudioStreamEngine extends EventEmitter {
           authResolved = true;
           resolveAuthWait();
         }
+      }
+      if (line.includes('Loading <') || line.includes('Loaded <') || line.includes('spotify:track:')) {
+        this.emit('trackChange', line);
       }
       if (line.includes('INVALID_CREDENTIALS') || line.includes('Bad credentials')) {
         const stored = this.store.load();
@@ -1263,7 +1335,7 @@ class AudioStreamEngine extends EventEmitter {
     const macClients = this.getMacClientList();
     return {
       deviceName: this.getActiveMacSpeakerName(),
-      receiverDeviceName: DEVICE_NAME,
+      receiverDeviceName: this.getLibrespotDeviceName(),
       available: this.hasBinaries,
       paired: this.isPaired(),
       running: Boolean(this.librespotProc),

@@ -3,10 +3,13 @@
 #include <Memory.h>
 #include <Events.h>
 #include <Sound.h>
+#include <Timer.h>
 #include <OSUtils.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#define FAST_TICKS() (*(volatile unsigned long *)0x016A)
 
 static short          gMacTCPRef      = 0;
 static Boolean        gMacTCPReady    = false;
@@ -22,38 +25,87 @@ static void         (*gIdleCallback)(void) = NULL;
 static Ptr            gHttpTcpRcvBuf  = NULL;
 
 /* ============================================================================
- * Native 68k Audio Streaming State (Quad-Buffered Sound Manager)
+ * Native 68k Audio Streaming State (6-Buffer Interrupt-Driven Sound Manager)
  * ============================================================================ */
 
-#define AUDIO_TCP_RCV_SIZE  8192
+#define AUDIO_TCP_RCV_SIZE  16384
 #define AUDIO_CHUNK_SIZE    4096
-#define NUM_AUDIO_BUFFERS   4
+#define NUM_AUDIO_BUFFERS   6
+
+#define PUMP_IDLE           0
+#define PUMP_WAITING_STATUS 1
+#define PUMP_WAITING_RCV    2
 
 static StreamPtr      gAudioStream       = 0;
 static Ptr            gAudioTcpRcvBuf    = NULL;
-static Boolean        gAudioRunning      = false;
+static volatile short gAudioRunning      = false;
+static volatile short gAudioNeedsStop    = false;
 static Boolean        gAudioInBackground = false;
 static unsigned short gAudioSampleRateHz = 22255;
 
-static unsigned long  gAudioBytesRead    = 0;
-static unsigned long  gAudioLastAcked    = 0;
-static TCPiopb        gAudioAckPb;
-static wdsEntry       gAudioAckWds[2];
-static unsigned char  gAudioAckBuf[4];
-static Boolean        gAudioAckInFlight  = false;
+static volatile short gAudioPumpLock          = 0;
+static volatile short gAudioPumpState         = PUMP_IDLE;
+static short          gAudioPendingRcvBufIdx  = 0;
+static TCPiopb        gAudioPumpPb;
+
+static TMTask         gAudioTmTask;
+static Boolean        gAudioTmInstalled       = false;
+static ProcPtr        gPrevMenuHook           = NULL;
+static ProcPtr        gPrevDragHook           = NULL;
+static Boolean        gHooksInstalled         = false;
 
 static SndChannelPtr  gSndChan           = NULL;
 static SndCallBackUPP gSndCallBackUPP    = NULL;
 static SoundHeader    gSndHeaders[NUM_AUDIO_BUFFERS];
-static Ptr            gPcmBuffers[NUM_AUDIO_BUFFERS]      = { NULL, NULL, NULL, NULL };
-static long           gPcmFilled[NUM_AUDIO_BUFFERS]       = { 0, 0, 0, 0 };
-static long           gBufferQueuedLen[NUM_AUDIO_BUFFERS] = { 0, 0, 0, 0 };
-static unsigned long  gBufferQueuedTick[NUM_AUDIO_BUFFERS]= { 0, 0, 0, 0 };
-static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0, 0, 0 };
+static Ptr            gPcmBuffers[NUM_AUDIO_BUFFERS]      = { NULL, NULL, NULL, NULL, NULL, NULL };
+static long           gPcmFilled[NUM_AUDIO_BUFFERS]       = { 0, 0, 0, 0, 0, 0 };
+static long           gBufferQueuedLen[NUM_AUDIO_BUFFERS] = { 0, 0, 0, 0, 0, 0 };
+static unsigned long  gBufferQueuedTick[NUM_AUDIO_BUFFERS]= { 0, 0, 0, 0, 0, 0 };
+static volatile short gBufferBusy[NUM_AUDIO_BUFFERS]      = { 0, 0, 0, 0, 0, 0 };
 static short          gNextFillBuf       = 0;
 static Boolean        gPrebuffering      = true;
 static unsigned long  gLastEmptyStatusTick = 0;
 static unsigned long  gLastAudioPumpTick   = 0;
+
+void AudioInterruptPumpC(void);
+void AudioHookPumpC(void);
+extern void AudioSaveCurrentA5(void);
+extern void AudioTimerAsmEntry(void);
+extern void AudioMenuDragHookAsmEntry(void);
+
+asm(
+    ".text\n"
+    ".even\n"
+    "gPcRelSavedA5:\n"
+    "    .long 0\n"
+    ".globl AudioSaveCurrentA5\n"
+    "AudioSaveCurrentA5:\n"
+    "    lea gPcRelSavedA5(%pc), %a0\n"
+    "    move.l %a5, (%a0)\n"
+    "    rts\n"
+    "\n"
+    ".globl AudioTimerAsmEntry\n"
+    "AudioTimerAsmEntry:\n"
+    "    movem.l %d0-%d2/%a0-%a1/%a5, -(%sp)\n"
+    "    move.l gPcRelSavedA5(%pc), %d0\n"
+    "    beq.s 1f\n"
+    "    movea.l %d0, %a5\n"
+    "    jsr AudioInterruptPumpC\n"
+    "1:\n"
+    "    movem.l (%sp)+, %d0-%d2/%a0-%a1/%a5\n"
+    "    rts\n"
+    "\n"
+    ".globl AudioMenuDragHookAsmEntry\n"
+    "AudioMenuDragHookAsmEntry:\n"
+    "    movem.l %d0-%d2/%a0-%a1/%a5, -(%sp)\n"
+    "    move.l gPcRelSavedA5(%pc), %d0\n"
+    "    beq.s 2f\n"
+    "    movea.l %d0, %a5\n"
+    "    jsr AudioHookPumpC\n"
+    "2:\n"
+    "    movem.l (%sp)+, %d0-%d2/%a0-%a1/%a5\n"
+    "    rts\n"
+);
 
 /*
  * Interrupt-safe Sound Manager callback:
@@ -189,7 +241,9 @@ static OSErr RunTCPControl(TCPiopb *pb, Boolean pumpAudioWhileWaiting)
 
     pb->ioCompletion = NULL;
     pb->ioCRefNum    = gMacTCPRef;
+    gAudioPumpLock   = 1;
     err = PBControlAsync((ParmBlkPtr)pb);
+    gAudioPumpLock   = 0;
     if (err != noErr && err != inProgress) {
         return err;
     }
@@ -531,6 +585,7 @@ void UrlEncode(const char *src, char *dst, short maxDst)
 void AudioStreamInit(void)
 {
     short i;
+    AudioSaveCurrentA5();
     if (!gSndCallBackUPP) {
         gSndCallBackUPP = NewSndCallBackUPP(SoundBufferCallback);
     }
@@ -539,6 +594,34 @@ void AudioStreamInit(void)
             gPcmBuffers[i] = NewPtrClear(AUDIO_CHUNK_SIZE);
         }
     }
+    if (!gHooksInstalled) {
+        gPrevMenuHook = *(ProcPtr *)0x0A30;
+        gPrevDragHook = *(ProcPtr *)0x09F6;
+        *(ProcPtr *)0x0A30 = (ProcPtr)AudioMenuDragHookAsmEntry;
+        *(ProcPtr *)0x09F6 = (ProcPtr)AudioMenuDragHookAsmEntry;
+        gHooksInstalled = true;
+    }
+    if (!gAudioTmInstalled) {
+        memset(&gAudioTmTask, 0, sizeof(gAudioTmTask));
+        gAudioTmTask.tmAddr = (TimerUPP)AudioTimerAsmEntry;
+        InsXTime((QElemPtr)&gAudioTmTask);
+        gAudioTmInstalled = true;
+        PrimeTime((QElemPtr)&gAudioTmTask, 20);
+    }
+}
+
+void AudioStreamShutdown(void)
+{
+    if (gAudioTmInstalled) {
+        RmvTime((QElemPtr)&gAudioTmTask);
+        gAudioTmInstalled = false;
+    }
+    if (gHooksInstalled) {
+        *(ProcPtr *)0x0A30 = gPrevMenuHook;
+        *(ProcPtr *)0x09F6 = gPrevDragHook;
+        gHooksInstalled = false;
+    }
+    AudioStreamStop();
 }
 
 static void QueueSoundBuffer(short idx)
@@ -558,7 +641,7 @@ static void QueueSoundBuffer(short idx)
     sh->baseFrequency = kMiddleC;
 
     gBufferQueuedLen[idx]  = gPcmFilled[idx];
-    gBufferQueuedTick[idx] = TickCount();
+    gBufferQueuedTick[idx] = FAST_TICKS();
     gBufferBusy[idx]       = 1;
     gPcmFilled[idx]        = 0;
 
@@ -682,9 +765,9 @@ Boolean AudioStreamStart(unsigned short sampleRateHz)
     gPrebuffering     = true;
     gLastEmptyStatusTick = 0;
     gLastAudioPumpTick   = 0;
-    gAudioBytesRead   = 0;
-    gAudioLastAcked   = 0;
-    gAudioAckInFlight = false;
+    gAudioPumpState   = PUMP_IDLE;
+    gAudioNeedsStop   = false;
+    memset(&gAudioPumpPb, 0, sizeof(gAudioPumpPb));
     gAudioRunning     = true;
     return true;
 }
@@ -694,9 +777,13 @@ void AudioStreamStop(void)
     TCPiopb pb;
     short i;
 
-    if (!gAudioRunning && gAudioStream == 0 && !gSndChan) return;
-    gAudioRunning = false;
-    gPrebuffering = true;
+    if (!gAudioRunning && !gAudioNeedsStop && gAudioStream == 0 && !gSndChan) return;
+    gAudioPumpLock = 1;
+    gAudioRunning   = false;
+    gAudioNeedsStop = false;
+    gPrebuffering   = true;
+    gAudioPumpState = PUMP_IDLE;
+    gAudioPumpLock = 0;
 
     /* Flush and quiet Sound Manager channel immediately, but keep gSndChan & gAudioStream
      * alive so resuming playback avoids SndNewChannel/SndDisposeChannel and TCPCreate/TCPRelease! */
@@ -714,7 +801,6 @@ void AudioStreamStop(void)
         pb.tcpStream = gAudioStream;
         RunTCPControl(&pb, false);
     }
-    gAudioAckInFlight = false;
 
     for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
         gBufferBusy[i] = 0;
@@ -777,16 +863,17 @@ Boolean AudioGetLiveSamples(unsigned char *outSamples, short count)
     return true;
 }
 
-void AudioStreamPump(void)
+static void AudioStreamPumpCore(void)
 {
-    TCPiopb pb;
     short attempts;
     short i;
     short busyCount = 0;
     long  minQueueSize;
     unsigned long nowTicks;
 
-    if (!gAudioRunning || gAudioStream == 0 || !gSndChan) return;
+    if (!gAudioRunning || gAudioNeedsStop || gAudioStream == 0 || !gSndChan) return;
+    if (gAudioPumpLock) return;
+    gAudioPumpLock = 1;
 
     for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
         if (gBufferBusy[i]) {
@@ -794,105 +881,139 @@ void AudioStreamPump(void)
         }
     }
 
-    /* Fast path: if all 4 Sound Manager buffers are busy playing, return immediately */
-    if (!gPrebuffering && busyCount == NUM_AUDIO_BUFFERS) {
-        return;
+    /* Fast path: if all 6 Sound Manager buffers are busy playing, return immediately */
+    if (!gPrebuffering && busyCount == NUM_AUDIO_BUFFERS && gAudioPumpState == PUMP_IDLE) {
+        goto unlock_out;
     }
 
-    nowTicks = TickCount();
-    if (gLastEmptyStatusTick != 0 && nowTicks == gLastEmptyStatusTick) {
-        return;
-    }
-
-    /* Only throttle MacTCP status polls to every 2 ticks when in foreground with >= 3 buffers queued */
-    if (!gPrebuffering && !gAudioInBackground && busyCount >= 3) {
-        if (gLastAudioPumpTick != 0 && (nowTicks - gLastAudioPumpTick) < 2) {
-            return;
-        }
+    nowTicks = FAST_TICKS();
+    if (gAudioPumpState == PUMP_IDLE && gLastEmptyStatusTick != 0 && nowTicks == gLastEmptyStatusTick) {
+        goto unlock_out;
     }
     gLastAudioPumpTick = nowTicks;
 
-    if (busyCount == 0 && gPcmFilled[0] == 0 && gPcmFilled[1] == 0 && gPcmFilled[2] == 0 && gPcmFilled[3] == 0) {
-        gPrebuffering = true;
-        gNextFillBuf  = 0;
+    if (busyCount == 0 && gAudioPumpState == PUMP_IDLE) {
+        Boolean allEmpty = true;
+        for (i = 0; i < NUM_AUDIO_BUFFERS; i++) {
+            if (gPcmFilled[i] != 0) {
+                allEmpty = false;
+                break;
+            }
+        }
+        if (allEmpty) {
+            gPrebuffering = true;
+            gNextFillBuf  = 0;
+        }
     }
 
-    /* Keep Sound Manager buffers nimble (2048 bytes = ~92ms each; 4 * 2048 = 8192 bytes = ~368ms
-     * total hardware interrupt cushion) so server-side ducked TTS audio is heard within ~0.35s
-     * while still riding through cooperative MultiFinder context switches! */
-    minQueueSize = 2048;
+    minQueueSize = AUDIO_CHUNK_SIZE;
 
     for (attempts = 0; attempts < NUM_AUDIO_BUFFERS; attempts++) {
         short idx;
         unsigned short unread = 0;
-        long targetSize;
+        unsigned char connState = 8;
+        long targetSize = AUDIO_CHUNK_SIZE;
         long needed;
         unsigned short toRead;
 
-        if (gPrebuffering) {
-            idx = (gPcmFilled[0] < 2048) ? 0 : 1;
-            targetSize = 2048;
-        } else {
-            idx = gNextFillBuf;
-            targetSize = 2048;
+        if (gAudioPumpState == PUMP_WAITING_STATUS) {
+            if (gAudioPumpPb.ioResult == inProgress) {
+                goto unlock_out;
+            }
+            gAudioPumpState = PUMP_IDLE;
+            if (gAudioPumpPb.ioResult != noErr) {
+                gAudioNeedsStop = true;
+                goto unlock_out;
+            }
+            unread    = gAudioPumpPb.csParam.status.amtUnreadData;
+            connState = gAudioPumpPb.csParam.status.connectionState;
+            idx       = gPrebuffering ? ((gPcmFilled[0] < AUDIO_CHUNK_SIZE) ? 0 : 1) : gNextFillBuf;
+            goto have_status;
         }
 
+        if (gAudioPumpState == PUMP_WAITING_RCV) {
+            if (gAudioPumpPb.ioResult == inProgress) {
+                goto unlock_out;
+            }
+            gAudioPumpState = PUMP_IDLE;
+            idx = gAudioPendingRcvBufIdx;
+            if (gAudioPumpPb.ioResult == noErr && gAudioPumpPb.csParam.receive.rcvBuffLen > 0) {
+                gPcmFilled[idx] += gAudioPumpPb.csParam.receive.rcvBuffLen;
+                goto check_queue_buf;
+            } else {
+                goto unlock_out;
+            }
+        }
+
+        idx = gPrebuffering ? ((gPcmFilled[0] < AUDIO_CHUNK_SIZE) ? 0 : 1) : gNextFillBuf;
         if (gBufferBusy[idx]) {
             break;
         }
 
-        memset(&pb, 0, sizeof(pb));
-        pb.ioCRefNum = gMacTCPRef;
-        pb.csCode    = TCPStatus;
-        pb.tcpStream = gAudioStream;
-        if (PBControlSync((ParmBlkPtr)&pb) != noErr) {
-            AudioStreamStop();
-            return;
+        memset(&gAudioPumpPb, 0, sizeof(gAudioPumpPb));
+        gAudioPumpPb.ioCRefNum = gMacTCPRef;
+        gAudioPumpPb.csCode    = TCPStatus;
+        gAudioPumpPb.tcpStream = gAudioStream;
+        PBControlAsync((ParmBlkPtr)&gAudioPumpPb);
+        if (gAudioPumpPb.ioResult == inProgress) {
+            gAudioPumpState = PUMP_WAITING_STATUS;
+            goto unlock_out;
+        }
+        if (gAudioPumpPb.ioResult != noErr) {
+            gAudioNeedsStop = true;
+            goto unlock_out;
         }
 
-        unread = pb.csParam.status.amtUnreadData;
+        unread    = gAudioPumpPb.csParam.status.amtUnreadData;
+        connState = gAudioPumpPb.csParam.status.connectionState;
+
+have_status:
+        if (gBufferBusy[idx]) {
+            break;
+        }
         if (unread == 0) {
-            if (pb.csParam.status.connectionState != 8 && busyCount == 0) {
-                AudioStreamStop();
-                return;
+            if (connState != 8 && busyCount == 0) {
+                gAudioNeedsStop = true;
+                goto unlock_out;
             }
             gLastEmptyStatusTick = nowTicks;
             break;
         }
         gLastEmptyStatusTick = 0;
 
-        /* Only coalesce small reads (< 512B) when in foreground and at least 2 buffers are already playing */
-        if (!gPrebuffering && !gAudioInBackground && busyCount >= 2 && unread < 512) {
-            break;
-        }
-
         needed = targetSize - gPcmFilled[idx];
         if (needed <= 0) {
-            break;
+            goto check_queue_buf;
         }
         toRead = (unread > (unsigned short)needed) ? (unsigned short)needed : unread;
 
-        memset(&pb, 0, sizeof(pb));
-        pb.ioCRefNum                           = gMacTCPRef;
-        pb.csCode                              = TCPRcv;
-        pb.tcpStream                           = gAudioStream;
-        pb.csParam.receive.commandTimeoutValue = 1;
-        pb.csParam.receive.rcvBuff             = gPcmBuffers[idx] + gPcmFilled[idx];
-        pb.csParam.receive.rcvBuffLen          = toRead;
+        memset(&gAudioPumpPb, 0, sizeof(gAudioPumpPb));
+        gAudioPumpPb.ioCRefNum                           = gMacTCPRef;
+        gAudioPumpPb.csCode                              = TCPRcv;
+        gAudioPumpPb.tcpStream                           = gAudioStream;
+        gAudioPumpPb.csParam.receive.commandTimeoutValue = 1;
+        gAudioPumpPb.csParam.receive.rcvBuff             = gPcmBuffers[idx] + gPcmFilled[idx];
+        gAudioPumpPb.csParam.receive.rcvBuffLen          = toRead;
+        gAudioPendingRcvBufIdx                           = idx;
 
-        if (PBControlSync((ParmBlkPtr)&pb) == noErr && pb.csParam.receive.rcvBuffLen > 0) {
-            gPcmFilled[idx] += pb.csParam.receive.rcvBuffLen;
-            gAudioBytesRead += (unsigned long)pb.csParam.receive.rcvBuffLen;
+        PBControlAsync((ParmBlkPtr)&gAudioPumpPb);
+        if (gAudioPumpPb.ioResult == inProgress) {
+            gAudioPumpState = PUMP_WAITING_RCV;
+            goto unlock_out;
+        }
+        if (gAudioPumpPb.ioResult == noErr && gAudioPumpPb.csParam.receive.rcvBuffLen > 0) {
+            gPcmFilled[idx] += gAudioPumpPb.csParam.receive.rcvBuffLen;
         } else {
             break;
         }
 
+check_queue_buf:
         if (gPrebuffering) {
-            if (gPcmFilled[0] >= 2048 && gPcmFilled[1] >= 1024) {
+            if (gPcmFilled[0] >= AUDIO_CHUNK_SIZE && gPcmFilled[1] >= (AUDIO_CHUNK_SIZE / 2)) {
                 gPrebuffering = false;
                 QueueSoundBuffer(0);
                 busyCount++;
-                if (gPcmFilled[1] >= 2048) {
+                if (gPcmFilled[1] >= AUDIO_CHUNK_SIZE) {
                     QueueSoundBuffer(1);
                     busyCount++;
                     gNextFillBuf = 2;
@@ -900,7 +1021,7 @@ void AudioStreamPump(void)
                     gNextFillBuf = 1;
                 }
             }
-        } else if (gPcmFilled[idx] >= minQueueSize || (busyCount <= 1 && gPcmFilled[idx] >= 1024)) {
+        } else if (gPcmFilled[idx] >= minQueueSize || (busyCount <= 1 && gPcmFilled[idx] >= (AUDIO_CHUNK_SIZE / 2))) {
             QueueSoundBuffer(idx);
             busyCount++;
             gNextFillBuf = (idx + 1) % NUM_AUDIO_BUFFERS;
@@ -909,32 +1030,35 @@ void AudioStreamPump(void)
         }
     }
 
-    /* Send an asynchronous 4-byte cumulative byte-read ACK back to the server on :6802
-     * every >= 1024 bytes consumed so the server knows the exact in-flight byte count
-     * across intermediate proxies (OrbStack, Docker NAT, Basilisk II slirp) and never
-     * lets more than ~160ms of music accumulate ahead of TTS speech! */
-    if ((gAudioBytesRead - gAudioLastAcked) >= 1024) {
-        if (!gAudioAckInFlight || gAudioAckPb.ioResult != inProgress) {
-            gAudioLastAcked = gAudioBytesRead;
-            gAudioAckBuf[0] = (unsigned char)((gAudioBytesRead >> 24) & 0xFF);
-            gAudioAckBuf[1] = (unsigned char)((gAudioBytesRead >> 16) & 0xFF);
-            gAudioAckBuf[2] = (unsigned char)((gAudioBytesRead >> 8)  & 0xFF);
-            gAudioAckBuf[3] = (unsigned char)(gAudioBytesRead & 0xFF);
-            gAudioAckWds[0].length = 4;
-            gAudioAckWds[0].ptr    = (Ptr)gAudioAckBuf;
-            gAudioAckWds[1].length = 0;
-            gAudioAckWds[1].ptr    = NULL;
-            memset(&gAudioAckPb, 0, sizeof(gAudioAckPb));
-            gAudioAckPb.ioCRefNum                     = gMacTCPRef;
-            gAudioAckPb.csCode                        = TCPSend;
-            gAudioAckPb.tcpStream                     = gAudioStream;
-            gAudioAckPb.csParam.send.ulpTimeoutValue  = 5;
-            gAudioAckPb.csParam.send.ulpTimeoutAction = 1;
-            gAudioAckPb.csParam.send.validityFlags    = timeoutValue | timeoutAction;
-            gAudioAckPb.csParam.send.pushFlag         = 1;
-            gAudioAckPb.csParam.send.wdsPtr           = (Ptr)gAudioAckWds;
-            gAudioAckInFlight = true;
-            PBControlAsync((ParmBlkPtr)&gAudioAckPb);
-        }
+unlock_out:
+    gAudioPumpLock = 0;
+}
+
+void AudioInterruptPumpC(void)
+{
+    if (gAudioRunning && !gAudioNeedsStop && !gAudioPumpLock) {
+        AudioStreamPumpCore();
+    }
+    if (gAudioTmInstalled) {
+        PrimeTime((QElemPtr)&gAudioTmTask, 20);
+    }
+}
+
+void AudioHookPumpC(void)
+{
+    if (gAudioRunning && !gAudioNeedsStop && !gAudioPumpLock) {
+        AudioStreamPumpCore();
+    }
+}
+
+void AudioStreamPump(void)
+{
+    if (gAudioNeedsStop) {
+        AudioStreamStop();
+        return;
+    }
+    AudioStreamPumpCore();
+    if (gAudioNeedsStop) {
+        AudioStreamStop();
     }
 }

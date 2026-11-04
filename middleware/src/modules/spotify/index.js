@@ -190,13 +190,13 @@ async function callPlayerCommand(endpoint, options = {}) {
         const saved = store.load();
         const savedId = saved && saved.lastSpeakerId ? String(saved.lastSpeakerId) : '';
         const savedName = saved && saved.lastSpeakerName ? String(saved.lastSpeakerName).toLowerCase() : '';
-        const savedIsMac = savedId.startsWith('mac68k:') || savedName.includes('macintosh 68k');
+        const savedIsMac = savedId.startsWith('mac68k:') || audioEngine.isLibrespotDeviceName(savedName);
         const target =
           devices.find((d) => d.is_active && d.id) ||
           (savedId && devices.find((d) => d.id === savedId)) ||
           (savedName && devices.find((d) => d.name && d.name.toLowerCase() === savedName)) ||
-          (savedIsMac && devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k') && d.id)) ||
-          devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k') && d.id) ||
+          (savedIsMac && devices.find((d) => d.name && audioEngine.isLibrespotDeviceName(d.name) && d.id)) ||
+          devices.find((d) => d.name && audioEngine.isLibrespotDeviceName(d.name) && d.id) ||
           devices.find((d) => d.id);
         if (target && target.id) {
           // If no device was active and this isn't `/me/player/play`, wake the device first
@@ -256,7 +256,41 @@ const likedStatusMap = new Map(); // uri -> { liked: boolean, ts: number }
 const artworkCache = new Map();
 const trackArtworkUrlMap = new Map(); // trackId -> imageUrl
 
-function rememberTrackArtworkUrl(trackObj) {
+function prewarmArtworkUrl(imageUrl) {
+  if (!imageUrl || customFetch) return;
+  const dither = store.load().artworkDither || 'adaptive';
+  const cacheKey = `${imageUrl}|${DEFAULT_ART_SIZE}|${dither}|raw`;
+  if (artworkCache.has(cacheKey)) return;
+  (async () => {
+    try {
+      let sourceBuf = rawSourceJpegCache.get(imageUrl);
+      if (!sourceBuf) {
+        const fetchFn = getFetchImpl();
+        const imgRes = await fetchFn(imageUrl);
+        if (!imgRes.ok) return;
+        const arrayBuf = await imgRes.arrayBuffer();
+        sourceBuf = Buffer.from(arrayBuf);
+        if (rawSourceJpegCache.size > 6) {
+          const oldestUrl = rawSourceJpegCache.keys().next().value;
+          rawSourceJpegCache.delete(oldestUrl);
+        }
+        rawSourceJpegCache.set(imageUrl, sourceBuf);
+      }
+      const result = await processArtworkBuffer(sourceBuf, {
+        size: DEFAULT_ART_SIZE,
+        dither,
+        format: 'raw',
+      });
+      if (artworkCache.size > 20) {
+        const oldest = artworkCache.keys().next().value;
+        artworkCache.delete(oldest);
+      }
+      artworkCache.set(cacheKey, result);
+    } catch {}
+  })();
+}
+
+function rememberTrackArtworkUrl(trackObj, { prewarm = false } = {}) {
   if (!trackObj || !trackObj.id) return;
   const images = (trackObj.album && Array.isArray(trackObj.album.images)) ? trackObj.album.images : [];
   const chosen = images.find((img) => img.width && img.width <= 300) || images[0];
@@ -266,6 +300,23 @@ function rememberTrackArtworkUrl(trackObj) {
       trackArtworkUrlMap.delete(oldestKey);
     }
     trackArtworkUrlMap.set(trackObj.id, chosen.url);
+    if (prewarm) {
+      prewarmArtworkUrl(chosen.url);
+    }
+  }
+}
+
+function prewarmCurrentAndNextTrackArtwork(currentItem) {
+  if (!currentItem || !currentItem.id) return;
+  rememberTrackArtworkUrl(currentItem, { prewarm: true });
+  const curUri = `spotify:track:${currentItem.id}`;
+  const idx = lastTrackListUris.indexOf(curUri);
+  if (idx >= 0 && idx + 1 < lastTrackListUris.length) {
+    const nextId = lastTrackListUris[idx + 1].split(':').pop();
+    const nextUrl = nextId && trackArtworkUrlMap.get(nextId);
+    if (nextUrl) {
+      prewarmArtworkUrl(nextUrl);
+    }
   }
 }
 
@@ -397,7 +448,7 @@ async function checkIsTrackLiked(trackIdOrUri) {
     }
     let cloudName = raw.device.name;
     let cloudId = raw.device.id || '';
-    if (cloudName.toLowerCase().includes('macintosh 68k')) {
+    if (audioEngine.isLibrespotDeviceName(cloudName)) {
       const activeMac = audioEngine.getActiveMacClient();
       cloudName = activeMac ? activeMac.name : audioEngine.getActiveMacSpeakerName();
       cloudId = activeMac ? activeMac.deviceId : cloudId;
@@ -414,9 +465,9 @@ async function checkIsTrackLiked(trackIdOrUri) {
 
   function applyOptimisticOverrides(np) {
     if (!np) return np;
-    // When Spotify's active speaker is our librespot receiver ("Macintosh 68k"),
+    // When Spotify's active speaker is our librespot receiver,
     // map deviceName to the currently selected 68k Mac's speaker name.
-    if (np.deviceName && np.deviceName.toLowerCase().includes('macintosh 68k')) {
+    if (np.deviceName && audioEngine.isLibrespotDeviceName(np.deviceName)) {
       np.deviceName = audioEngine.getActiveMacSpeakerName();
     }
     if (customFetch) return np;
@@ -903,6 +954,15 @@ let nowPlayingCache = {
   refreshInFlight: false,
 };
 
+audioEngine.on('trackChange', () => {
+  nowPlayingCache.fetchedAt = 0;
+  refreshNowPlayingCache().catch(() => {});
+  setTimeout(() => {
+    nowPlayingCache.fetchedAt = 0;
+    refreshNowPlayingCache().catch(() => {});
+  }, 500);
+});
+
 async function refreshNowPlayingCache() {
   if (nowPlayingCache.refreshInFlight) return;
   nowPlayingCache.refreshInFlight = true;
@@ -912,7 +972,7 @@ async function refreshNowPlayingCache() {
     syncActiveSpeakerFromCloud(raw);
     let isLiked = false;
     if (raw && raw.item && raw.item.id) {
-      rememberTrackArtworkUrl(raw.item);
+      prewarmCurrentAndNextTrackArtwork(raw.item);
       isLiked = await checkIsTrackLiked(raw.item.id);
     }
     nowPlayingCache.raw = raw || null;
@@ -929,7 +989,23 @@ async function getFastNormalizedNowPlaying() {
   let raw;
   let isLiked = false;
 
-  if (!customFetch && nowPlayingCache.fetchedAt > 0 && (Date.now() - nowPlayingCache.fetchedAt) < 30000) {
+  const cacheAgeMs = nowPlayingCache.fetchedAt > 0 ? (Date.now() - nowPlayingCache.fetchedAt) : Infinity;
+  let nearCachedTrackEnd = false;
+  if (
+    nowPlayingCache.raw &&
+    nowPlayingCache.raw.is_playing &&
+    typeof nowPlayingCache.raw.progress_ms === 'number' &&
+    nowPlayingCache.raw.item &&
+    typeof nowPlayingCache.raw.item.duration_ms === 'number' &&
+    nowPlayingCache.raw.item.duration_ms > 0
+  ) {
+    const projectedMs = nowPlayingCache.raw.progress_ms + Math.max(0, cacheAgeMs);
+    if (projectedMs >= nowPlayingCache.raw.item.duration_ms - 800 && cacheAgeMs > 350) {
+      nearCachedTrackEnd = true;
+    }
+  }
+
+  if (!customFetch && nowPlayingCache.fetchedAt > 0 && cacheAgeMs < 30000 && !nearCachedTrackEnd) {
     // Serve immediately (<1ms) from cache and trigger background refresh if >900ms old
     raw = nowPlayingCache.raw ? { ...nowPlayingCache.raw } : null;
     if (raw && raw.is_playing && typeof raw.progress_ms === 'number') {
@@ -943,7 +1019,7 @@ async function getFastNormalizedNowPlaying() {
     } else {
       isLiked = nowPlayingCache.isLiked;
     }
-    if ((Date.now() - nowPlayingCache.fetchedAt) > 900) {
+    if (cacheAgeMs > 900) {
       refreshNowPlayingCache();
     }
   } else {
@@ -951,7 +1027,7 @@ async function getFastNormalizedNowPlaying() {
     const playerFetchedAt = Date.now();
     syncActiveSpeakerFromCloud(raw);
     if (raw && raw.item && raw.item.id) {
-      rememberTrackArtworkUrl(raw.item);
+      prewarmCurrentAndNextTrackArtwork(raw.item);
       isLiked = await checkIsTrackLiked(raw.item.id);
     }
     if (!customFetch) {
@@ -1798,6 +1874,30 @@ router.all('/toggle-like', async (req, res) => {
 // 5. DEVICES, QUEUE, PLAYLISTS, ALBUMS, ARTISTS, RECENTLY PLAYED, TOP & SEARCH
 // ============================================================================
 
+router.all('/set-client-name', async (req, res) => {
+  try {
+    const clientName = String(req.query.client_name || (req.body && req.body.client_name) || '').trim() || 'Macintosh 68k';
+    const clientId = String(req.query.client_id || (req.body && req.body.client_id) || '').trim();
+    const rawIp =
+      (req.query && req.query.client_ip) ||
+      req.ip ||
+      (req.socket && req.socket.remoteAddress) ||
+      '';
+    const entry = audioEngine.registerMacClient({
+      id: clientId || rawIp || clientName,
+      ip: rawIp,
+      name: clientName,
+      forceRename: true,
+    });
+    const effectiveName = (entry && entry.name) || clientName;
+    const pipe = `${formatPipeRow(['OK', 'CLIENT_NAME', effectiveName])}\n`;
+    if (req.query.format === 'json') return res.json({ ok: true, clientName: effectiveName, pipe: pipe.trim() });
+    return sendPipeResponse(req, res, pipe);
+  } catch (err) {
+    return handleRouteError(req, res, err);
+  }
+});
+
 router.get('/devices', async (req, res) => {
   try {
     registerMacFromRequest(req);
@@ -1810,7 +1910,7 @@ router.get('/devices', async (req, res) => {
     let macsInserted = false;
 
     for (const d of devices) {
-      const isLibrespot = d.name && d.name.toLowerCase().includes('macintosh 68k');
+      const isLibrespot = Boolean(d.name && audioEngine.isLibrespotDeviceName(d.name));
       if (isLibrespot && macClients.length > 0) {
         const vol = typeof d.volume_percent === 'number' ? d.volume_percent : 100;
         for (const mac of macClients) {
@@ -1908,7 +2008,7 @@ router.all('/transfer', async (req, res) => {
       for (let attempt = 0; attempt < 3; attempt++) {
         const data = await callSpotify('/me/player/devices');
         const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
-        found = devices.find((d) => d.name && d.name.toLowerCase().includes('macintosh 68k'));
+        found = devices.find((d) => d.name && audioEngine.isLibrespotDeviceName(d.name));
         if (found || isStartup || customFetch) break;
         await new Promise((r) => setTimeout(r, 600));
       }
@@ -1937,7 +2037,7 @@ router.all('/transfer', async (req, res) => {
     } else if (target === 'desktop' || target === 'other' || deviceId === 'desktop') {
       const data = await callSpotify('/me/player/devices');
       const devices = (data && Array.isArray(data.devices)) ? data.devices : [];
-      const found = devices.find((d) => d.name && !d.name.toLowerCase().includes('macintosh 68k'));
+      const found = devices.find((d) => d.name && !audioEngine.isLibrespotDeviceName(d.name));
       if (!found) {
         const err = new Error('No other Spotify device (Desktop/Phone) is currently open.');
         err.status = 404;
@@ -1958,7 +2058,7 @@ router.all('/transfer', async (req, res) => {
         if (found) {
           deviceId = found.id;
           if (found.name) {
-            if (found.name.toLowerCase().includes('macintosh 68k')) {
+            if (audioEngine.isLibrespotDeviceName(found.name)) {
               deviceName = audioEngine.getActiveMacSpeakerName();
             } else {
               deviceName = found.name;

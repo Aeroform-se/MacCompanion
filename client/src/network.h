@@ -53,6 +53,7 @@ void UrlEncode(const char *src, char *dst, short maxDst);
  * ============================================================================ */
 
 void AudioStreamInit(void);
+void AudioStreamShutdown(void);
 Boolean AudioStreamStart(unsigned short sampleRateHz);
 void AudioStreamStop(void);
 Boolean AudioStreamIsRunning(void);
