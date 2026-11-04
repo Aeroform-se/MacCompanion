@@ -92,7 +92,7 @@ function createApp() {
     });
   });
 
-  // Handle librespot speaker OAuth callback on http://127.0.0.1:6800/login
+  // Handle librespot speaker OAuth callback on /login
   app.get('/login', async (req, res) => {
     try {
       await spotifyModule.audioEngine.handleSpeakerCallback({
@@ -100,9 +100,9 @@ function createApp() {
         state: req.query.state,
         error: req.query.error,
       });
-      res.redirect('http://localhost:6800/');
+      res.redirect('/#spotimac');
     } catch (err) {
-      res.redirect(`http://localhost:6800/?error=${encodeURIComponent(err.message)}`);
+      res.redirect(`/?error=${encodeURIComponent(err.message)}#spotimac`);
     }
   });
 

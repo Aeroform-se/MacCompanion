@@ -26,5 +26,6 @@ ENV AUDIO_TCP_PORT=6802
 EXPOSE 6800/tcp
 EXPOSE 6801/udp
 EXPOSE 6802/tcp
+EXPOSE 6803/tcp
 
 CMD ["node", "src/index.js"]

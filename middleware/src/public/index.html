@@ -1151,7 +1151,7 @@
             </div>
             <div class="row-right">
               <div class="action-btn-wrap">
-                <a href="/api/spotify/audio-login" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-speaker-btn">Re-Pair</a>
+                <a href="#spotimac" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-speaker-btn" onclick="openSpeakerPairingSection(event)">Re-Pair</a>
               </div>
             </div>
           </div>
@@ -1376,13 +1376,57 @@
           </div>
 
           <!-- Speaker Pairing -->
-          <div style="margin-top:10px; padding-top:12px; border-top:1px dotted #000; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-            <div style="display:flex; align-items:center; gap:8px;">
-              <img src="/img/status-off.png" id="sub-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
-              <span id="speaker-status-label" style="font-size:13px; font-weight:bold;">Speaker: Checking...</span>
+          <div id="speaker-pairing-section" style="margin-top:10px; padding-top:12px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:8px;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <img src="/img/status-off.png" id="sub-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
+                <span id="speaker-status-label" style="font-size:13px; font-weight:bold;">Speaker: Checking...</span>
+              </div>
+              <div class="action-btn-wrap" id="speaker-pair-toggle-wrap">
+                <button type="button" id="speaker-pair-toggle-btn" class="action-btn-sm pixel-pill-clip" onclick="toggleSpeakerPairingGuide()">Re-Pair Speaker</button>
+              </div>
             </div>
-            <div class="action-btn-wrap">
-              <a href="/api/spotify/audio-login" id="speaker-pair-btn" class="action-btn-sm pixel-pill-clip">Activate "Macintosh 68k" Speaker</a>
+
+            <div id="speaker-pairing-guide-box" style="margin-top:4px; padding:12px; border:1px solid #000; background:#fafafa; display:flex; flex-direction:column; gap:10px; font-size:13px; line-height:1.45;">
+              <div>
+                <strong>Enable local playback (Speaker pairing):</strong><br/>
+                To enable local playback, first you need to enable your vintage mac to act as a speaker on spotify.<br/>
+                You only need to do this once.
+              </div>
+
+              <div>
+                <strong>Option 1 &mdash; The easy way.</strong><br/>
+                Open any official spotify app on any device that is connected to the same network as your 68k mac and select &ldquo;Macintosh 68k&rdquo; from the Speakers menu. Starting playback once automatically enables the speaker.
+              </div>
+
+              <div>
+                <strong>Option 2 &mdash; The manual way.</strong><br/>
+                If the &ldquo;Macintosh 68k&rdquo; does not appear in your spotify player as a speaker, you can pair the speaker manually using the method below. This can happen if your network configuration does not allow local mDNS discovery (such as not running the docker containter in network host mode).
+              </div>
+
+              <div style="display:flex; flex-direction:column; gap:6px; padding-top:2px;">
+                <div>
+                  Click <a href="/api/spotify/audio-login" target="_blank" rel="noopener" id="speaker-pair-btn" class="action-btn-sm pixel-pill-clip" style="display:inline-block; vertical-align:middle; margin:0 2px; text-decoration:none;">Open Spotify Speaker Login &#8599;</a> (opens in a new tab) and click <strong>Agree</strong>.
+                </div>
+                <div>
+                  If your browser is running on a different computer than this server, it will redirect to a <code>http://127.0.0.1:6800/login?code=...</code> page that cannot load.
+                </div>
+                <div>
+                  Copy that full <code>127.0.0.1</code> URL including the code from your browser&rsquo;s address bar, return to this tab, and paste it below:
+                </div>
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:4px;">
+                  <input
+                    type="text"
+                    id="speaker-callback-input"
+                    placeholder="Paste http://127.0.0.1:6800/login?code=... URL here"
+                    style="flex:1; min-width:240px; font-family:monospace; font-size:12px; padding:6px 8px; border:2px solid #000; background:#fff;"
+                  />
+                  <div class="action-btn-wrap">
+                    <button type="button" class="action-btn-sm pixel-pill-clip" id="speaker-complete-btn" style="background:#000; color:#fff;" onclick="submitManualSpeakerCallback()">Complete Pairing</button>
+                  </div>
+                </div>
+                <div id="speaker-pair-feedback" style="font-size:12px; font-weight:bold; display:none;"></div>
+              </div>
             </div>
           </div>
         </div>
@@ -1782,6 +1826,80 @@
         } else {
           badge.classList.add('hidden');
         }
+      }
+    }
+
+    let speakerGuideExpanded = false;
+
+    function openSpeakerPairingSection(event) {
+      speakerGuideExpanded = true;
+      window.location.hash = '#spotimac';
+      updateRoute();
+      setTimeout(() => {
+        const sec = document.getElementById('speaker-pairing-section');
+        if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 60);
+    }
+
+    function toggleSpeakerPairingGuide() {
+      speakerGuideExpanded = !speakerGuideExpanded;
+      const box = document.getElementById('speaker-pairing-guide-box');
+      if (box) {
+        box.classList.toggle('hidden', !speakerGuideExpanded);
+      }
+    }
+
+    async function submitManualSpeakerCallback() {
+      const inputEl = document.getElementById('speaker-callback-input');
+      const feedbackEl = document.getElementById('speaker-pair-feedback');
+      const btnEl = document.getElementById('speaker-complete-btn');
+      const rawVal = inputEl ? inputEl.value.trim() : '';
+
+      if (!rawVal) {
+        if (feedbackEl) {
+          feedbackEl.style.display = 'block';
+          feedbackEl.style.color = '#cf222e';
+          feedbackEl.textContent = 'Please paste the http://127.0.0.1:6800/login?code=... URL first.';
+        }
+        return;
+      }
+
+      if (btnEl) btnEl.disabled = true;
+      if (feedbackEl) {
+        feedbackEl.style.display = 'block';
+        feedbackEl.style.color = '#555';
+        feedbackEl.textContent = 'Completing speaker pairing...';
+      }
+
+      try {
+        const res = await fetch('/api/spotify/audio-callback-manual', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callbackInput: rawVal }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'Speaker pairing failed');
+        }
+        if (inputEl) inputEl.value = '';
+        speakerGuideExpanded = false;
+        if (feedbackEl) {
+          feedbackEl.style.display = 'block';
+          feedbackEl.style.color = '#1a7f37';
+          feedbackEl.textContent = '✓ Speaker paired and active!';
+          setTimeout(() => {
+            if (feedbackEl) feedbackEl.style.display = 'none';
+          }, 4000);
+        }
+        await pollStatus();
+      } catch (err) {
+        if (feedbackEl) {
+          feedbackEl.style.display = 'block';
+          feedbackEl.style.color = '#cf222e';
+          feedbackEl.textContent = `✗ ${err.message}`;
+        }
+      } finally {
+        if (btnEl) btnEl.disabled = false;
       }
     }
 
@@ -2972,23 +3090,28 @@
 
         const speakerIcon = document.getElementById('sub-speaker-icon');
         const speakerLabel = document.getElementById('speaker-status-label');
-        const speakerBtn = document.getElementById('speaker-pair-btn');
+        const speakerToggleWrap = document.getElementById('speaker-pair-toggle-wrap');
+        const speakerToggleBtn = document.getElementById('speaker-pair-toggle-btn');
+        const speakerGuideBox = document.getElementById('speaker-pairing-guide-box');
         if (spotify.audio.paired && spotify.audio.running) {
           const macCount = Array.isArray(spotify.audio.macClients) ? spotify.audio.macClients.length : 0;
           const suffix = macCount > 1 ? ` (${macCount} Macs online)` : '';
           const spkText = `Speaker pairing: ${spotify.audio.deviceName}${suffix}`;
           speakerLabel.textContent = `Active Speaker: "${spotify.audio.deviceName}"${suffix}`;
-          speakerBtn.textContent = 'Re-Pair Speaker';
+          if (speakerToggleWrap) speakerToggleWrap.classList.remove('hidden');
+          if (speakerToggleBtn) speakerToggleBtn.textContent = speakerGuideExpanded ? 'Hide Pairing Guide' : 'Re-Pair Speaker';
+          if (speakerGuideBox) speakerGuideBox.classList.toggle('hidden', !speakerGuideExpanded);
           setIconStatus(speakerIcon, 'ok');
           setIconStatus(dashSpotimacSpeakerIcon, 'ok');
           dashSpotimacSpeaker.textContent = spkText;
-          dashSpotimacSpeakerBtn.textContent = 'Re-Pair';
+          dashSpotimacSpeakerBtn.textContent = 'Re-Activate';
         } else {
-          speakerLabel.textContent = 'Speaker not paired with Spotify Connect yet';
-          speakerBtn.textContent = 'Activate "Macintosh 68k" Speaker';
+          speakerLabel.textContent = 'Local playback not activated with Spotify yet';
+          if (speakerToggleWrap) speakerToggleWrap.classList.add('hidden');
+          if (speakerGuideBox) speakerGuideBox.classList.remove('hidden');
           setIconStatus(speakerIcon, 'off');
           setIconStatus(dashSpotimacSpeakerIcon, 'off');
-          dashSpotimacSpeaker.textContent = 'Speaker pairing: Not paired';
+          dashSpotimacSpeaker.textContent = 'Local playback: Not activated';
           dashSpotimacSpeakerBtn.textContent = 'Activate';
         }
       }

@@ -47,6 +47,7 @@ services:
       - 6800:6800 # Web GUI & HTTP API
       - 6801:6801/udp # Local LAN Discovery
       - 6802:6802 # 68k PCM Audio Stream
+      - 6803:6803 # File Transfers
 EOF
 
 # 3. Create clean, standalone source archive (zero personal data / API keys)

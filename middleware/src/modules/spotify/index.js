@@ -851,9 +851,6 @@ router.get('/callback', async (req, res) => {
       state: req.query.state,
       error: req.query.error,
     });
-    if (audioEngine.hasBinaries && !audioEngine.isPaired()) {
-      return res.redirect('/api/spotify/audio-login');
-    }
     res.redirect('/');
   } catch (err) {
     res.redirect(`/?error=${encodeURIComponent(err.message)}`);
@@ -936,9 +933,38 @@ router.get('/audio-callback', async (req, res) => {
       state: req.query.state,
       error: req.query.error,
     });
-    res.redirect('/');
+    res.redirect('/#spotimac');
   } catch (err) {
-    res.redirect(`/?error=${encodeURIComponent(err.message)}`);
+    res.redirect(`/?error=${encodeURIComponent(err.message)}#spotimac`);
+  }
+});
+
+router.post('/audio-callback-manual', async (req, res) => {
+  try {
+    const { callbackInput } = req.body || {};
+    if (!callbackInput || !String(callbackInput).trim()) {
+      return res.status(400).json({ ok: false, error: 'Please paste the 127.0.0.1 callback URL or authorization code' });
+    }
+
+    let code = String(callbackInput).trim();
+    let state = null;
+    let error = null;
+
+    if (code.includes('code=') || code.includes('error=') || code.startsWith('http')) {
+      const urlObj = new URL(code.startsWith('http') ? code : `http://localhost/?${code}`);
+      code = urlObj.searchParams.get('code');
+      state = urlObj.searchParams.get('state');
+      error = urlObj.searchParams.get('error');
+    }
+
+    await audioEngine.handleSpeakerCallback({ code, state, error });
+    res.json({ ok: true, status: getStatus() });
+  } catch (err) {
+    res.status(err.status || 400).json({
+      ok: false,
+      error: err.message,
+      status: getStatus(),
+    });
   }
 });
 

@@ -746,9 +746,23 @@ class AudioStreamEngine extends EventEmitter {
     }
   }
 
+  hasCachedCredentials() {
+    try {
+      const credFile = path.join(DATA_DIR, 'librespot', 'credentials.json');
+      return fs.existsSync(credFile) && fs.statSync(credFile).size > 10;
+    } catch {
+      return false;
+    }
+  }
+
   isPaired() {
     const data = this.store.load();
-    return Boolean(data.librespotRefreshToken || data.librespotAccessToken);
+    return Boolean(
+      data.librespotRefreshToken ||
+      data.librespotAccessToken ||
+      this.zeroconfAuthenticated ||
+      this.hasCachedCredentials()
+    );
   }
 
   /**
@@ -849,6 +863,7 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   clearCachedCredentials() {
+    this.zeroconfAuthenticated = false;
     try {
       const credFile = path.join(DATA_DIR, 'librespot', 'credentials.json');
       if (fs.existsSync(credFile)) {
@@ -994,14 +1009,9 @@ class AudioStreamEngine extends EventEmitter {
       console.warn('[AudioEngine] Failed to refresh speaker token:', err.message);
     }
 
-    if (!speakerToken) {
-      this.clearCachedCredentials();
-      this.stopProcesses();
-      this.state = 'AWAITING_SPEAKER_AUTH';
-      return false;
-    }
+    const authModeKey = speakerToken || (this.hasCachedCredentials() ? 'cached_credentials' : 'zeroconf_discovery');
 
-    if (!forceRestart && this.librespotProc && this.pacer && this.librespotStartedToken === speakerToken) {
+    if (!forceRestart && this.librespotProc && this.pacer && this.librespotStartedToken === authModeKey) {
       if (!this.ffmpegProc || this.currentRateHz !== hz || this.currentFilterChain !== filterChain) {
         this.spawnFfmpegTranscoder(hz);
       }
@@ -1010,7 +1020,7 @@ class AudioStreamEngine extends EventEmitter {
 
     this.stopProcesses();
     this.state = 'STARTING';
-    this.librespotStartedToken = speakerToken;
+    this.librespotStartedToken = authModeKey;
 
     const cacheDir = path.join(DATA_DIR, 'librespot');
     if (!fs.existsSync(cacheDir)) {
@@ -1029,13 +1039,16 @@ class AudioStreamEngine extends EventEmitter {
       '--dither', 'none',
       '--volume-ctrl', 'cubic',
       '--volume-range', '30',
+      '--cache', cacheDir,
       '--system-cache', cacheDir,
       '--disable-audio-cache',
       '--initial-volume', '100',
-      '--access-token', speakerToken,
     ];
+    if (speakerToken) {
+      librespotArgs.push('--access-token', speakerToken);
+    }
 
-    console.log(`[AudioEngine] Starting librespot ("${receiverName}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
+    console.log(`[AudioEngine] Starting librespot ("${receiverName}", mode=${speakerToken ? 'oauth' : authModeKey}) -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
     const lsProc = spawn('librespot', librespotArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -1063,6 +1076,7 @@ class AudioStreamEngine extends EventEmitter {
     lsProc.stderr.on('data', (data) => {
       const line = data.toString().trim();
       if (line.includes('Authenticated as') || line.includes('Country:')) {
+        this.zeroconfAuthenticated = true;
         this.state = 'READY';
         this.lastError = null;
         if (!authResolved && resolveAuthWait) {
@@ -1112,8 +1126,11 @@ class AudioStreamEngine extends EventEmitter {
       }
     });
 
-    this.state = 'READY';
+    this.state = this.isPaired() ? 'READY' : 'AWAITING_SPEAKER_AUTH';
     await authWaitPromise;
+    if (this.isPaired() && this.state === 'AWAITING_SPEAKER_AUTH') {
+      this.state = 'READY';
+    }
     return true;
   }
 
