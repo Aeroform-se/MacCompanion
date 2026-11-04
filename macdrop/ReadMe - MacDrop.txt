@@ -20,19 +20,23 @@ SYSTEM REQUIREMENTS
 
 SERVER & CLIENT SETUP
 
-1. Launch MacDrop on your vintage Macintosh. It will automatically
-   discover your MacCompanion server via UDP broadcast (or you can
-   enter your server IP via File -> Set Server IP...).
-2. To give your Mac a custom display name, choose File -> Set Client
+1. MacDrop is an extension made to launch when you boot your macintosh.
+   To install, simply drag the MacDrop file into your system/extensions
+   folder and reboot your mac. You should now see MacDrop running in
+   your menu bar.
+2. Macdrop will automatically try to discover your MacCompanion server 
+   via UDP broadcast (or you can enter your server IP via File -> 
+   Set Server IP...).
+3. To give your Mac a custom display name, choose File -> Set Client
    Name... (Cmd-N), or choose File -> Set Download Folder... (Cmd-D)
    to pick where incoming files are saved.
-3. Open http://<your-server-ip>:6800 on any modern computer, phone, or
+4. Open http://<your-server-ip>:6800 on any modern computer, phone, or
    tablet. Your vintage Mac will appear immediately inside the MacDrop
    card on the dashboard.
    - Tip: Click the pop-out icon in the top-right corner of the MacDrop
      card (or visit http://<your-server-ip>:6800/#drop) for a compact
      floating drop window.
-4. Should your client not appear in the MacCompanion dashboard, you can
+5. Should your client not appear in the MacCompanion dashboard, you can
    try to add it manually in the configuration page.
 
 

@@ -57,6 +57,8 @@ const TYPE_TO_EXT = {
   'PDF ': 'pdf',
   'ZIP ': 'zip',
   'dImg': 'dsk',
+  'DDim': 'dsk',
+  'rohd': 'img',
 };
 
 function getMimeType(filename, type) {

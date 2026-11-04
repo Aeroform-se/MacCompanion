@@ -2,9 +2,9 @@
  * Single source of truth for MacCompanion Middleware Server versioning.
  */
 const SERVER_NAME = 'MacCompanion';
-const SERVER_VERSION = '0.4.60';
-const SERVER_VERSION_SLUG = 'v0.4.60';
-const SERVER_CODENAME = 'MacAI & Modular Hub';
+const SERVER_VERSION = '0.4.61';
+const SERVER_VERSION_SLUG = 'v0.4.61';
+const SERVER_CODENAME = 'BFF';
 
 module.exports = {
   SERVER_NAME,

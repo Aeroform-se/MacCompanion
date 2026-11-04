@@ -35,9 +35,11 @@ const EXTENSION_MAP = {
   sit:   { type: 'SIT!', creator: 'SIT!' },
   cpt:   { type: 'PACT', creator: 'CPTO' },
   sea:   { type: 'APPL', creator: '????' },
-  dsk:   { type: 'dImg', creator: 'dImg' },
-  img:   { type: 'dImg', creator: 'dImg' },
-  image: { type: 'dImg', creator: 'dImg' },
+  dsk:   { type: 'DDim', creator: 'ddsk' },
+  img:   { type: 'DDim', creator: 'ddsk' },
+  image: { type: 'dImg', creator: 'ddsk' },
+  toast: { type: 'DDim', creator: 'ddsk' },
+  iso:   { type: 'DDim', creator: 'ddsk' },
   bin:   { type: 'BINA', creator: 'ttxt' },
   hqx:   { type: 'TEXT', creator: 'BnHx' },
   zip:   { type: 'ZIP ', creator: 'ZIP ' },
@@ -339,14 +341,36 @@ function parseMacBinaryHeader(buf) {
  * @param {number} [opts.modTime] - Unix timestamp (milliseconds)
  * @returns {Buffer} Complete MacBinary II stream
  */
+/**
+ * Detects whether a buffer has an 84-byte Apple Disk Copy 4.2 header (`dImg`),
+ * or is a raw sector disk image (`DDim`) of any size.
+ */
+function isDiskCopy42Image(buf) {
+  if (!buf || buf.length <= 84) return false;
+  const volNameLen = buf[0];
+  if (volNameLen < 1 || volNameLen > 63) return false;
+  if (buf.readUInt16BE(82) !== 0x0100) return false;
+  const dataSize = buf.readUInt32BE(64);
+  const tagSize = buf.readUInt32BE(68);
+  return dataSize > 0 && (84 + dataSize + tagSize) === buf.length;
+}
+
 function createMacBinary(opts) {
   const fileName = sanitizeMacFilename(opts.fileName || 'Untitled');
   const mapping = getTypeCreatorForFilename(fileName);
-  const fileType = (opts.fileType || mapping.type || 'BINA').padEnd(4, ' ').slice(0, 4);
-  const fileCreator = (opts.fileCreator || mapping.creator || 'ttxt').padEnd(4, ' ').slice(0, 4);
-
   const dataFork = opts.dataBuffer || Buffer.alloc(0);
   const rsrcFork = opts.rsrcBuffer || Buffer.alloc(0);
+
+  let detectedType = opts.fileType || mapping.type || 'BINA';
+  let detectedCreator = opts.fileCreator || mapping.creator || 'ttxt';
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  if (!opts.fileType && (ext === 'dsk' || ext === 'img' || ext === 'image' || ext === 'toast' || ext === 'iso')) {
+    detectedType = isDiskCopy42Image(dataFork) ? 'dImg' : 'DDim';
+    detectedCreator = 'ddsk';
+  }
+
+  const fileType = detectedType.padEnd(4, ' ').slice(0, 4);
+  const fileCreator = detectedCreator.padEnd(4, ' ').slice(0, 4);
 
   const dataLen = dataFork.length;
   const rsrcLen = rsrcFork.length;
