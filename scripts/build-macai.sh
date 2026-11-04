@@ -56,6 +56,10 @@ if idx != -1:
         f.write(ddata)
 PYEOF
 
+if [ -f "$MACAI_DIR/ReadMe - MacAI.txt" ]; then
+    bash "$ROOT_DIR/scripts/inject-dsk-readme.sh" "$BUILD_DIR/$APP_NAME.dsk" "$MACAI_DIR/ReadMe - MacAI.txt" "ReadMe - MacAI"
+fi
+
 echo "==> Built artifacts in $BUILD_DIR:"
 ls -lh "$BUILD_DIR/$APP_NAME.bin" "$BUILD_DIR/$APP_NAME.dsk"
 
