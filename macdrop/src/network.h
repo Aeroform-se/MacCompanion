@@ -70,4 +70,10 @@ void NetStopChannel(void);
 /* Main event loop network polling */
 void NetIdle(void);
 
+/* Called when a new file transfer starts so any unacknowledged alert is automatically cleared */
+void OnTransferStarted(Boolean isUpload);
+
+/* Displays or updates the non-blocking transfer completion alert, baking in any unacknowledged files */
+void ShowTransferNotifyAlert(const char *fileName, Boolean isUpload);
+
 #endif /* MACDROP_NETWORK_H */

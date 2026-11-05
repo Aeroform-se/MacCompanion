@@ -60,6 +60,17 @@ static WindowPtr gAboutWindow          = NULL;
 static Boolean   gWasHiddenBeforeAbout = false;
 static Rect      gBtnAboutOkRect;
 
+/* Transfer Notification Alert Window state (non-blocking, auto-clearing, multi-file accumulating) */
+#define MAX_PENDING_NOTIFY_FILES 24
+static WindowPtr gNotifyWindow            = NULL;
+static Boolean   gWasHiddenBeforeNotify   = false;
+static Rect      gBtnNotifyOkRect;
+static char      gPendingNotifyFiles[MAX_PENDING_NOTIFY_FILES][36];
+static short     gPendingNotifyCount      = 0;
+static short     gPendingNotifyTotalCount = 0;
+static Boolean   gPendingNotifyIsUpload   = false;
+static char      gNotifyMessageText[512]  = "";
+
 /* Compact Incoming File Window state */
 static Boolean   gCompactReceiveMode   = false;
 static Boolean   gAutoOpenedForReceive = false;
@@ -86,6 +97,8 @@ static void SetCompactReceiveWindowMode(Boolean compact);
 static void SwitchToFinder(void);
 static void SyncSharedData(void);
 static void UpdateMenuStates(void);
+static void DrawNotifyWindow(void);
+static void DismissNotifyWindow(Boolean acknowledgedByUser);
 
 static void DrawCString(const char *str)
 {
@@ -276,7 +289,11 @@ void UpdateProgressUI(void)
             HideWindow(gWindow);
         }
         SetCompactReceiveWindowMode(false);
-        SwitchToFinder();
+        if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
+            SwitchToFinder();
+        } else {
+            gWasHiddenBeforeNotify = true;
+        }
         SyncSharedData();
         UpdateMenuStates();
         return;
@@ -943,6 +960,186 @@ static void OpenAboutWindow(void)
     }
 }
 
+static void DrawNotifyWindow(void)
+{
+    Rect r, textR;
+    short msgLen;
+
+    if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) return;
+
+    SetPortWindowPort(gNotifyWindow);
+    r = gNotifyWindow->portRect;
+    EraseRect(&r);
+
+    /* MacDrop 32x32 icon on the left, matching native System 7 alert layout */
+    BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, 18, 16, srcCopy);
+
+    msgLen = (short)strlen(gNotifyMessageText);
+    if (msgLen > 110) {
+        TextFont(kFontIDGeneva);
+        TextSize(9);
+    } else {
+        TextFont(systemFont);
+        TextSize(12);
+    }
+    TextFace(normal);
+    TextMode(srcOr);
+
+    SetRect(&textR, 62, 16, r.right - 16, r.bottom - 42);
+    TETextBox(gNotifyMessageText, msgLen, &textR, teJustLeft);
+
+    /* Default "OK" button at bottom-right */
+    TextFont(systemFont);
+    TextSize(12);
+    TextFace(normal);
+    SetRect(&gBtnNotifyOkRect, r.right - 84, r.bottom - 32, r.right - 16, r.bottom - 12);
+    DrawButton(&gBtnNotifyOkRect, "OK", true);
+}
+
+static void DismissNotifyWindow(Boolean acknowledgedByUser)
+{
+    if (acknowledgedByUser) {
+        gPendingNotifyCount      = 0;
+        gPendingNotifyTotalCount = 0;
+        gNotifyMessageText[0]    = '\0';
+    }
+
+    if (gNotifyWindow && IsWindowVisible(gNotifyWindow)) {
+        HideWindow(gNotifyWindow);
+    }
+
+    if (acknowledgedByUser) {
+        if (gWasHiddenBeforeNotify && (!gWindow || !IsWindowVisible(gWindow))) {
+            gWasHiddenBeforeNotify = false;
+            SwitchToFinder();
+        } else {
+            gWasHiddenBeforeNotify = false;
+            if (gWindow && IsWindowVisible(gWindow)) {
+                SelectWindow(gWindow);
+                SetPortWindowPort(gWindow);
+                DrawWindow();
+            }
+        }
+        SyncSharedData();
+        UpdateMenuStates();
+    }
+}
+
+void OnTransferStarted(Boolean isUpload)
+{
+    /* Automatically clear (hide) any unacknowledged alert on screen when a new file begins,
+     * while preserving gPendingNotifyFiles so previous file(s) are baked into the next alert! */
+    if (gNotifyWindow && IsWindowVisible(gNotifyWindow)) {
+        DismissNotifyWindow(false);
+    }
+    if (gPendingNotifyCount > 0 && gPendingNotifyIsUpload != isUpload) {
+        gPendingNotifyCount      = 0;
+        gPendingNotifyTotalCount = 0;
+    }
+}
+
+void ShowTransferNotifyAlert(const char *fileName, Boolean isUpload)
+{
+    const char *cleanName = (fileName && fileName[0]) ? fileName : "file";
+    short i;
+    int pos;
+    short cardW = 336;
+    short cardH = 108;
+    short scrW, scrH, left, top;
+    Rect notifyRect;
+
+    if (gSoundEnabled) {
+        SysBeep(30);
+    }
+
+    if (!gNotifyEnabled) {
+        gPendingNotifyCount      = 0;
+        gPendingNotifyTotalCount = 0;
+        return;
+    }
+
+    if (gPendingNotifyCount > 0 && gPendingNotifyIsUpload != isUpload) {
+        gPendingNotifyCount      = 0;
+        gPendingNotifyTotalCount = 0;
+    }
+    gPendingNotifyIsUpload = isUpload;
+
+    gPendingNotifyTotalCount++;
+    if (gPendingNotifyCount < MAX_PENDING_NOTIFY_FILES) {
+        strncpy(gPendingNotifyFiles[gPendingNotifyCount], cleanName, sizeof(gPendingNotifyFiles[0]) - 1);
+        gPendingNotifyFiles[gPendingNotifyCount][sizeof(gPendingNotifyFiles[0]) - 1] = '\0';
+        gPendingNotifyCount++;
+    }
+
+    pos = snprintf(gNotifyMessageText, sizeof(gNotifyMessageText),
+                   "%s", isUpload ? "Sent file " : "Received file ");
+    for (i = 0; i < gPendingNotifyCount && pos < (int)sizeof(gNotifyMessageText) - 24; i++) {
+        if (i > 0) {
+            pos += snprintf(gNotifyMessageText + pos, sizeof(gNotifyMessageText) - (size_t)pos, ", ");
+        }
+        pos += snprintf(gNotifyMessageText + pos, sizeof(gNotifyMessageText) - (size_t)pos, "%s", gPendingNotifyFiles[i]);
+    }
+    if (gPendingNotifyTotalCount > gPendingNotifyCount && pos < (int)sizeof(gNotifyMessageText) - 16) {
+        pos += snprintf(gNotifyMessageText + pos, sizeof(gNotifyMessageText) - (size_t)pos,
+                        " (+%d more).", (int)(gPendingNotifyTotalCount - gPendingNotifyCount));
+    } else if (pos > 0 && pos < (int)sizeof(gNotifyMessageText) - 2) {
+        if (gNotifyMessageText[pos - 1] != '.') {
+            gNotifyMessageText[pos++] = '.';
+            gNotifyMessageText[pos]   = '\0';
+        }
+    }
+
+    /* Hide the compact receive progress window if it was auto-opened for this transfer */
+    if (gAutoOpenedForReceive) {
+        gAutoOpenedForReceive = false;
+        if (gWindow && IsWindowVisible(gWindow)) {
+            HideWindow(gWindow);
+        }
+        SetCompactReceiveWindowMode(false);
+        gWasHiddenBeforeNotify = true;
+    } else if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
+        if (!gWasHiddenBeforeNotify) {
+            gWasHiddenBeforeNotify = (!gWindow || !IsWindowVisible(gWindow));
+        }
+    }
+
+    if (strlen(gNotifyMessageText) > 95) {
+        cardH = 136;
+    }
+
+    scrW = qd.screenBits.bounds.right - qd.screenBits.bounds.left;
+    scrH = qd.screenBits.bounds.bottom - qd.screenBits.bounds.top;
+    left = qd.screenBits.bounds.left + (scrW / 2) - (cardW / 2);
+    if (scrH >= 700) {
+        top = qd.screenBits.bounds.top + 150;
+    } else if (scrH >= 480) {
+        top = qd.screenBits.bounds.top + 20 + ((scrH - 20 - cardH) / 3);
+    } else {
+        top = qd.screenBits.bounds.top + 20 + ((scrH - 20 - cardH) / 3);
+    }
+
+    EnsureFrontProcess();
+    DrawMenuBar();
+
+    if (!gNotifyWindow) {
+        SetRect(&notifyRect, left, top, left + cardW, top + cardH);
+        gNotifyWindow = NewWindow(NULL, &notifyRect, "\p", false, dBoxProc, (WindowPtr)-1, false, 0);
+    } else {
+        MoveWindow(gNotifyWindow, left, top, false);
+        SizeWindow(gNotifyWindow, cardW, cardH, true);
+    }
+
+    if (gNotifyWindow) {
+        ShowWindow(gNotifyWindow);
+        BringToFront(gNotifyWindow);
+        SelectWindow(gNotifyWindow);
+        SetPortWindowPort(gNotifyWindow);
+        DrawNotifyWindow();
+    }
+    SyncSharedData();
+    UpdateMenuStates();
+}
+
 static void SwitchToFinder(void)
 {
     ProcessSerialNumber psn;
@@ -1344,6 +1541,9 @@ static void HandleMenuChoice(long choice)
                 UpdateMenuStates();
             } else if (itemID == ITEM_NOTIFY) {
                 gNotifyEnabled = !gNotifyEnabled;
+                if (!gNotifyEnabled && gNotifyWindow && IsWindowVisible(gNotifyWindow)) {
+                    DismissNotifyWindow(true);
+                }
                 SavePreferences();
                 UpdateMenuStates();
             }
@@ -1392,6 +1592,26 @@ static void HandleMouseDown(EventRecord *evt)
                 CloseAboutWindow();
                 return;
             }
+            if (win == gNotifyWindow) {
+                Point localPt = evt->where;
+                Rect hitRect = gBtnNotifyOkRect;
+                InsetRect(&hitRect, -4, -4);
+                SetPortWindowPort(gNotifyWindow);
+                GlobalToLocal(&localPt);
+                if (PtInRect(localPt, &hitRect)) {
+                    unsigned long finalTicks;
+                    InvertRoundRect(&gBtnNotifyOkRect, 8, 8);
+                    Delay(6, &finalTicks);
+                    InvertRoundRect(&gBtnNotifyOkRect, 8, 8);
+                    DismissNotifyWindow(true);
+                } else if (win != FrontWindow()) {
+                    SelectWindow(gNotifyWindow);
+                }
+                return;
+            }
+            if (gNotifyWindow && IsWindowVisible(gNotifyWindow)) {
+                DismissNotifyWindow(true);
+            }
             if (win != FrontWindow()) {
                 SelectWindow(win);
             }
@@ -1437,6 +1657,19 @@ static void HandleKeyDown(EventRecord *evt)
     if (gAboutWindow) {
         CloseAboutWindow();
         return;
+    }
+
+    /* If Transfer Notification Alert is open, Return, Enter, Escape, or Space dismisses it */
+    if (gNotifyWindow && IsWindowVisible(gNotifyWindow)) {
+        if (key == '\r' || key == 3 || key == 27 || key == ' ') {
+            unsigned long finalTicks;
+            SetPortWindowPort(gNotifyWindow);
+            InvertRoundRect(&gBtnNotifyOkRect, 8, 8);
+            Delay(6, &finalTicks);
+            InvertRoundRect(&gBtnNotifyOkRect, 8, 8);
+            DismissNotifyWindow(true);
+            return;
+        }
     }
 
     /* Cancel active transfer via Cmd-. or Escape */
@@ -1536,7 +1769,7 @@ int main(void)
 
     while (!gDone) {
         EventRecord event;
-        short sleep = gTransferActive ? 0 : 10;
+        short sleep = (gTransferActive || !gChannelConnected) ? 0 : 10;
         Boolean gotEvent;
 
         ProcessSharedCommand();
@@ -1562,7 +1795,11 @@ int main(void)
                 HideWindow(gWindow);
             }
             SetCompactReceiveWindowMode(false);
-            SwitchToFinder();
+            if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
+                SwitchToFinder();
+            } else {
+                gWasHiddenBeforeNotify = true;
+            }
             SyncSharedData();
             UpdateMenuStates();
         }
@@ -1580,7 +1817,11 @@ int main(void)
                 HideWindow(gWindow);
             }
             SetCompactReceiveWindowMode(false);
-            SwitchToFinder();
+            if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
+                SwitchToFinder();
+            } else {
+                gWasHiddenBeforeNotify = true;
+            }
             SyncSharedData();
             UpdateMenuStates();
         }
@@ -1635,7 +1876,8 @@ int main(void)
                              * (i.e. noPendingCommand, not an internal switch, and no modal dialog opening) */
                             if (!gInternalSwitch && !gOpeningModalDialog &&
                                 (!gSharedData || gSharedData->PendingCommand == CMD_NONE) &&
-                                !gAboutWindow && !gWasHiddenBeforeAbout) {
+                                !gAboutWindow && !gWasHiddenBeforeAbout &&
+                                !(gNotifyWindow && IsWindowVisible(gNotifyWindow)) && !gWasHiddenBeforeNotify) {
                                 if (gWindow) {
                                     if (!IsWindowVisible(gWindow)) {
                                         SetCompactReceiveWindowMode(false);
@@ -1654,6 +1896,9 @@ int main(void)
                                 if (gAboutWindow && IsWindowVisible(gAboutWindow)) {
                                     DrawAboutWindow();
                                 }
+                                if (gNotifyWindow && IsWindowVisible(gNotifyWindow)) {
+                                    DrawNotifyWindow();
+                                }
                             }
                         }
                     }
@@ -1663,6 +1908,10 @@ int main(void)
                         BeginUpdate(gAboutWindow);
                         DrawAboutWindow();
                         EndUpdate(gAboutWindow);
+                    } else if ((WindowPtr)event.message == gNotifyWindow) {
+                        BeginUpdate(gNotifyWindow);
+                        DrawNotifyWindow();
+                        EndUpdate(gNotifyWindow);
                     } else if ((WindowPtr)event.message == gWindow) {
                         BeginUpdate(gWindow);
                         DrawWindow();
@@ -1670,7 +1919,9 @@ int main(void)
                     }
                     break;
                 case activateEvt:
-                    if (gWindow && IsWindowVisible(gWindow)) {
+                    if ((WindowPtr)event.message == gNotifyWindow && gNotifyWindow && IsWindowVisible(gNotifyWindow)) {
+                        DrawNotifyWindow();
+                    } else if (gWindow && IsWindowVisible(gWindow)) {
                         DrawWindow();
                     }
                     break;
@@ -1704,6 +1955,10 @@ int main(void)
     if (gAboutWindow) {
         DisposeWindow(gAboutWindow);
         gAboutWindow = NULL;
+    }
+    if (gNotifyWindow) {
+        DisposeWindow(gNotifyWindow);
+        gNotifyWindow = NULL;
     }
     if (gWindow) {
         DisposeWindow(gWindow);
