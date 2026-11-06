@@ -60,6 +60,65 @@ function createApp() {
     });
   });
 
+  // Check latest published container version on GitHub Container Registry (ghcr.io/aeroform-se/maccompanion)
+  app.get('/api/check-update', async (req, res) => {
+    const pkgUrl = 'https://github.com/Aeroform-se/MacCompanion/pkgs/container/maccompanion';
+    const parseSemver = (v) => {
+      const m = String(v || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/i);
+      return m ? [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)] : null;
+    };
+    const isNewer = (baseVer, candVer) => {
+      const a = parseSemver(baseVer);
+      const b = parseSemver(candVer);
+      if (!a || !b) return false;
+      for (let i = 0; i < 3; i++) {
+        if (b[i] > a[i]) return true;
+        if (b[i] < a[i]) return false;
+      }
+      return false;
+    };
+
+    try {
+      const tokenRes = await fetch('https://ghcr.io/token?service=ghcr.io&scope=repository:aeroform-se/maccompanion:pull');
+      if (!tokenRes.ok) throw new Error(`GHCR token HTTP ${tokenRes.status}`);
+      const { token } = await tokenRes.json();
+      if (!token) throw new Error('Missing GHCR pull token');
+
+      const tagsRes = await fetch('https://ghcr.io/v2/aeroform-se/maccompanion/tags/list', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!tagsRes.ok) throw new Error(`GHCR tags HTTP ${tagsRes.status}`);
+      const tagsData = await tagsRes.json();
+      const tags = Array.isArray(tagsData && tagsData.tags) ? tagsData.tags : [];
+
+      let latestTag = null;
+      for (const t of tags) {
+        if (!parseSemver(t)) continue;
+        if (!latestTag || isNewer(latestTag, t)) {
+          latestTag = t;
+        }
+      }
+
+      const updateAvailable = Boolean(latestTag && isNewer(SERVER_VERSION_SLUG, latestTag));
+      res.json({
+        ok: true,
+        currentVersion: SERVER_VERSION_SLUG,
+        latestVersion: latestTag,
+        updateAvailable,
+        packageUrl: pkgUrl,
+      });
+    } catch (err) {
+      res.json({
+        ok: false,
+        currentVersion: SERVER_VERSION_SLUG,
+        latestVersion: null,
+        updateAvailable: false,
+        packageUrl: pkgUrl,
+        error: err.message,
+      });
+    }
+  });
+
   // Pipe-delimited discovery/health endpoint for 68k Macintosh HTTP verification
   app.get('/api/ping', (req, res) => {
     const ip = getLocalIpAddress();

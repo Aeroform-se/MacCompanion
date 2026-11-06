@@ -560,7 +560,29 @@ function getStatus() {
   const isAuthenticated = Boolean(data.accessToken && data.refreshToken);
   const audioStatus = audioEngine.getStatus();
 
-  if (data.lastError) {
+  if (!hasClientId) {
+    // Auto-clear any stale MISSING_CONFIG error so unconfigured installs never get stuck in ERROR state
+    if (data.lastError || data.lastErrorCode === 'MISSING_CONFIG') {
+      store.save({ lastError: null, lastErrorCode: null });
+    }
+    return {
+      id: 'spotify',
+      name: 'Spotify Connect',
+      ok: false,
+      error: false,
+      state: 'AWAITING_CONFIG',
+      message: 'Unconfigured — Follow the steps below to set up SpotiMac.',
+      audio: audioStatus,
+      config: {
+        clientId: '',
+        redirectUri: config.redirectUri,
+        source: config.source,
+      },
+      loginUrl: '/api/spotify/login',
+    };
+  }
+
+  if (data.lastError && data.lastErrorCode !== 'MISSING_CONFIG') {
     return {
       id: 'spotify',
       name: 'Spotify Connect',
@@ -569,6 +591,8 @@ function getStatus() {
       errorCode: data.lastErrorCode || 'SPOTIFY_ERR',
       state: 'ERROR',
       message: data.lastError,
+      isAuthenticated,
+      user: data.userProfile ? data.userProfile.displayName || data.userProfile.id : null,
       audio: audioStatus,
       config: {
         clientId: config.clientId,
@@ -599,31 +623,13 @@ function getStatus() {
     };
   }
 
-  if (!hasClientId) {
-    return {
-      id: 'spotify',
-      name: 'Spotify Connect',
-      ok: false,
-      error: false,
-      state: 'AWAITING_CONFIG',
-      message: 'Enter your Spotify Client ID below or via SPOTIFY_CLIENT_ID env var',
-      audio: audioStatus,
-      config: {
-        clientId: '',
-        redirectUri: config.redirectUri,
-        source: config.source,
-      },
-      loginUrl: '/api/spotify/login',
-    };
-  }
-
   return {
     id: 'spotify',
     name: 'Spotify Connect',
     ok: false,
     error: false,
     state: 'AWAITING_LOGIN',
-    message: 'Ready to connect your Spotify account',
+    message: 'Step 1 complete! Now connect your Spotify account in Step 2 below.',
     audio: audioStatus,
     config: {
       clientId: config.clientId,
@@ -718,11 +724,9 @@ router.get('/login', (req, res) => {
   const { clientId, redirectUri } = getEffectiveConfig();
 
   if (!clientId) {
-    store.save({
-      lastError: 'Cannot start login: SPOTIFY_CLIENT_ID is not configured',
-      lastErrorCode: 'MISSING_CONFIG',
-    });
-    return res.redirect('/?error=missing_client_id');
+    // Do not set a persistent error state when Client ID is simply unconfigured;
+    // send the user directly to the SpotiMac setup guide instead.
+    return res.redirect('/#spotimac');
   }
 
   const codeVerifier = generateCodeVerifier();
@@ -851,9 +855,9 @@ router.get('/callback', async (req, res) => {
       state: req.query.state,
       error: req.query.error,
     });
-    res.redirect('/');
+    res.redirect('/#spotimac');
   } catch (err) {
-    res.redirect(`/?error=${encodeURIComponent(err.message)}`);
+    res.redirect(`/?error=${encodeURIComponent(err.message)}#spotimac`);
   }
 });
 

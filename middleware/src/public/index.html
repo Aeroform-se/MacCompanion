@@ -133,6 +133,27 @@
       border-radius: 4px;
     }
 
+    .update-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      font-weight: bold;
+      background: #000000;
+      color: #ffffff;
+      padding: 2px 9px;
+      text-decoration: none;
+      margin-left: 6px;
+      vertical-align: middle;
+      cursor: pointer;
+    }
+
+    .update-badge:hover {
+      background: #ffffff;
+      color: #000000;
+      outline: 1.5px solid #000000;
+    }
+
     /* Main Dashboard Grid */
     .services-grid {
       display: grid;
@@ -550,6 +571,19 @@
       border-bottom: 2px dotted #000000;
       font-size: 14px;
       min-height: 42px;
+      transition: opacity 0.15s;
+    }
+
+    .card-row.row-disabled {
+      opacity: 0.42;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .section-box.step-disabled {
+      opacity: 0.48;
+      pointer-events: none;
+      user-select: none;
     }
 
     .row-left {
@@ -1014,8 +1048,10 @@
         <img src="/img/status-ok.png" id="server-status-icon" class="status-icon" width="8" height="8" alt="Server Online" />
         <span id="server-status-text">Running</span>
         <span>IP: <span id="lan-ip">...</span></span>
-        <span id="server-version">v0.4.17</span>
-        <span id="error-code-badge" class="error-code hidden">NET_OFFLINE</span>
+        <span style="display:inline-flex; align-items:center;">
+          <span id="server-version">v0.4.66</span>
+          <a href="https://github.com/Aeroform-se/MacCompanion/pkgs/container/maccompanion" target="_blank" rel="noopener" id="server-update-badge" class="update-badge pixel-pill-clip hidden" title="A newer MacCompanion container version is available on GitHub">Update available</a>
+        </span>
       </div>
     </div>
   </header>
@@ -1110,18 +1146,18 @@
           <!-- Row 1: Service running -->
           <div class="card-row">
             <div class="row-left">
-              <img src="/img/status-ok.png" id="dash-spotimac-icon" class="status-icon" width="8" height="8" alt="Service Status" />
-              <span id="dash-spotimac-status">Service running</span>
+              <img src="/img/status-off.png" id="dash-spotimac-icon" class="status-icon" width="8" height="8" alt="Service Status" />
+              <span id="dash-spotimac-status">Unconfigured</span>
             </div>
           </div>
 
           <!-- Row 2: Audio quality toggle -->
-          <div class="card-row">
+          <div class="card-row" id="dash-spotimac-audio-row">
             <div class="row-left">
               <span>Audio quality</span>
             </div>
             <div class="row-right">
-              <div class="toggle-pill-wrap">
+              <div class="toggle-pill-wrap" id="dash-spotimac-audio-wrap">
                 <div class="toggle-pill pixel-pill-clip">
                   <button type="button" id="dash-rate-22k-btn" class="toggle-pill-btn active" onclick="setAudioSampleRate('22k')">22Khz</button>
                   <button type="button" id="dash-rate-11k-btn" class="toggle-pill-btn" onclick="setAudioSampleRate('11k')">11Khz</button>
@@ -1131,27 +1167,27 @@
           </div>
 
           <!-- Row 3: Account -->
-          <div class="card-row">
+          <div class="card-row" id="dash-spotimac-acc-row">
             <div class="row-left">
-              <img src="/img/status-ok.png" id="dash-spotimac-acc-icon" class="status-icon" width="8" height="8" alt="Account Status" />
-              <span id="dash-spotimac-acc">Account: Checking...</span>
+              <img src="/img/status-off.png" id="dash-spotimac-acc-icon" class="status-icon" width="8" height="8" alt="Account Status" />
+              <span id="dash-spotimac-acc">Account: Not set up</span>
             </div>
             <div class="row-right">
-              <div class="action-btn-wrap">
-                <button type="button" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-acc-btn" onclick="handleDashAccountAction()">Disconnect</button>
+              <div class="action-btn-wrap" id="dash-spotimac-acc-btn-wrap">
+                <button type="button" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-acc-btn" onclick="handleDashAccountAction()">Setup</button>
               </div>
             </div>
           </div>
 
           <!-- Row 4: Speaker pairing -->
-          <div class="card-row">
+          <div class="card-row row-disabled" id="dash-spotimac-speaker-row">
             <div class="row-left">
-              <img src="/img/status-ok.png" id="dash-spotimac-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
-              <span id="dash-spotimac-speaker">Speaker pairing: Mac 68k</span>
+              <img src="/img/status-off.png" id="dash-spotimac-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
+              <span id="dash-spotimac-speaker">Local playback: Not activated</span>
             </div>
             <div class="row-right">
-              <div class="action-btn-wrap">
-                <a href="#spotimac" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-speaker-btn" onclick="openSpeakerPairingSection(event)">Re-Pair</a>
+              <div class="action-btn-wrap" id="dash-spotimac-speaker-btn-wrap">
+                <a href="#spotimac" class="action-btn-sm pixel-pill-clip" id="dash-spotimac-speaker-btn" onclick="openSpeakerPairingSection(event)">Activate</a>
               </div>
             </div>
           </div>
@@ -1231,7 +1267,7 @@
     </div>
   </main>
 
-  <!-- VIEW 2: SpotiMac Subpage -->
+    <!-- VIEW 2: SpotiMac Subpage -->
   <main id="view-spotimac" class="subpage-view hidden">
     <div class="subpage-header">
       <div class="back-btn-wrap">
@@ -1243,200 +1279,237 @@
     <div class="settings-card-wrap">
       <section class="settings-card pixel-card-clip">
         <div class="status-banner" id="spotify-status-box">
-          <img src="/img/status-ok.png" id="spotify-status-icon" class="status-icon" width="8" height="8" alt="Status" />
+          <img src="/img/status-off.png" id="spotify-status-icon" class="status-icon" width="8" height="8" alt="Status" />
           <span id="spotify-status-text">Checking Spotify integration status...</span>
         </div>
 
-        <!-- Client ID Setup Form -->
-        <form id="config-form" class="section-box hidden" onsubmit="saveConfig(event)">
-          <div class="instructions-box">
-            <strong>Spotify App Setup Instructions:</strong>
-            <ol>
-              <li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> and click <strong>Create app</strong>.</li>
-              <li>
-                Set <strong>Redirect URI</strong> to:<br/>
-                <code class="code-pill" id="redirect-uri-pill">https://aeroform-se.github.io/MacCompanion/callback.html</code>
-              </li>
-              <li>Check <strong>Web API</strong> under APIs used, save, and paste your <strong>Client ID</strong> below:</li>
-            </ol>
-          </div>
-
-          <div class="field-group">
-            <label for="client-id-input">Spotify Client ID:</label>
-            <input
-              type="text"
-              id="client-id-input"
-              placeholder="e.g. 4b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e"
-              required
-            />
-          </div>
-
-          <div style="display:flex; gap:12px; justify-content:center; margin-top:4px;">
-            <div class="mac-btn-wrap">
-              <button type="submit" class="mac-btn primary pixel-pill-clip">Save Client ID</button>
+        <!-- STEP 1: Create & Enter Spotify Client ID -->
+        <div class="section-box" id="spotimac-step1-box">
+          <!-- Summary Row (shown when Client ID is saved and not currently editing) -->
+          <div id="step1-summary-row" class="section-title-row hidden">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <img src="/img/status-ok.png" id="step1-status-icon" class="status-icon" width="8" height="8" alt="Step 1" />
+              <span id="step1-summary-text">Step 1: Spotify Client ID configured</span>
+              <code class="code-pill" id="step1-client-id-preview" style="margin-top:0; font-size:11px; padding:1px 6px;"></code>
             </div>
-            <div class="mac-btn-wrap">
-              <button type="button" id="cancel-config-btn" class="mac-btn hidden pixel-pill-clip" onclick="toggleConfigEditor(false)">Cancel</button>
+            <div class="action-btn-wrap">
+              <button type="button" class="action-btn-sm pixel-pill-clip" id="edit-config-btn" onclick="toggleConfigEditor(true)">Change Client ID</button>
             </div>
           </div>
-        </form>
 
-        <!-- Action Buttons for Login / Reconfigure / Retry -->
-        <div id="action-area" class="section-box hidden" style="align-items:center;">
-          <div style="display:flex; flex-wrap:wrap; gap:12px; justify-content:center;">
-            <div class="mac-btn-wrap">
-              <a href="/api/spotify/login" class="mac-btn primary pixel-pill-clip" id="login-btn">Connect Spotify</a>
+          <!-- Client ID Setup Form -->
+          <form id="config-form" style="display:flex; flex-direction:column; gap:12px;" onsubmit="saveConfig(event)">
+            <div class="section-title-row">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <img src="/img/status-off.png" id="step1-form-icon" class="status-icon" width="8" height="8" alt="Step 1" />
+                <span>Step 1 &mdash; Create a Spotify Developer App (Client ID)</span>
+              </div>
             </div>
-            <div class="mac-btn-wrap">
-              <button type="button" class="mac-btn pixel-pill-clip" id="edit-config-btn" onclick="toggleConfigEditor(true)">Change Client ID</button>
+
+            <div class="instructions-box">
+              <div style="margin-bottom:6px;">
+                SpotiMac uses your own free Spotify Developer Client ID to communicate with Spotify:
+              </div>
+              <ol>
+                <li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>, log in with your Spotify Premium account, and click <strong>Create app</strong>.</li>
+                <li>
+                  Enter any App name (e.g. <em>SpotiMac</em>) and description, then paste this exact <strong>Redirect URI</strong>:<br/>
+                  <code class="code-pill" id="redirect-uri-pill">https://aeroform-se.github.io/MacCompanion/callback.html</code>
+                </li>
+                <li>Under <strong>Which API/SDKs are you planning to use?</strong>, check <strong>Web API</strong>, agree to the terms, and click <strong>Save</strong>.</li>
+                <li>In your new app&rsquo;s <strong>Settings</strong>, copy the <strong>Client ID</strong> and paste it below:</li>
+              </ol>
             </div>
-            <div class="mac-btn-wrap">
+
+            <div class="field-group">
+              <label for="client-id-input">Spotify Client ID:</label>
+              <input
+                type="text"
+                id="client-id-input"
+                placeholder="Paste your 32-character Spotify Client ID..."
+                required
+              />
+            </div>
+
+            <div style="display:flex; gap:12px; justify-content:center; margin-top:4px;">
+              <div class="mac-btn-wrap">
+                <button type="submit" class="mac-btn primary pixel-pill-clip">Save Client ID &amp; Continue</button>
+              </div>
+              <div class="mac-btn-wrap">
+                <button type="button" id="cancel-config-btn" class="mac-btn hidden pixel-pill-clip" onclick="toggleConfigEditor(false)">Cancel</button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <!-- STEP 2: Connect Your Spotify Account -->
+        <div class="section-box step-disabled" id="spotimac-step2-box">
+          <div class="section-title-row">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <img src="/img/status-off.png" id="step2-status-icon" class="status-icon" width="8" height="8" alt="Step 2" />
+              <span id="step2-title-text">Step 2 &mdash; Connect Your Spotify Account</span>
+            </div>
+            <button type="button" id="disconnect-account-btn" class="subtle-btn danger hidden" onclick="disconnectSpotify()">Disconnect Account</button>
+          </div>
+
+          <div id="step2-desc-text" style="font-size:13px; line-height:1.45;">
+            Save your Client ID in Step 1 first to unlock Spotify account login.
+          </div>
+
+          <div id="action-area" class="hidden" style="display:flex; flex-wrap:wrap; gap:12px; justify-content:center; margin-top:4px;">
+            <div class="mac-btn-wrap" id="login-btn-wrap">
+              <a href="/api/spotify/login" class="mac-btn primary pixel-pill-clip" id="login-btn">Connect Spotify Account</a>
+            </div>
+            <div class="mac-btn-wrap" id="retry-btn-wrap">
               <button type="button" class="mac-btn hidden pixel-pill-clip" id="retry-btn" onclick="retryConnection()">Retry / Clear Error</button>
             </div>
           </div>
         </div>
 
-        <!-- 68k Native Audio Streaming Settings -->
-        <div id="audio-settings-panel" class="section-box hidden">
+        <!-- STEP 3: Activate Local 68k Audio Playback (Speaker Pairing) & Sound Settings -->
+        <div id="audio-settings-panel" class="section-box step-disabled">
           <div class="section-title-row">
-            <span>68k Local Audio Stream Rate:</span>
-            <div class="toggle-pill-wrap">
-              <div class="toggle-pill pixel-pill-clip">
-                <button type="button" id="rate-22k-btn" class="toggle-pill-btn active" onclick="setAudioSampleRate('22k')">22 kHz</button>
-                <button type="button" id="rate-11k-btn" class="toggle-pill-btn" onclick="setAudioSampleRate('11k')">11 kHz</button>
-              </div>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <img src="/img/status-off.png" id="sub-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
+              <span id="speaker-status-label" style="font-size:14px; font-weight:bold;">Step 3 &mdash; Activate Local 68k Playback</span>
             </div>
-          </div>
-          <p style="margin:0; font-size:13px; line-height:1.45;">
-            <strong>11 kHz</strong> suits Macintosh Plus / SE (68000) systems and slower network bridges better.
-          </p>
-          <p style="margin:0; font-size:13px; line-height:1.45;">
-            <strong>22 kHz</strong> is recommended for SE/30 and 68030+ Macs.
-          </p>
-
-          <!-- Curated Sound Profiles: 3 Separate Option Cards with individual descriptions -->
-          <div style="margin-top:10px; padding-top:12px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:8px;">
-            <div class="section-title-row">
-              <span>Sound Profile:</span>
-            </div>
-
-            <div class="sound-profiles-grid">
-              <!-- Profile 1: Low Noise (Warm) -->
-              <div class="sound-profile-card-wrap active" id="prof-wrap-warm" onclick="setAudioProfile('warm')">
-                <div class="sound-profile-card pixel-pill-clip" id="prof-card-warm">
-                  <div class="profile-card-header">
-                    <div class="profile-card-title">
-                      <img src="/img/status-ok.png" id="prof-icon-warm" class="status-icon" width="8" height="8" alt="Active" />
-                      <span>Low Noise (Warm)</span>
-                    </div>
-                    <div class="profile-badge-wrap">
-                      <span class="profile-badge badge-active pixel-pill-clip" id="prof-badge-warm">Active</span>
-                    </div>
-                  </div>
-                  <p class="profile-card-desc">
-                    Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.
-                  </p>
-                </div>
-              </div>
-
-              <!-- Profile 2: HiFi (Shibata) -->
-              <div class="sound-profile-card-wrap" id="prof-wrap-hifi" onclick="setAudioProfile('hifi')">
-                <div class="sound-profile-card pixel-pill-clip" id="prof-card-hifi">
-                  <div class="profile-card-header">
-                    <div class="profile-card-title">
-                      <img src="/img/status-off.png" id="prof-icon-hifi" class="status-icon" width="8" height="8" alt="Inactive" />
-                      <span>HiFi (Shibata)</span>
-                    </div>
-                    <div class="profile-badge-wrap">
-                      <span class="profile-badge badge-select pixel-pill-clip" id="prof-badge-hifi">Select</span>
-                    </div>
-                  </div>
-                  <p class="profile-card-desc">
-                    Maximum dynamic range and natural transients with Shibata noise-shaped dither. Best at 100% client volume.
-                  </p>
-                </div>
-              </div>
-
-              <!-- Profile 3: Compact Mac Speaker -->
-              <div class="sound-profile-card-wrap" id="prof-wrap-compact" onclick="setAudioProfile('compact')">
-                <div class="sound-profile-card pixel-pill-clip" id="prof-card-compact">
-                  <div class="profile-card-header">
-                    <div class="profile-card-title">
-                      <img src="/img/status-off.png" id="prof-icon-compact" class="status-icon" width="8" height="8" alt="Inactive" />
-                      <span>Compact Mac Speaker</span>
-                    </div>
-                    <div class="profile-badge-wrap">
-                      <span class="profile-badge badge-select pixel-pill-clip" id="prof-badge-compact">Select</span>
-                    </div>
-                  </div>
-                  <p class="profile-card-desc">
-                    Tailored for the internal speaker in a Plus/SE/Classic: rolls off sub-140 Hz cone rumble, boosts 2.2 kHz midrange presence, and levels dynamics.
-                  </p>
-                </div>
-              </div>
+            <div class="action-btn-wrap hidden" id="speaker-pair-toggle-wrap">
+              <button type="button" id="speaker-pair-toggle-btn" class="action-btn-sm pixel-pill-clip" onclick="toggleSpeakerPairingGuide()">Re-Pair Speaker</button>
             </div>
           </div>
 
-          <!-- Speaker Pairing -->
-          <div id="speaker-pairing-section" style="margin-top:10px; padding-top:12px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:8px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-              <div style="display:flex; align-items:center; gap:8px;">
-                <img src="/img/status-off.png" id="sub-speaker-icon" class="status-icon" width="8" height="8" alt="Speaker Status" />
-                <span id="speaker-status-label" style="font-size:13px; font-weight:bold;">Speaker: Checking...</span>
-              </div>
-              <div class="action-btn-wrap" id="speaker-pair-toggle-wrap">
-                <button type="button" id="speaker-pair-toggle-btn" class="action-btn-sm pixel-pill-clip" onclick="toggleSpeakerPairingGuide()">Re-Pair Speaker</button>
+          <div id="step3-locked-hint" style="font-size:13px; line-height:1.45;">
+            Connect your Spotify account in Step 2 to unlock local audio streaming, speaker pairing, and sound profiles.
+          </div>
+
+          <div id="step3-unlocked-content" class="hidden" style="display:flex; flex-direction:column; gap:12px;">
+            <!-- Speaker Pairing Guide -->
+            <div id="speaker-pairing-section" style="display:flex; flex-direction:column; gap:8px;">
+              <div id="speaker-pairing-guide-box" style="margin-top:2px; padding:12px; border:1px solid #000; background:#ffffff; display:flex; flex-direction:column; gap:10px; font-size:13px; line-height:1.45;">
+                <div>
+                  <strong>Enable local playback (Speaker pairing):</strong><br/>
+                  To enable local playback, first you need to enable your vintage Mac to act as a speaker on Spotify.<br/>
+                  You only need to do this once.
+                </div>
+
+                <div>
+                  <strong>Option 1 &mdash; The easy way.</strong><br/>
+                  Open any official Spotify app on any device that is connected to the same network as your 68k Mac and select &ldquo;Macintosh 68k&rdquo; from the Speakers menu. Starting playback once automatically enables the speaker.
+                </div>
+
+                <div>
+                  <strong>Option 2 &mdash; The manual way.</strong><br/>
+                  If &ldquo;Macintosh 68k&rdquo; does not appear in your Spotify player as a speaker, you can pair the speaker manually using the method below. This can happen if your network configuration does not allow local mDNS discovery (such as not running the Docker container in network host mode).
+                </div>
+
+                <div style="display:flex; flex-direction:column; gap:6px; padding-top:2px;">
+                  <div>
+                    Click <a href="/api/spotify/audio-login" target="_blank" rel="noopener" id="speaker-pair-btn" class="action-btn-sm pixel-pill-clip" style="display:inline-block; vertical-align:middle; margin:0 2px; text-decoration:none;">Open Spotify Speaker Login &#8599;</a> (opens in a new tab) and click <strong>Agree</strong>.
+                  </div>
+                  <div>
+                    If your browser is running on a different computer than this server, it will redirect to a <code>http://127.0.0.1:6800/login?code=...</code> page that cannot load.
+                  </div>
+                  <div>
+                    Copy that full <code>127.0.0.1</code> URL including the code from your browser&rsquo;s address bar, return to this tab, and paste it below:
+                  </div>
+                  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:4px;">
+                    <input
+                      type="text"
+                      id="speaker-callback-input"
+                      placeholder="Paste http://127.0.0.1:6800/login?code=... URL here"
+                      style="flex:1; min-width:240px; font-family:monospace; font-size:12px; padding:6px 8px; border:2px solid #000; background:#fff;"
+                    />
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="speaker-complete-btn" style="background:#000; color:#fff;" onclick="submitManualSpeakerCallback()">Complete Pairing</button>
+                    </div>
+                  </div>
+                  <div id="speaker-pair-feedback" style="font-size:12px; font-weight:bold; display:none;"></div>
+                </div>
               </div>
             </div>
 
-            <div id="speaker-pairing-guide-box" style="margin-top:4px; padding:12px; border:1px solid #000; background:#fafafa; display:flex; flex-direction:column; gap:10px; font-size:13px; line-height:1.45;">
-              <div>
-                <strong>Enable local playback (Speaker pairing):</strong><br/>
-                To enable local playback, first you need to enable your vintage mac to act as a speaker on spotify.<br/>
-                You only need to do this once.
-              </div>
-
-              <div>
-                <strong>Option 1 &mdash; The easy way.</strong><br/>
-                Open any official spotify app on any device that is connected to the same network as your 68k mac and select &ldquo;Macintosh 68k&rdquo; from the Speakers menu. Starting playback once automatically enables the speaker.
-              </div>
-
-              <div>
-                <strong>Option 2 &mdash; The manual way.</strong><br/>
-                If the &ldquo;Macintosh 68k&rdquo; does not appear in your spotify player as a speaker, you can pair the speaker manually using the method below. This can happen if your network configuration does not allow local mDNS discovery (such as not running the docker containter in network host mode).
-              </div>
-
-              <div style="display:flex; flex-direction:column; gap:6px; padding-top:2px;">
-                <div>
-                  Click <a href="/api/spotify/audio-login" target="_blank" rel="noopener" id="speaker-pair-btn" class="action-btn-sm pixel-pill-clip" style="display:inline-block; vertical-align:middle; margin:0 2px; text-decoration:none;">Open Spotify Speaker Login &#8599;</a> (opens in a new tab) and click <strong>Agree</strong>.
-                </div>
-                <div>
-                  If your browser is running on a different computer than this server, it will redirect to a <code>http://127.0.0.1:6800/login?code=...</code> page that cannot load.
-                </div>
-                <div>
-                  Copy that full <code>127.0.0.1</code> URL including the code from your browser&rsquo;s address bar, return to this tab, and paste it below:
-                </div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:4px;">
-                  <input
-                    type="text"
-                    id="speaker-callback-input"
-                    placeholder="Paste http://127.0.0.1:6800/login?code=... URL here"
-                    style="flex:1; min-width:240px; font-family:monospace; font-size:12px; padding:6px 8px; border:2px solid #000; background:#fff;"
-                  />
-                  <div class="action-btn-wrap">
-                    <button type="button" class="action-btn-sm pixel-pill-clip" id="speaker-complete-btn" style="background:#000; color:#fff;" onclick="submitManualSpeakerCallback()">Complete Pairing</button>
+            <!-- 68k Audio Stream Rate -->
+            <div style="padding-top:10px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:6px;">
+              <div class="section-title-row">
+                <span>68k Local Audio Stream Rate:</span>
+                <div class="toggle-pill-wrap">
+                  <div class="toggle-pill pixel-pill-clip">
+                    <button type="button" id="rate-22k-btn" class="toggle-pill-btn active" onclick="setAudioSampleRate('22k')">22 kHz</button>
+                    <button type="button" id="rate-11k-btn" class="toggle-pill-btn" onclick="setAudioSampleRate('11k')">11 kHz</button>
                   </div>
                 </div>
-                <div id="speaker-pair-feedback" style="font-size:12px; font-weight:bold; display:none;"></div>
+              </div>
+              <p style="margin:0; font-size:13px; line-height:1.45;">
+                <strong>11 kHz</strong> suits Macintosh Plus / SE (68000) systems and slower network bridges better.
+              </p>
+              <p style="margin:0; font-size:13px; line-height:1.45;">
+                <strong>22 kHz</strong> is recommended for SE/30 and 68030+ Macs.
+              </p>
+            </div>
+
+            <!-- Curated Sound Profiles: 3 Separate Option Cards with individual descriptions -->
+            <div style="padding-top:10px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:8px;">
+              <div class="section-title-row">
+                <span>Sound Profile:</span>
+              </div>
+
+              <div class="sound-profiles-grid">
+                <!-- Profile 1: Low Noise (Warm) -->
+                <div class="sound-profile-card-wrap active" id="prof-wrap-warm" onclick="setAudioProfile('warm')">
+                  <div class="sound-profile-card pixel-pill-clip" id="prof-card-warm">
+                    <div class="profile-card-header">
+                      <div class="profile-card-title">
+                        <img src="/img/status-ok.png" id="prof-icon-warm" class="status-icon" width="8" height="8" alt="Active" />
+                        <span>Low Noise (Warm)</span>
+                      </div>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge badge-active pixel-pill-clip" id="prof-badge-warm">Active</span>
+                      </div>
+                    </div>
+                    <p class="profile-card-desc">
+                      Minimizes 8-bit background hiss in quiet passages using gentle dynamic range compression, +5 dB makeup gain, and a 9.5 kHz low-pass filter.
+                    </p>
+                  </div>
+                </div>
+
+                <!-- Profile 2: HiFi (Shibata) -->
+                <div class="sound-profile-card-wrap" id="prof-wrap-hifi" onclick="setAudioProfile('hifi')">
+                  <div class="sound-profile-card pixel-pill-clip" id="prof-card-hifi">
+                    <div class="profile-card-header">
+                      <div class="profile-card-title">
+                        <img src="/img/status-off.png" id="prof-icon-hifi" class="status-icon" width="8" height="8" alt="Inactive" />
+                        <span>HiFi (Shibata)</span>
+                      </div>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge badge-select pixel-pill-clip" id="prof-badge-hifi">Select</span>
+                      </div>
+                    </div>
+                    <p class="profile-card-desc">
+                      Maximum dynamic range and natural transients with Shibata noise-shaped dither. Best at 100% client volume.
+                    </p>
+                  </div>
+                </div>
+
+                <!-- Profile 3: Compact Mac Speaker -->
+                <div class="sound-profile-card-wrap" id="prof-wrap-compact" onclick="setAudioProfile('compact')">
+                  <div class="sound-profile-card pixel-pill-clip" id="prof-card-compact">
+                    <div class="profile-card-header">
+                      <div class="profile-card-title">
+                        <img src="/img/status-off.png" id="prof-icon-compact" class="status-icon" width="8" height="8" alt="Inactive" />
+                        <span>Compact Mac Speaker</span>
+                      </div>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge badge-select pixel-pill-clip" id="prof-badge-compact">Select</span>
+                      </div>
+                    </div>
+                    <p class="profile-card-desc">
+                      Tailored for the internal speaker in a Plus/SE/Classic: rolls off sub-140 Hz cone rumble, boosts 2.2 kHz midrange presence, and levels dynamics.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- Account Footer -->
-        <div id="connected-footer" class="section-box hidden" style="flex-direction:row; justify-content:space-between; align-items:center;">
-          <span id="spotify-user-label" style="font-weight:bold;">Connected</span>
-          <button type="button" class="subtle-btn danger" onclick="disconnectSpotify()">Disconnect Account</button>
         </div>
       </section>
     </div>
@@ -1810,35 +1883,28 @@
       }
     }
 
-    function setPlatformStatus(isOnline, errorCodeText) {
+    function setPlatformStatus(isOnline, customErrorText) {
       const icon = document.getElementById('server-status-icon');
       const text = document.getElementById('server-status-text');
-      const badge = document.getElementById('error-code-badge');
 
-      if (isOnline) {
+      if (isOnline && !customErrorText) {
         setIconStatus(icon, 'ok');
         text.textContent = 'Running';
-        badge.classList.add('hidden');
       } else {
         setIconStatus(icon, 'error');
-        text.textContent = 'Server Offline';
-        if (errorCodeText) {
-          badge.textContent = errorCodeText;
-          badge.classList.remove('hidden');
-        } else {
-          badge.classList.add('hidden');
-        }
+        text.textContent = customErrorText || 'Server Offline';
       }
     }
 
     let speakerGuideExpanded = false;
 
     function openSpeakerPairingSection(event) {
+      if (event) event.preventDefault();
       speakerGuideExpanded = true;
       window.location.hash = '#spotimac';
       updateRoute();
       setTimeout(() => {
-        const sec = document.getElementById('speaker-pairing-section');
+        const sec = document.getElementById('speaker-pairing-section') || document.getElementById('audio-settings-panel');
         if (sec) sec.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 60);
     }
@@ -1846,8 +1912,12 @@
     function toggleSpeakerPairingGuide() {
       speakerGuideExpanded = !speakerGuideExpanded;
       const box = document.getElementById('speaker-pairing-guide-box');
+      const btn = document.getElementById('speaker-pair-toggle-btn');
       if (box) {
         box.classList.toggle('hidden', !speakerGuideExpanded);
+      }
+      if (btn) {
+        btn.textContent = speakerGuideExpanded ? 'Hide Pairing Guide' : 'Re-Pair Speaker';
       }
     }
 
@@ -1908,6 +1978,9 @@
     function handleDashAccountAction() {
       if (lastSpotifyData && lastSpotifyData.ok && lastSpotifyData.state === 'READY') {
         disconnectSpotify();
+      } else if (!lastKnownConfig.clientId || (lastSpotifyData && lastSpotifyData.state === 'AWAITING_CONFIG')) {
+        window.location.hash = '#spotimac';
+        updateRoute();
       } else {
         window.location.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
       }
@@ -1916,17 +1989,23 @@
     function toggleConfigEditor(show) {
       editingConfig = show;
       const form = document.getElementById('config-form');
-      const actionArea = document.getElementById('action-area');
+      const summaryRow = document.getElementById('step1-summary-row');
       const cancelBtn = document.getElementById('cancel-config-btn');
       if (show) {
-        document.getElementById('client-id-input').value = lastKnownConfig.clientId || '';
-        form.classList.remove('hidden');
-        actionArea.classList.add('hidden');
-        cancelBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
+        const inputEl = document.getElementById('client-id-input');
+        if (inputEl && !inputEl.matches(':focus')) {
+          inputEl.value = lastKnownConfig.clientId || '';
+        }
+        if (form) form.classList.remove('hidden');
+        if (summaryRow) summaryRow.classList.add('hidden');
+        if (cancelBtn) cancelBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
       } else {
-        form.classList.add('hidden');
         if (lastKnownConfig.clientId) {
-          actionArea.classList.remove('hidden');
+          if (form) form.classList.add('hidden');
+          if (summaryRow) summaryRow.classList.remove('hidden');
+        } else {
+          if (form) form.classList.remove('hidden');
+          if (summaryRow) summaryRow.classList.add('hidden');
         }
       }
     }
@@ -1947,8 +2026,11 @@
         }
         editingConfig = false;
         await pollStatus();
+        setTimeout(() => {
+          const step2Box = document.getElementById('spotimac-step2-box');
+          if (step2Box) step2Box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 80);
       } catch (err) {
-        setPlatformStatus(false, 'CFG_ERR');
         const bannerIcon = document.getElementById('spotify-status-icon');
         const bannerText = document.getElementById('spotify-status-text');
         if (bannerIcon) setIconStatus(bannerIcon, 'error');
@@ -3045,34 +3127,86 @@
       }
     }
 
+    let updateCheckCompleted = false;
+
+    async function checkGitHubUpdate() {
+      if (updateCheckCompleted) return;
+      updateCheckCompleted = true;
+
+      try {
+        const res = await fetch('/api/check-update', { cache: 'no-store' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const badge = document.getElementById('server-update-badge');
+        if (!badge) return;
+
+        if (data && data.ok && data.updateAvailable && data.latestVersion) {
+          badge.href = data.packageUrl || 'https://github.com/Aeroform-se/MacCompanion/pkgs/container/maccompanion';
+          badge.title = `MacCompanion container ${data.latestVersion} is available on GitHub (running ${data.currentVersion})`;
+          badge.classList.remove('hidden');
+        } else {
+          badge.classList.add('hidden');
+        }
+      } catch (_) {
+        // Silent fail if offline or GitHub Container Registry is unreachable
+      }
+    }
+
+    function formatClientIdPreview(idStr) {
+      if (!idStr) return '';
+      if (idStr.length <= 12) return idStr;
+      return `${idStr.slice(0, 8)}...${idStr.slice(-4)}`;
+    }
+
     function renderUI(data) {
       const spotify = data.modules && data.modules.spotify;
       lastSpotifyData = spotify;
 
       const subStatusIcon = document.getElementById('spotify-status-icon');
       const subStatusText = document.getElementById('spotify-status-text');
+      const step1SummaryRow = document.getElementById('step1-summary-row');
+      const step1StatusIcon = document.getElementById('step1-status-icon');
+      const step1Preview = document.getElementById('step1-client-id-preview');
+      const step1FormIcon = document.getElementById('step1-form-icon');
       const configForm = document.getElementById('config-form');
+      const step2Box = document.getElementById('spotimac-step2-box');
+      const step2StatusIcon = document.getElementById('step2-status-icon');
+      const step2TitleText = document.getElementById('step2-title-text');
+      const step2DescText = document.getElementById('step2-desc-text');
+      const disconnectAccBtn = document.getElementById('disconnect-account-btn');
       const actionArea = document.getElementById('action-area');
+      const loginBtnWrap = document.getElementById('login-btn-wrap');
       const loginBtn = document.getElementById('login-btn');
       const retryBtn = document.getElementById('retry-btn');
       const audioPanel = document.getElementById('audio-settings-panel');
-      const connectedFooter = document.getElementById('connected-footer');
-      const userLabel = document.getElementById('spotify-user-label');
+      const step3LockedHint = document.getElementById('step3-locked-hint');
+      const step3UnlockedContent = document.getElementById('step3-unlocked-content');
 
       // Dashboard Card Elements
       const dashSpotimacIcon = document.getElementById('dash-spotimac-icon');
       const dashSpotimacStatus = document.getElementById('dash-spotimac-status');
+      const dashSpotimacAudioRow = document.getElementById('dash-spotimac-audio-row');
       const dashSpotimacAccIcon = document.getElementById('dash-spotimac-acc-icon');
       const dashSpotimacAcc = document.getElementById('dash-spotimac-acc');
+      const dashSpotimacAccBtnWrap = document.getElementById('dash-spotimac-acc-btn-wrap');
       const dashSpotimacAccBtn = document.getElementById('dash-spotimac-acc-btn');
+      const dashSpotimacSpeakerRow = document.getElementById('dash-spotimac-speaker-row');
       const dashSpotimacSpeakerIcon = document.getElementById('dash-spotimac-speaker-icon');
       const dashSpotimacSpeaker = document.getElementById('dash-spotimac-speaker');
       const dashSpotimacSpeakerBtn = document.getElementById('dash-spotimac-speaker-btn');
 
-      setPlatformStatus(true);
+      // Top Platform Header: only reflect overall MacCompanion server & internet reachability
+      const hasNoInternet = Boolean(spotify && spotify.errorCode === 'NET_ERROR');
+      if (hasNoInternet) {
+        setPlatformStatus(false, 'No Internet Access');
+      } else {
+        setPlatformStatus(true);
+      }
+
       document.getElementById('lan-ip').textContent = `${data.server.ip}:${data.server.httpPort}`;
       if (data.server.version) {
         document.getElementById('server-version').textContent = data.server.version;
+        checkGitHubUpdate();
       }
 
       if (data.modules && data.modules.macai) {
@@ -3092,6 +3226,20 @@
         }
       }
 
+      const hasClientId = Boolean(lastKnownConfig.clientId);
+      const isReady = Boolean(spotify.ok && spotify.state === 'READY');
+      const isUnconfigured = !hasClientId || spotify.state === 'AWAITING_CONFIG';
+
+      // Dashboard Row 2: Audio quality toggle (disabled/greyed out when unconfigured)
+      if (dashSpotimacAudioRow) {
+        dashSpotimacAudioRow.classList.toggle('row-disabled', isUnconfigured);
+      }
+
+      // Dashboard Row 4: Local playback (enabled only when Spotify account is logged in / READY)
+      if (dashSpotimacSpeakerRow) {
+        dashSpotimacSpeakerRow.classList.toggle('row-disabled', !isReady);
+      }
+
       // Audio Sample Rate & Profile
       if (spotify.audio) {
         const is11k = spotify.audio.sampleRateMode === '11k';
@@ -3108,11 +3256,11 @@
         const speakerToggleWrap = document.getElementById('speaker-pair-toggle-wrap');
         const speakerToggleBtn = document.getElementById('speaker-pair-toggle-btn');
         const speakerGuideBox = document.getElementById('speaker-pairing-guide-box');
-        if (spotify.audio.paired && spotify.audio.running) {
+        if (isReady && spotify.audio.paired && spotify.audio.running) {
           const macCount = Array.isArray(spotify.audio.macClients) ? spotify.audio.macClients.length : 0;
           const suffix = macCount > 1 ? ` (${macCount} Macs online)` : '';
           const spkText = `Local playback: ${spotify.audio.deviceName}${suffix}`;
-          speakerLabel.textContent = `Local playback: "${spotify.audio.deviceName}"${suffix}`;
+          speakerLabel.textContent = `Step 3: Local playback active ("${spotify.audio.deviceName}"${suffix})`;
           if (speakerToggleWrap) speakerToggleWrap.classList.remove('hidden');
           if (speakerToggleBtn) speakerToggleBtn.textContent = speakerGuideExpanded ? 'Hide Pairing Guide' : 'Re-Pair Speaker';
           if (speakerGuideBox) speakerGuideBox.classList.toggle('hidden', !speakerGuideExpanded);
@@ -3121,7 +3269,9 @@
           dashSpotimacSpeaker.textContent = spkText;
           dashSpotimacSpeakerBtn.textContent = 'Re-Activate';
         } else {
-          speakerLabel.textContent = 'Local playback not activated with Spotify yet';
+          speakerLabel.textContent = isReady
+            ? 'Step 3 — Activate Local 68k Playback (Not activated yet)'
+            : 'Step 3 — Activate Local 68k Playback';
           if (speakerToggleWrap) speakerToggleWrap.classList.add('hidden');
           if (speakerGuideBox) speakerGuideBox.classList.remove('hidden');
           setIconStatus(speakerIcon, 'off');
@@ -3131,80 +3281,140 @@
         }
       }
 
-      loginBtn.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
+      if (loginBtn) {
+        loginBtn.href = `/api/spotify/login?origin=${encodeURIComponent(window.location.origin)}`;
+      }
 
-      // 1. Service Error State
+      // Sync Step 1 Box (Client ID)
+      if (hasClientId) {
+        if (step1StatusIcon) setIconStatus(step1StatusIcon, 'ok');
+        if (step1FormIcon) setIconStatus(step1FormIcon, 'ok');
+        if (step1Preview) step1Preview.textContent = formatClientIdPreview(lastKnownConfig.clientId);
+        toggleConfigEditor(editingConfig);
+      } else {
+        if (step1StatusIcon) setIconStatus(step1StatusIcon, 'off');
+        if (step1FormIcon) setIconStatus(step1FormIcon, 'off');
+        if (step1Preview) step1Preview.textContent = '';
+        toggleConfigEditor(true);
+      }
+
+      // 1. State A: Unconfigured (No Client ID saved yet)
+      if (isUnconfigured) {
+        setIconStatus(dashSpotimacIcon, 'off');
+        dashSpotimacStatus.textContent = 'Unconfigured';
+        setIconStatus(dashSpotimacAccIcon, 'off');
+        dashSpotimacAcc.textContent = 'Account: Not set up';
+        if (dashSpotimacAccBtnWrap) dashSpotimacAccBtnWrap.classList.remove('hidden');
+        dashSpotimacAccBtn.textContent = 'Setup';
+
+        setIconStatus(subStatusIcon, 'off');
+        subStatusText.textContent = 'Unconfigured — Follow the steps below to set up SpotiMac.';
+
+        if (step2Box) step2Box.classList.add('step-disabled');
+        if (step2StatusIcon) setIconStatus(step2StatusIcon, 'off');
+        if (step2TitleText) step2TitleText.textContent = 'Step 2 — Connect Your Spotify Account';
+        if (step2DescText) {
+          step2DescText.textContent = 'Save your Client ID in Step 1 first to unlock Spotify account login.';
+          step2DescText.classList.remove('hidden');
+        }
+        if (disconnectAccBtn) disconnectAccBtn.classList.add('hidden');
+        if (actionArea) actionArea.classList.add('hidden');
+
+        if (audioPanel) audioPanel.classList.add('step-disabled');
+        if (step3LockedHint) step3LockedHint.classList.remove('hidden');
+        if (step3UnlockedContent) step3UnlockedContent.classList.add('hidden');
+        return;
+      }
+
+      // 2. State D: Service Error State (only when Client ID IS configured)
       if (spotify.error || spotify.state === 'ERROR') {
-        setPlatformStatus(false, spotify.errorCode || 'SPOTIFY_ERR');
         setIconStatus(dashSpotimacIcon, 'error');
         dashSpotimacStatus.textContent = 'Service Error';
         setIconStatus(subStatusIcon, 'error');
-        subStatusText.textContent = spotify.message || 'An unexpected Spotify error occurred.';
-        actionArea.classList.remove('hidden');
-        loginBtn.classList.toggle('hidden', !lastKnownConfig.clientId);
-        retryBtn.classList.remove('hidden');
-        audioPanel.classList.add('hidden');
-        connectedFooter.classList.add('hidden');
-        if (!editingConfig) configForm.classList.add('hidden');
+        subStatusText.textContent = `Spotify Error: ${spotify.message || 'An unexpected Spotify error occurred.'}`;
 
         setIconStatus(dashSpotimacAccIcon, 'off');
-        dashSpotimacAcc.textContent = 'Account: Error';
-        dashSpotimacAccBtn.textContent = 'Connect';
+        dashSpotimacAcc.textContent = spotify.isAuthenticated ? 'Account: Auth Error' : 'Account: Not configured';
+        // Hide the dashboard Connect button in error state as requested
+        if (dashSpotimacAccBtnWrap) dashSpotimacAccBtnWrap.classList.add('hidden');
+
+        if (step2Box) step2Box.classList.remove('step-disabled');
+        if (step2StatusIcon) setIconStatus(step2StatusIcon, 'error');
+        if (step2TitleText) step2TitleText.textContent = 'Step 2 — Connect Your Spotify Account';
+        if (step2DescText) {
+          step2DescText.textContent = 'Could not complete Spotify authorization. Verify your Client ID and Redirect URI in Step 1, or click below to try again.';
+          step2DescText.classList.remove('hidden');
+        }
+        if (disconnectAccBtn) disconnectAccBtn.classList.toggle('hidden', !spotify.isAuthenticated);
+        if (actionArea) actionArea.classList.remove('hidden');
+        if (loginBtnWrap) loginBtnWrap.classList.remove('hidden');
+        if (retryBtn) retryBtn.classList.remove('hidden');
+
+        if (audioPanel) audioPanel.classList.add('step-disabled');
+        if (step3LockedHint) step3LockedHint.classList.remove('hidden');
+        if (step3UnlockedContent) step3UnlockedContent.classList.add('hidden');
         return;
       }
 
-      // 2. Spotify Operational & Logged In
-      if (spotify.ok && spotify.state === 'READY') {
+      // 3. State C: Spotify Operational & Logged In (READY)
+      if (isReady) {
         setIconStatus(dashSpotimacIcon, 'ok');
         dashSpotimacStatus.textContent = 'Service running';
+
+        const speakerPaired = Boolean(spotify.audio && spotify.audio.paired && spotify.audio.running);
         setIconStatus(subStatusIcon, 'ok');
-        subStatusText.textContent = 'Spotify service is running OK';
-        configForm.classList.add('hidden');
-        actionArea.classList.add('hidden');
-        audioPanel.classList.remove('hidden');
-        connectedFooter.classList.remove('hidden');
-        userLabel.textContent = spotify.user ? `Account: ${spotify.user}` : 'Account connected';
+        subStatusText.textContent = speakerPaired
+          ? 'Spotify service is running OK'
+          : 'Spotify account connected! Complete Step 3 below to activate local 68k playback.';
 
         setIconStatus(dashSpotimacAccIcon, 'ok');
         dashSpotimacAcc.textContent = spotify.user ? `Account: ${spotify.user}` : 'Account: Connected';
+        if (dashSpotimacAccBtnWrap) dashSpotimacAccBtnWrap.classList.remove('hidden');
         dashSpotimacAccBtn.textContent = 'Disconnect';
-        return;
-      }
 
-      audioPanel.classList.add('hidden');
-      connectedFooter.classList.add('hidden');
-
-      // 3. Awaiting Client ID Setup
-      if (spotify.state === 'AWAITING_CONFIG') {
-        setIconStatus(dashSpotimacIcon, 'off');
-        dashSpotimacStatus.textContent = 'Setup Required';
-        setIconStatus(subStatusIcon, 'off');
-        subStatusText.textContent = 'Spotify Client ID not configured.';
-        actionArea.classList.add('hidden');
-        if (!editingConfig) {
-          toggleConfigEditor(true);
+        if (step2Box) step2Box.classList.remove('step-disabled');
+        if (step2StatusIcon) setIconStatus(step2StatusIcon, 'ok');
+        if (step2TitleText) {
+          step2TitleText.textContent = spotify.user
+            ? `Step 2: Connected as ${spotify.user}`
+            : 'Step 2: Spotify Account Connected';
         }
-        setIconStatus(dashSpotimacAccIcon, 'off');
-        dashSpotimacAcc.textContent = 'Account: No Client ID';
-        dashSpotimacAccBtn.textContent = 'Setup';
+        if (step2DescText) step2DescText.classList.add('hidden');
+        if (disconnectAccBtn) disconnectAccBtn.classList.remove('hidden');
+        if (actionArea) actionArea.classList.add('hidden');
+
+        if (audioPanel) audioPanel.classList.remove('step-disabled');
+        if (step3LockedHint) step3LockedHint.classList.add('hidden');
+        if (step3UnlockedContent) step3UnlockedContent.classList.remove('hidden');
         return;
       }
 
-      // 4. Awaiting OAuth Login
+      // 4. State B: Client ID Saved, Awaiting OAuth Login (AWAITING_LOGIN)
       setIconStatus(dashSpotimacIcon, 'off');
       dashSpotimacStatus.textContent = 'Login Required';
       setIconStatus(subStatusIcon, 'off');
-      subStatusText.textContent = spotify.message || 'Log in to Spotify to enable audio streaming.';
-      retryBtn.classList.add('hidden');
-      loginBtn.classList.remove('hidden');
-      if (!editingConfig) {
-        configForm.classList.add('hidden');
-        actionArea.classList.remove('hidden');
-      }
+      subStatusText.textContent = 'Step 1 complete! Now connect your Spotify account in Step 2 below.';
 
       setIconStatus(dashSpotimacAccIcon, 'off');
       dashSpotimacAcc.textContent = 'Account: Not logged in';
-      dashSpotimacAccBtn.textContent = 'Connect';
+      if (dashSpotimacAccBtnWrap) dashSpotimacAccBtnWrap.classList.remove('hidden');
+      dashSpotimacAccBtn.textContent = 'Login';
+
+      if (step2Box) step2Box.classList.remove('step-disabled');
+      if (step2StatusIcon) setIconStatus(step2StatusIcon, 'off');
+      if (step2TitleText) step2TitleText.textContent = 'Step 2 — Connect Your Spotify Account';
+      if (step2DescText) {
+        step2DescText.textContent = 'Click below to authorize SpotiMac with your Spotify account. This enables browsing playlists, albums, search, and remote playback control.';
+        step2DescText.classList.remove('hidden');
+      }
+      if (disconnectAccBtn) disconnectAccBtn.classList.add('hidden');
+      if (actionArea) actionArea.classList.remove('hidden');
+      if (loginBtnWrap) loginBtnWrap.classList.remove('hidden');
+      if (retryBtn) retryBtn.classList.add('hidden');
+
+      if (audioPanel) audioPanel.classList.add('step-disabled');
+      if (step3LockedHint) step3LockedHint.classList.remove('hidden');
+      if (step3UnlockedContent) step3UnlockedContent.classList.add('hidden');
     }
 
     async function pollStatus() {
@@ -3214,7 +3424,7 @@
         const data = await res.json();
         renderUI(data);
       } catch (err) {
-        setPlatformStatus(false, 'NET_OFFLINE');
+        setPlatformStatus(false, 'Server Offline');
         const dashSpotimacIcon = document.getElementById('dash-spotimac-icon');
         const dashSpotimacStatus = document.getElementById('dash-spotimac-status');
         if (dashSpotimacIcon) setIconStatus(dashSpotimacIcon, 'error');

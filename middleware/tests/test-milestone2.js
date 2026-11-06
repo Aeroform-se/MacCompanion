@@ -155,7 +155,7 @@ async function runTests() {
       `/api/spotify/callback?code=mock_auth_code_abc&state=${storedAfterLoginInit.oauthState}`
     );
     assert.strictEqual(callbackRes.statusCode, 302);
-    assert.strictEqual(callbackRes.headers.location, '/');
+    assert.strictEqual(callbackRes.headers.location, '/#spotimac');
 
     const readyStatus = JSON.parse((await httpRequest('GET', '/api/spotify/status')).body);
     assert.strictEqual(readyStatus.ok, true);
