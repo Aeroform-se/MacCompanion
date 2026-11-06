@@ -13,7 +13,7 @@ Classic Macs are timeless, but the modern web left them behind around 1998. **Ma
 
 ![The SpotiMac client](docs/screens/spotimac-overview.gif)
 
-Spotify for your 68k Mac. **Supports local playback** and multitasking with a mini player, all so you can get that real work done and delivered to your favorite tunes. Throwing a party? There might be a nice feature for that built in too.
+Spotify for your 68k Mac. **Supports local audio playback through your Macintosh speaker** and multitasking with a mini player, all so you can get that real work done and delivered to your favorite tunes. Throwing a party? There might be a nice feature for that built in too.
 
 **Requirements:**
 - **Account:** Spotify Premium + a free Spotify Developer Client ID.
@@ -28,7 +28,7 @@ Spotify for your 68k Mac. **Supports local playback** and multitasking with a mi
 
 ![The MacDrop extension](docs/screens/macdrop-overview.gif)
 
-Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. Ever wanted to drop files from your phone straight to your 68k Mac? Well, now you can (Yes, it also works from other devices :).
+Like Airdrop, if it was invented in the 1990's. Biderectional file transfers with device auto discovery. Ever wanted to drop files from your phone straight to your 68k Mac? Well, now you can. Supports both modern devices <-> 68k Mac and 68k Mac <-> 68k Mac transfers at blistering speeds.
 
 **Requirements:**
 - **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
@@ -42,7 +42,7 @@ Like Airdrop, if it was invented in the 1990's. Biderectional file transfers wit
 
 ![The MacAI client](docs/screens/macai-overview.gif)
 
-AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq right from within System 7. Featuring image generation, bi-directional voice, and an ominous sentient mainframe.
+AI for your vintage 68k Mac. Converse with Gemini, ChatGPT, Claude, and Groq right from within System 7. Featuring image generation, bi-directional voice, and an ominous sentient mainframe. (Currently in beta).
 
 **Requirements:**
 - **Account:** Free or paid API key for Google Gemini, Groq, OpenAI, or Anthropic Claude.
