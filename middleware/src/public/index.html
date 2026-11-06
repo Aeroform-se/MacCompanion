@@ -1012,7 +1012,7 @@
     <div class="server-pill-wrap">
       <div class="server-pill pixel-pill-clip" id="server-status-pill">
         <img src="/img/status-ok.png" id="server-status-icon" class="status-icon" width="8" height="8" alt="Server Online" />
-        <span id="server-status-text">Server Online</span>
+        <span id="server-status-text">Running</span>
         <span>IP: <span id="lan-ip">...</span></span>
         <span id="server-version">v0.4.17</span>
         <span id="error-code-badge" class="error-code hidden">NET_OFFLINE</span>
@@ -1308,14 +1308,16 @@
             </div>
           </div>
           <p style="margin:0; font-size:13px; line-height:1.45;">
-            <strong>11 kHz</strong> suits Macintosh Plus / SE (68000) systems and slower network bridges better. <strong>22 kHz</strong> is recommended for SE/30 and 68030+ Macs.
+            <strong>11 kHz</strong> suits Macintosh Plus / SE (68000) systems and slower network bridges better.
+          </p>
+          <p style="margin:0; font-size:13px; line-height:1.45;">
+            <strong>22 kHz</strong> is recommended for SE/30 and 68030+ Macs.
           </p>
 
           <!-- Curated Sound Profiles: 3 Separate Option Cards with individual descriptions -->
           <div style="margin-top:10px; padding-top:12px; border-top:1px dotted #000; display:flex; flex-direction:column; gap:8px;">
             <div class="section-title-row">
-              <span>Sound Profile (Live Hot-Swap):</span>
-              <a href="/test.html#dsp-lab" class="subtle-btn">Granular Lab &rarr;</a>
+              <span>Sound Profile:</span>
             </div>
 
             <div class="sound-profiles-grid">
@@ -1476,7 +1478,7 @@
           </div>
           <div id="gemini-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
             <div class="section-title-row">
-              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
+              <span style="font-size:12px;">Custom Model:</span>
               <button type="button" class="subtle-btn" id="gemini-fetch-btn" onclick="fetchModelsForProvider('gemini')">Fetch Available Models</button>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
@@ -1514,7 +1516,7 @@
           </div>
           <div id="chatgpt-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
             <div class="section-title-row">
-              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
+              <span style="font-size:12px;">Custom Model:</span>
               <button type="button" class="subtle-btn" id="chatgpt-fetch-btn" onclick="fetchModelsForProvider('chatgpt')">Fetch Available Models</button>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
@@ -1552,7 +1554,7 @@
           </div>
           <div id="claude-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
             <div class="section-title-row">
-              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
+              <span style="font-size:12px;">Custom Model:</span>
               <button type="button" class="subtle-btn" id="claude-fetch-btn" onclick="fetchModelsForProvider('claude')">Fetch Available Models</button>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
@@ -1590,7 +1592,7 @@
           </div>
           <div id="groq-custom-box" style="margin-top:6px; padding-top:8px; border-top:1px dashed #bbb; display:flex; flex-direction:column; gap:6px;">
             <div class="section-title-row">
-              <span style="font-size:12px;">Custom Model (optional advanced override):</span>
+              <span style="font-size:12px;">Custom Model:</span>
               <button type="button" class="subtle-btn" id="groq-fetch-btn" onclick="fetchModelsForProvider('groq')">Fetch Available Models</button>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
@@ -1815,7 +1817,7 @@
 
       if (isOnline) {
         setIconStatus(icon, 'ok');
-        text.textContent = 'Server Online';
+        text.textContent = 'Running';
         badge.classList.add('hidden');
       } else {
         setIconStatus(icon, 'error');
@@ -3096,8 +3098,8 @@
         if (spotify.audio.paired && spotify.audio.running) {
           const macCount = Array.isArray(spotify.audio.macClients) ? spotify.audio.macClients.length : 0;
           const suffix = macCount > 1 ? ` (${macCount} Macs online)` : '';
-          const spkText = `Speaker pairing: ${spotify.audio.deviceName}${suffix}`;
-          speakerLabel.textContent = `Active Speaker: "${spotify.audio.deviceName}"${suffix}`;
+          const spkText = `Local playback: ${spotify.audio.deviceName}${suffix}`;
+          speakerLabel.textContent = `Local playback: "${spotify.audio.deviceName}"${suffix}`;
           if (speakerToggleWrap) speakerToggleWrap.classList.remove('hidden');
           if (speakerToggleBtn) speakerToggleBtn.textContent = speakerGuideExpanded ? 'Hide Pairing Guide' : 'Re-Pair Speaker';
           if (speakerGuideBox) speakerGuideBox.classList.toggle('hidden', !speakerGuideExpanded);
