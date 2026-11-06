@@ -317,13 +317,85 @@ class MacDropModule {
   }
 
   /**
+   * Returns online 68k Macintosh peers visible to a given requesting 68k client.
+   */
+  getOnlinePeersForClient(excludeId = '', excludeIp = '') {
+    const peers = [];
+    const seenIds = new Set();
+    const seenIps = new Set();
+    const cleanExcludeId = (excludeId || '').trim();
+    const cleanExcludeIp = (excludeIp || '').trim();
+
+    const sanitizeField = (str) => String(str || '').replace(/[|;\r\n]/g, ' ').trim();
+
+    // 1. Live active reverse-channel clients
+    for (const c of this.activeClients.values()) {
+      if (!c) continue;
+      if (cleanExcludeId && c.id === cleanExcludeId) continue;
+      if (!cleanExcludeId && cleanExcludeIp && c.ip === cleanExcludeIp) continue;
+      seenIds.add(c.id);
+      if (c.ip) seenIps.add(c.ip.trim());
+      peers.push({
+        id: sanitizeField(c.id),
+        name: sanitizeField(c.name || `Macintosh (${c.ip})`),
+        machine: sanitizeField(c.machine || 'Macintosh 68k'),
+        ip: (c.ip || '').trim(),
+      });
+    }
+
+    // 2. Online manual / known LAN targets from pingCache
+    try {
+      const data = this.store.load();
+      for (const d of [...(data.knownDevices || []), ...(data.targets || [])]) {
+        if (!d || !d.ip) continue;
+        const ip = d.ip.trim();
+        if (seenIps.has(ip)) continue;
+        if (cleanExcludeIp && ip === cleanExcludeIp) continue;
+        const port = d.port || DEFAULT_MACDROP_PORT;
+        const isOnline = Boolean(this.pingCache.get(`${ip}:${port}`)?.online);
+        if (!isOnline) continue;
+
+        const devId = d.id || `device_${ip.replace(/\./g, '_')}`;
+        if (cleanExcludeId && devId === cleanExcludeId) continue;
+        if (seenIds.has(devId)) continue;
+
+        seenIds.add(devId);
+        seenIps.add(ip);
+        const pongMeta = this.lastPongByIp.get(ip);
+        peers.push({
+          id: sanitizeField(devId),
+          name: sanitizeField((pongMeta && pongMeta.name) || d.name || `Macintosh (${ip})`),
+          machine: sanitizeField((pongMeta && pongMeta.machine) || d.machine || 'Vintage Macintosh'),
+          ip,
+        });
+      }
+    } catch (_) {}
+
+    return peers.slice(0, 6);
+  }
+
+  /**
+   * Formats online peers into a compact header value for 68k clients:
+   * id|name|machine;id2|name2|machine2
+   */
+  formatPeersHeaderValue(excludeId = '', excludeIp = '') {
+    const peers = this.getOnlinePeersForClient(excludeId, excludeIp);
+    if (peers.length === 0) return 'NONE';
+    return peers.map(p => `${p.id}|${p.name}|${p.machine}`).join(';');
+  }
+
+  /**
    * Safely closes a reverse-channel response socket so the 68k client immediately
    * detects disconnect and reconnects instead of hanging on an orphaned stream.
    */
   _closeClientSocket(c) {
     if (c && c.res && !c.res.writableEnded && !c.res.destroyed) {
       try {
-        c.res.writeHead(204, { 'X-MacDrop-Status': 'POLL', 'Connection': 'close' });
+        c.res.writeHead(204, {
+          'X-MacDrop-Status': 'POLL',
+          'X-MacDrop-Peers': this.formatPeersHeaderValue(c.id, c.ip),
+          'Connection': 'close',
+        });
         c.res.end();
       } catch (_) {
         try { c.res.destroy(); } catch (_) {}
@@ -831,7 +903,11 @@ class MacDropModule {
         try {
           curr.probing = true;
           curr.probeSentAt = Date.now();
-          res.writeHead(204, { 'X-MacDrop-Status': 'POLL', 'Connection': 'close' });
+          res.writeHead(204, {
+            'X-MacDrop-Status': 'POLL',
+            'X-MacDrop-Peers': this.formatPeersHeaderValue(clientId, remoteIp),
+            'Connection': 'close',
+          });
           res.end();
         } catch (_) {}
       }, 8000);
@@ -942,8 +1018,31 @@ class MacDropModule {
       res.json(this.getStatus());
     });
 
-    // 3b. INBOUND TRANSFER ENDPOINTS (68k Vintage Mac -> Server & Modern Web UI)
-    // - 68k Mac uploads MacBinary payload (streaming & simultaneous pass-through)
+    // 3a. Compact Peer Discovery Endpoint for 68k Macintosh Clients
+    this.router.get('/peers', (req, res) => {
+      if (!this.hasActiveTransfer()) {
+        this.sweepDeadClients();
+      }
+      const excludeId = (req.query.id || req.query.exclude || req.headers['x-client-id'] || '').trim();
+      const excludeIp = this.resolveClientIp(req);
+      const peers = this.getOnlinePeersForClient(excludeId, excludeIp);
+      const headerVal = peers.length > 0
+        ? peers.map(p => `${p.id}|${p.name}|${p.machine}`).join(';')
+        : 'NONE';
+
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('X-MacDrop-Peers', headerVal);
+      res.setHeader('Connection', 'close');
+
+      const lines = ['SERVER|MacCompanion Server|Web Browser'];
+      for (const p of peers) {
+        lines.push(`PEER|${p.id}|${p.name}|${p.machine}`);
+      }
+      res.send(lines.join('\n') + '\n');
+    });
+
+    // 3b. INBOUND TRANSFER ENDPOINTS (68k Vintage Mac -> Server / Modern Web UI OR Peer 68k Mac Relay)
+    // - 68k Mac uploads MacBinary payload (streaming & simultaneous pass-through or peer relay)
     this.router.post('/inbound/upload', (req, res) => {
       if (req.socket && typeof req.socket.setNoDelay === 'function') {
         req.socket.setNoDelay(true);
@@ -951,7 +1050,9 @@ class MacDropModule {
       const remoteIp = this.resolveClientIp(req);
       const clientId = (req.query.id || req.headers['x-client-id'] || '').trim();
       const clientName = (req.query.name || req.headers['x-client-name'] || `Macintosh (${remoteIp})`).trim();
-      const transferId = 'in_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
+      const rawTargetId = (req.query.target_id || req.headers['x-target-id'] || '').trim();
+      const isPeerRelay = Boolean(rawTargetId && rawTargetId.toUpperCase() !== 'SERVER');
+      const transferId = (isPeerRelay ? 'p2p_' : 'in_') + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6);
 
       // Locate client in activeClients to protect it from probe sweeps while streaming
       let client = null;
@@ -980,6 +1081,167 @@ class MacDropModule {
         if (client) client.transferInProgress = false;
         console.error(`[MacDrop] Failed to create staging file ${stagingPath}:`, err);
         return res.status(500).json({ ok: false, error: 'Cannot create staging file' });
+      }
+
+      // If this is a 68k-to-68k peer relay, buffer the uploaded MacBinary II file and forward it to the target Mac
+      if (isPeerRelay) {
+        let totalReceived = 0;
+        let headerBuffer = Buffer.alloc(0);
+        let parsedFileName = req.headers['x-filename'] || 'MacintoshFile';
+        const expectedTotal = parseInt(req.headers['content-length'] || '0', 10) || 0;
+        const resolvedTargets = this.resolveTargets(rawTargetId);
+        const targetLabel = resolvedTargets.length > 0 ? (resolvedTargets[0].name || resolvedTargets[0].ip) : rawTargetId;
+
+        req.on('data', chunk => {
+          const prevReceived = totalReceived;
+          totalReceived += chunk.length;
+          if (client) {
+            client.transferInProgress = true;
+            client.lastSeen = Date.now();
+          }
+          if (fd !== null) {
+            try {
+              fs.writeSync(fd, chunk, 0, chunk.length, prevReceived);
+            } catch (_) {}
+          }
+          if (headerBuffer.length < 128) {
+            headerBuffer = Buffer.concat([headerBuffer, chunk]);
+            if (headerBuffer.length >= 128) {
+              const info = parseMacBinaryHeader(headerBuffer.subarray(0, 128));
+              if (info && info.fileName) {
+                parsedFileName = sanitizeMacFilename(info.fileName);
+              }
+              this.activeTransfer = {
+                transferId,
+                fileName: parsedFileName,
+                targetName: `${clientName} → ${targetLabel}`,
+                totalBytes: expectedTotal || (128 + (info ? info.dataLength + info.rsrcLength : 0)),
+                bytesSent: totalReceived,
+                percent: 10,
+                speedBps: 0,
+                speedFormatted: 'Relaying...',
+                status: 'STREAMING',
+                startedAt: Date.now(),
+                lastProgressAt: Date.now(),
+              };
+            }
+          } else if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
+            this.activeTransfer.bytesSent = Math.round(totalReceived / 2);
+            if (this.activeTransfer.totalBytes > 0) {
+              this.activeTransfer.percent = Math.min(48, Math.round((totalReceived / this.activeTransfer.totalBytes) * 48));
+            }
+            this.activeTransfer.lastProgressAt = Date.now();
+          }
+        });
+
+        req.on('end', () => {
+          if (client) {
+            client.transferInProgress = false;
+            client.lastSeen = Date.now();
+          }
+          if (fd !== null) {
+            try { fs.closeSync(fd); } catch (_) {}
+            fd = null;
+          }
+
+          let macBinaryBuffer = null;
+          try {
+            macBinaryBuffer = fs.readFileSync(stagingPath);
+            fs.unlinkSync(stagingPath);
+          } catch (readErr) {
+            console.error(`[MacDrop] Failed reading peer relay staging file ${stagingPath}:`, readErr);
+            return res.status(500).json({ ok: false, error: 'Failed reading relay buffer' });
+          }
+
+          const targetsToPush = this.resolveTargets(rawTargetId);
+          if (targetsToPush.length === 0) {
+            if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
+              this.activeTransfer = null;
+            }
+            return res.status(404).json({ ok: false, error: 'Target Macintosh is offline' });
+          }
+
+          const target = targetsToPush[0];
+          const macInfo = parseMacBinaryHeader(macBinaryBuffer) || {
+            fileName: parsedFileName,
+            type: '????',
+            creator: '????',
+            dataLength: macBinaryBuffer.length,
+            rsrcLength: 0,
+          };
+
+          // Acknowledge upload to the sending 68k Mac immediately so its TCPRcv does not time out,
+          // while streaming the MacBinary II payload down the receiving 68k Mac's channel!
+          res.json({
+            ok: true,
+            relayed: true,
+            message: `Relaying "${macInfo.fileName}" to ${target.name || target.ip}`,
+            transferId,
+          });
+
+          console.log(`[MacDrop] Relaying "${macInfo.fileName}" (${macBinaryBuffer.length} B) from ${clientName} -> ${target.name} (${target.id})`);
+
+          this.deliverToTarget(target, macBinaryBuffer, macInfo, transferId)
+            .then(() => {
+              console.log(`[MacDrop] Peer relay completed: "${macInfo.fileName}" delivered to ${target.name}`);
+              const storeData = this.store.load();
+              const transfers = Array.isArray(storeData.recentTransfers) ? [...storeData.recentTransfers] : [];
+              transfers.unshift({
+                id: transferId,
+                fileName: macInfo.fileName,
+                type: macInfo.type,
+                creator: macInfo.creator,
+                fileSize: (macInfo.dataLength || 0) + (macInfo.rsrcLength || 0),
+                totalSent: macBinaryBuffer.length,
+                targetName: `${clientName} → ${target.name || target.ip}`,
+                targetIp: target.ip || 'N/A',
+                timestamp: Date.now(),
+                status: 'DELIVERED',
+              });
+              if (transfers.length > MAX_TRANSFER_LOGS) transfers.pop();
+              this.store.save({ recentTransfers: transfers });
+            })
+            .catch((err) => {
+              console.error(`[MacDrop] Peer relay to ${target.name} failed:`, err.message);
+            })
+            .finally(() => {
+              setTimeout(() => {
+                if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
+                  this.activeTransfer = null;
+                }
+              }, 3000);
+            });
+        });
+
+        req.on('close', () => {
+          if (!req.complete) {
+            if (client) {
+              client.transferInProgress = false;
+              client.lastSeen = Date.now();
+            }
+            if (fd !== null) {
+              try { fs.closeSync(fd); } catch (_) {}
+              fd = null;
+            }
+            try { if (fs.existsSync(stagingPath)) fs.unlinkSync(stagingPath); } catch (_) {}
+            if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
+              this.activeTransfer = null;
+            }
+          }
+        });
+
+        req.on('error', () => {
+          if (client) {
+            client.transferInProgress = false;
+            client.lastSeen = Date.now();
+          }
+          if (fd !== null) {
+            try { fs.closeSync(fd); } catch (_) {}
+            fd = null;
+          }
+          try { if (fs.existsSync(stagingPath)) fs.unlinkSync(stagingPath); } catch (_) {}
+        });
+        return;
       }
 
       let totalReceived = 0;

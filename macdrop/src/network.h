@@ -25,6 +25,18 @@ extern unsigned long    gTransferSpeedBps;
 extern char             gCurrentTransferId[64];
 extern Rect             gBtnCancelTransferRect;
 
+#define MAX_MACDROP_PEERS 5
+
+typedef struct {
+    char id[48];
+    char name[48];
+    char machine[48];
+} MacDropPeer;
+
+extern MacDropPeer      gOnlinePeers[MAX_MACDROP_PEERS];
+extern short            gOnlinePeerCount;
+extern char             gActiveUploadTargetName[48];
+
 /* Cancels active inbound or outbound file transfer */
 void NetCancelActiveTransfer(void);
 
@@ -33,6 +45,12 @@ Boolean NetInit(void);
 
 /* Sends a file to MacCompanion server / modern Mac via HTTP POST MacBinary */
 Boolean NetSendFile(const FSSpec *spec);
+
+/* Sends a file to a specific target ("SERVER" or a peer 68k Mac ID) */
+Boolean NetSendFileToTarget(const FSSpec *spec, const char *targetId, const char *targetName);
+
+/* Queries /api/macdrop/peers from server to update gOnlinePeers immediately */
+Boolean NetRefreshPeers(void);
 
 /* Attempts UDP discovery of MacCompanion middleware */
 Boolean NetDiscoverServer(void);

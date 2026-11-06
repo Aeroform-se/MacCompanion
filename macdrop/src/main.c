@@ -45,7 +45,7 @@
 #define ITEM_NOTIFY     2
 
 #define MAIN_WIN_WIDTH     390
-#define MAIN_WIN_HEIGHT    230
+#define MAIN_WIN_HEIGHT    240
 #define COMPACT_WIN_HEIGHT 92
 
 Boolean          gDone                 = false;
@@ -84,7 +84,29 @@ static Boolean   gLastDrawnTransferActive = false;
 static Rect      gStatusRowRect;
 static Rect      gDownloadFolderRowRect;
 static Rect      gDropZoneRect;
+static Rect      gBtnRefreshPeersRect;
+#define MAX_TARGET_CARDS 4
+static Rect      gTargetCardRects[MAX_TARGET_CARDS];
+static char      gTargetCardIds[MAX_TARGET_CARDS][48];
+static char      gTargetCardNames[MAX_TARGET_CARDS][48];
+static short     gTargetCardCount = 0;
+static short     gDragHoverTargetIdx = -1;
 static MacDropSharedData *gSharedData = NULL;
+
+/* Crisp 16x16 1-bit icons for Target Cards (rowBytes = 2, 16 rows) */
+static const unsigned char kIconServer16x16[32] = {
+    0x7F, 0xFE, 0x80, 0x01, 0x9F, 0xF9, 0x90, 0x09,
+    0x90, 0x09, 0x90, 0x09, 0x9F, 0xF9, 0x80, 0x01,
+    0x7F, 0xFE, 0x03, 0xC0, 0x3F, 0xFC, 0x40, 0x02,
+    0x55, 0x52, 0x40, 0x02, 0x3F, 0xFC, 0x00, 0x00
+};
+
+static const unsigned char kIconMacPeer16x16[32] = {
+    0x1F, 0xF8, 0x20, 0x04, 0x27, 0xE4, 0x24, 0x24,
+    0x24, 0x24, 0x24, 0x24, 0x27, 0xE4, 0x20, 0x04,
+    0x20, 0x34, 0x20, 0x04, 0x1F, 0xF8, 0x10, 0x08,
+    0x1F, 0xF8, 0x3F, 0xFC, 0x00, 0x00, 0x00, 0x00
+};
 
 void UpdateProgressUI(void);
 static void DrawTransferProgressOnly(void);
@@ -310,8 +332,58 @@ void UpdateProgressUI(void)
 static DragTrackingHandlerUPP gDragTrackingUPP = NULL;
 static DragReceiveHandlerUPP  gDragReceiveUPP  = NULL;
 
+static short FindTargetCardAtPoint(Point localPt)
+{
+    short i;
+    for (i = 0; i < gTargetCardCount; i++) {
+        if (PtInRect(localPt, &gTargetCardRects[i])) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 static pascal OSErr MyDragTrackingHandler(DragTrackingMessage message, WindowRef theWindow, void *handlerRefCon, DragRef theDrag)
 {
+    Point localPt;
+    short newIdx = -1;
+    GrafPtr savePort;
+
+    (void)handlerRefCon;
+    (void)theDrag;
+
+    if (!gWindow || theWindow != gWindow || gTransferActive || gCompactReceiveMode) {
+        return noErr;
+    }
+
+    if (message == kDragTrackingInWindow) {
+        GetPort(&savePort);
+        SetPortWindowPort(gWindow);
+        GetMouse(&localPt);
+        newIdx = FindTargetCardAtPoint(localPt);
+        if (newIdx == -1 && PtInRect(localPt, &gDropZoneRect) && gTargetCardCount > 0) {
+            newIdx = 0; /* Default to Server card if hovering general drop box area */
+        }
+        if (newIdx != gDragHoverTargetIdx) {
+            if (gDragHoverTargetIdx >= 0 && gDragHoverTargetIdx < gTargetCardCount) {
+                InvertRoundRect(&gTargetCardRects[gDragHoverTargetIdx], 6, 6);
+            }
+            gDragHoverTargetIdx = newIdx;
+            if (gDragHoverTargetIdx >= 0 && gDragHoverTargetIdx < gTargetCardCount) {
+                InvertRoundRect(&gTargetCardRects[gDragHoverTargetIdx], 6, 6);
+            }
+        }
+        SetPort(savePort);
+    } else if (message == kDragTrackingLeaveWindow) {
+        if (gDragHoverTargetIdx >= 0 && gDragHoverTargetIdx < gTargetCardCount) {
+            GetPort(&savePort);
+            SetPortWindowPort(gWindow);
+            InvertRoundRect(&gTargetCardRects[gDragHoverTargetIdx], 6, 6);
+            SetPort(savePort);
+        }
+        gDragHoverTargetIdx = -1;
+    }
+
     return noErr;
 }
 
@@ -320,9 +392,32 @@ static pascal OSErr MyDragReceiveHandler(WindowRef theWindow, void *handlerRefCo
     unsigned short numItems = 0;
     unsigned short i;
     OSErr err;
+    Point localPt;
+    short targetIdx;
+    char targetId[48] = "SERVER";
+    char targetName[48] = "MacCompanion Server";
+    Boolean sentAny = false;
+
+    (void)theWindow;
+    (void)handlerRefCon;
 
     err = CountDragItems(theDrag, &numItems);
     if (err != noErr || numItems == 0) return dragNotAcceptedErr;
+
+    SetPortWindowPort(gWindow);
+    GetMouse(&localPt);
+    targetIdx = FindTargetCardAtPoint(localPt);
+    if (targetIdx < 0 && gDragHoverTargetIdx >= 0 && gDragHoverTargetIdx < gTargetCardCount) {
+        targetIdx = gDragHoverTargetIdx;
+    }
+    gDragHoverTargetIdx = -1;
+
+    if (targetIdx >= 0 && targetIdx < gTargetCardCount) {
+        strncpy(targetId, gTargetCardIds[targetIdx], sizeof(targetId) - 1);
+        targetId[sizeof(targetId) - 1] = '\0';
+        strncpy(targetName, gTargetCardNames[targetIdx], sizeof(targetName) - 1);
+        targetName[sizeof(targetName) - 1] = '\0';
+    }
 
     for (i = 1; i <= numItems; i++) {
         ItemReference item;
@@ -331,11 +426,15 @@ static pascal OSErr MyDragReceiveHandler(WindowRef theWindow, void *handlerRefCo
 
         if (GetDragItemReferenceNumber(theDrag, i, &item) == noErr) {
             if (GetFlavorData(theDrag, item, flavorTypeHFS, &hfs, &sz, 0) == noErr) {
-                NetSendFile(&hfs.fileSpec);
-                DrawWindow();
-                return noErr;
+                NetSendFileToTarget(&hfs.fileSpec, targetId, targetName);
+                sentAny = true;
             }
         }
+    }
+
+    if (sentAny) {
+        DrawWindow();
+        return noErr;
     }
     return dragNotAcceptedErr;
 }
@@ -824,7 +923,7 @@ static pascal short SendDlgHookYD(short item, DialogRef theDialog, void *yourDat
     return item;
 }
 
-static void SendFileWithPicker(void)
+static void SendFileWithPickerToTarget(const char *targetId, const char *targetName)
 {
     StandardFileReply reply;
     Point dlgPt = { -1, -1 };
@@ -852,11 +951,16 @@ static void SendFileWithPicker(void)
     DisposeDlgHookYDUPP(hookUPP);
 
     if (reply.sfGood) {
-        NetSendFile(&reply.sfFile);
+        NetSendFileToTarget(&reply.sfFile, targetId, targetName);
         if (gWindow && IsWindowVisible(gWindow)) {
             DrawWindow();
         }
     }
+}
+
+static void SendFileWithPicker(void)
+{
+    SendFileWithPickerToTarget("SERVER", "MacCompanion Server");
 }
 
 static void DrawAboutWindow(void)
@@ -1317,7 +1421,9 @@ static void DrawWindow(void)
         MoveTo(16, y);
         TextFace(bold);
         if (gTransferIsUpload) {
-            DrawCString("Sending to Server: ");
+            snprintf(buf, sizeof(buf), "Sending to %s: ",
+                     gActiveUploadTargetName[0] ? gActiveUploadTargetName : "Server");
+            DrawCString(buf);
         } else {
             DrawCString("Receiving: ");
         }
@@ -1348,12 +1454,15 @@ static void DrawWindow(void)
         DrawCString(buf);
         gLastDrawnTransferActive = true;
     } else {
-        /* Drop Box Area */
+        /* Drop Box Area with Server + Peer Macintosh Target Cards */
         Rect dropBox;
-        short boxH = 142;
-        short cx = (r.left + r.right) / 2;
-        const char *t1 = "Drag file here to send,";
-        const char *t2 = "or click to pick file.";
+        short boxH = 152;
+        short maxPeers = gOnlinePeerCount > (MAX_TARGET_CARDS - 1) ? (MAX_TARGET_CARDS - 1) : gOnlinePeerCount;
+        short totalCards = 1 + maxPeers;
+        short cardH = (totalCards >= 4) ? 26 : ((totalCards == 3) ? 34 : 36);
+        short cardGap = (totalCards >= 4) ? 4 : 6;
+        short cardTop;
+        short i;
 
         SetRect(&dropBox, 16, y, r.right - 16, y + boxH);
         gDropZoneRect = dropBox;
@@ -1365,15 +1474,95 @@ static void DrawWindow(void)
         FrameRoundRect(&dropBox, 6, 6);
         PenNormal();
 
-        /* Draw 32x32 MacDrop logo in center of box */
-        BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, cx - 16, dropBox.top + 28, srcCopy);
-
+        /* Header inside Drop Box + [ Refresh ] pill button */
+        TextFont(kFontIDGeneva);
+        TextSize(9);
         TextFace(bold);
-        MoveTo(cx - MeasureCString(t1) / 2, dropBox.top + 80);
-        DrawCString(t1);
+        MoveTo(dropBox.left + 10, dropBox.top + 15);
+        DrawCString("Drop file on target or click to send:");
         TextFace(normal);
-        MoveTo(cx - MeasureCString(t2) / 2, dropBox.top + 98);
-        DrawCString(t2);
+
+        SetRect(&gBtnRefreshPeersRect, dropBox.right - 64, dropBox.top + 4, dropBox.right - 8, dropBox.top + 19);
+        EraseRoundRect(&gBtnRefreshPeersRect, 6, 6);
+        FrameRoundRect(&gBtnRefreshPeersRect, 6, 6);
+        MoveTo((gBtnRefreshPeersRect.left + gBtnRefreshPeersRect.right) / 2 - MeasureCString("Refresh") / 2,
+               gBtnRefreshPeersRect.top + 11);
+        DrawCString("Refresh");
+
+        /* Populate Target Cards: Card 0 = Server, Cards 1..N = Online 68k Peers */
+        gTargetCardCount = totalCards;
+        strcpy(gTargetCardIds[0], "SERVER");
+        strcpy(gTargetCardNames[0], "MacCompanion Server");
+        for (i = 0; i < maxPeers; i++) {
+            strncpy(gTargetCardIds[1 + i], gOnlinePeers[i].id, sizeof(gTargetCardIds[0]) - 1);
+            gTargetCardIds[1 + i][sizeof(gTargetCardIds[0]) - 1] = '\0';
+            strncpy(gTargetCardNames[1 + i], gOnlinePeers[i].name, sizeof(gTargetCardNames[0]) - 1);
+            gTargetCardNames[1 + i][sizeof(gTargetCardNames[0]) - 1] = '\0';
+        }
+
+        cardTop = dropBox.top + 24;
+        for (i = 0; i < totalCards; i++) {
+            Rect cardR, badgeR;
+            Boolean isServer = (i == 0);
+            const char *titleStr = gTargetCardNames[i];
+            const char *subStr   = isServer ? "Modern Browser / Web UI" : gOnlinePeers[i - 1].machine;
+            short iconY;
+
+            SetRect(&cardR, dropBox.left + 10, cardTop, dropBox.right - 10, cardTop + cardH);
+            gTargetCardRects[i] = cardR;
+
+            EraseRoundRect(&cardR, 6, 6);
+            FrameRoundRect(&cardR, 6, 6);
+            /* Subtle 1px bottom-right shadow */
+            MoveTo(cardR.left + 3, cardR.bottom);
+            LineTo(cardR.right, cardR.bottom);
+            LineTo(cardR.right, cardR.top + 3);
+
+            iconY = cardR.top + (cardH - 16) / 2;
+            BlitBitmap(isServer ? kIconServer16x16 : kIconMacPeer16x16, 2, 16, 16, cardR.left + 8, iconY, srcCopy);
+
+            if (cardH >= 34) {
+                TextFace(bold);
+                MoveTo(cardR.left + 30, cardR.top + 14);
+                DrawCString(titleStr);
+                TextFace(normal);
+                MoveTo(cardR.left + 30, cardR.top + 27);
+                DrawCString(subStr);
+            } else {
+                TextFace(bold);
+                MoveTo(cardR.left + 30, cardR.top + 17);
+                DrawCString(titleStr);
+                TextFace(normal);
+                DrawCString("  (");
+                DrawCString(subStr);
+                DrawCString(")");
+            }
+
+            /* Right-side "Send..." pill indicator */
+            SetRect(&badgeR, cardR.right - 52, cardR.top + (cardH - 16) / 2, cardR.right - 8, cardR.top + (cardH - 16) / 2 + 16);
+            FrameRoundRect(&badgeR, 6, 6);
+            MoveTo((badgeR.left + badgeR.right) / 2 - MeasureCString("Send...") / 2, badgeR.top + 11);
+            DrawCString("Send...");
+
+            if (gDragHoverTargetIdx == i) {
+                InvertRoundRect(&cardR, 6, 6);
+            }
+
+            cardTop += cardH + cardGap;
+        }
+
+        /* When only the Server is online (0 peer Macs), show a helpful hint in the remaining space */
+        if (totalCards == 1) {
+            short hintY = cardTop + 10;
+            BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, dropBox.left + 16, hintY, srcCopy);
+            TextFace(bold);
+            MoveTo(dropBox.left + 58, hintY + 13);
+            DrawCString("No other 68k Macs currently online");
+            TextFace(normal);
+            MoveTo(dropBox.left + 58, hintY + 27);
+            DrawCString("Run MacDrop on another Mac to drop Mac-to-Mac.");
+        }
+
         gLastDrawnTransferActive = false;
     }
 }
@@ -1389,6 +1578,9 @@ static void ProcessSharedCommand(void)
         case CMD_OPEN_WINDOW:
             gAutoOpenedForReceive = false;
             SetCompactReceiveWindowMode(false);
+            if (gChannelConnected || gServerIP != 0) {
+                NetRefreshPeers();
+            }
             EnsureFrontProcess();
             if (gWindow) {
                 ShowWindow(gWindow);
@@ -1514,6 +1706,9 @@ static void HandleMenuChoice(long choice)
                             SetCompactReceiveWindowMode(false);
                             SwitchToFinder();
                         } else {
+                            if (gChannelConnected || gServerIP != 0) {
+                                NetRefreshPeers();
+                            }
                             SetCompactReceiveWindowMode(false);
                             ShowWindow(gWindow);
                             SelectWindow(gWindow);
@@ -1632,9 +1827,34 @@ static void HandleMouseDown(EventRecord *evt)
                     return;
                 }
 
-                /* Ready View: Drop Box Click -> Open Send File Picker */
+                /* Ready View: Drop Box Click -> Refresh button, specific Target Card, or fallback Server */
                 if (!gTransferActive && !gCompactReceiveMode && PtInRect(localPt, &gDropZoneRect)) {
-                    SendFileWithPicker();
+                    short clickedIdx;
+                    if (PtInRect(localPt, &gBtnRefreshPeersRect)) {
+                        unsigned long finalTicks;
+                        InvertRoundRect(&gBtnRefreshPeersRect, 6, 6);
+                        Delay(5, &finalTicks);
+                        InvertRoundRect(&gBtnRefreshPeersRect, 6, 6);
+                        NetRefreshPeers();
+                        DrawWindow();
+                        return;
+                    }
+                    clickedIdx = FindTargetCardAtPoint(localPt);
+                    if (clickedIdx >= 0 && clickedIdx < gTargetCardCount) {
+                        unsigned long finalTicks;
+                        char chosenId[48];
+                        char chosenName[48];
+                        strncpy(chosenId, gTargetCardIds[clickedIdx], sizeof(chosenId) - 1);
+                        chosenId[sizeof(chosenId) - 1] = '\0';
+                        strncpy(chosenName, gTargetCardNames[clickedIdx], sizeof(chosenName) - 1);
+                        chosenName[sizeof(chosenName) - 1] = '\0';
+                        InvertRoundRect(&gTargetCardRects[clickedIdx], 6, 6);
+                        Delay(5, &finalTicks);
+                        InvertRoundRect(&gTargetCardRects[clickedIdx], 6, 6);
+                        SendFileWithPickerToTarget(chosenId, chosenName);
+                        return;
+                    }
+                    SendFileWithPickerToTarget("SERVER", "MacCompanion Server");
                     return;
                 }
 
@@ -1723,7 +1943,7 @@ int main(void)
     ConnectSharedData();
 
     /* Create status window (centered horizontally) - initially hidden */
-    SetRect(&r, 40, 45, 430, 275);
+    SetRect(&r, 40, 45, 430, 285);
     gWindow = NewWindow(NULL, &r, "\pMacDrop", false, documentProc, (WindowPtr)-1, true, 0);
 
     UpdateMenuStates();

@@ -32,6 +32,11 @@ char            gCurrentTransferId[64] = "";
 Rect            gBtnCancelTransferRect;
 static Boolean  gCancelUpload        = false;
 
+MacDropPeer     gOnlinePeers[MAX_MACDROP_PEERS];
+short           gOnlinePeerCount     = 0;
+char            gActiveUploadTargetName[48] = "MacCompanion Server";
+static Boolean  gInitialPeersFetched = false;
+
 #define LISTEN_RCV_BUF_SIZE 65536
 #define CHAN_RCV_BUF_SIZE   65536
 #define FALLBACK_RCV_SIZE   16384
@@ -388,7 +393,127 @@ void NetCancelActiveTransfer(void)
     }
 }
 
+static void ParsePeersHeaderString(const char *rawHdr)
+{
+    MacDropPeer newPeers[MAX_MACDROP_PEERS];
+    short newCount = 0;
+    char buf[512];
+    char *tok;
+    extern void UpdateProgressUI(void);
+
+    memset(newPeers, 0, sizeof(newPeers));
+
+    if (rawHdr && rawHdr[0] != '\0' && strncmp(rawHdr, "NONE", 4) != 0) {
+        strncpy(buf, rawHdr, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+
+        tok = buf;
+        while (tok && *tok && newCount < MAX_MACDROP_PEERS) {
+            char *nextSemi = strchr(tok, ';');
+            char *p1, *p2;
+            if (nextSemi) {
+                *nextSemi = '\0';
+            }
+            p1 = strchr(tok, '|');
+            if (p1) {
+                *p1 = '\0';
+                p2 = strchr(p1 + 1, '|');
+                if (p2) {
+                    *p2 = '\0';
+                }
+                if (tok[0] != '\0' && strcmp(tok, gClientID) != 0 && strcmp(tok, "SERVER") != 0) {
+                    strncpy(newPeers[newCount].id, tok, sizeof(newPeers[0].id) - 1);
+                    strncpy(newPeers[newCount].name, p1 + 1, sizeof(newPeers[0].name) - 1);
+                    if (p2 && *(p2 + 1)) {
+                        strncpy(newPeers[newCount].machine, p2 + 1, sizeof(newPeers[0].machine) - 1);
+                    } else {
+                        strcpy(newPeers[newCount].machine, "Macintosh 68k");
+                    }
+                    newCount++;
+                }
+            }
+            tok = nextSemi ? (nextSemi + 1) : NULL;
+        }
+    }
+
+    if (newCount != gOnlinePeerCount || memcmp(newPeers, gOnlinePeers, sizeof(newPeers)) != 0) {
+        gOnlinePeerCount = newCount;
+        memcpy(gOnlinePeers, newPeers, sizeof(gOnlinePeers));
+        UpdateProgressUI();
+    }
+}
+
+Boolean NetRefreshPeers(void)
+{
+    char path[256];
+    char body[1024];
+    char encId[96];
+    char ourIpStr[32];
+    long n;
+    MacDropPeer newPeers[MAX_MACDROP_PEERS];
+    short newCount = 0;
+    char *line;
+
+    if (!NetInit() || gServerIP == 0) return false;
+
+    FormatIP(gOurIP, ourIpStr);
+    URLEncode(gClientID, encId, sizeof(encId));
+    snprintf(path, sizeof(path), "/api/macdrop/peers?id=%s&ip=%s", encId, ourIpStr);
+
+    n = NetHttpGet(path, body, sizeof(body));
+    if (n <= 0) return false;
+
+    memset(newPeers, 0, sizeof(newPeers));
+    line = body;
+    while (line && *line && newCount < MAX_MACDROP_PEERS) {
+        char *nextLine = strchr(line, '\n');
+        if (nextLine) {
+            *nextLine = '\0';
+        }
+        /* Strip trailing \r */
+        {
+            short l = (short)strlen(line);
+            if (l > 0 && line[l - 1] == '\r') line[l - 1] = '\0';
+        }
+        if (strncmp(line, "PEER|", 5) == 0) {
+            char *pId = line + 5;
+            char *pName = strchr(pId, '|');
+            if (pName) {
+                char *pMach;
+                *pName = '\0';
+                pName++;
+                pMach = strchr(pName, '|');
+                if (pMach) {
+                    *pMach = '\0';
+                    pMach++;
+                }
+                if (pId[0] != '\0' && strcmp(pId, gClientID) != 0) {
+                    strncpy(newPeers[newCount].id, pId, sizeof(newPeers[0].id) - 1);
+                    strncpy(newPeers[newCount].name, pName, sizeof(newPeers[0].name) - 1);
+                    if (pMach && pMach[0]) {
+                        strncpy(newPeers[newCount].machine, pMach, sizeof(newPeers[0].machine) - 1);
+                    } else {
+                        strcpy(newPeers[newCount].machine, "Macintosh 68k");
+                    }
+                    newCount++;
+                }
+            }
+        }
+        line = nextLine ? (nextLine + 1) : NULL;
+    }
+
+    gOnlinePeerCount = newCount;
+    memcpy(gOnlinePeers, newPeers, sizeof(gOnlinePeers));
+    gInitialPeersFetched = true;
+    return true;
+}
+
 Boolean NetSendFile(const FSSpec *spec)
+{
+    return NetSendFileToTarget(spec, "SERVER", "MacCompanion Server");
+}
+
+Boolean NetSendFileToTarget(const FSSpec *spec, const char *targetId, const char *targetName)
 {
     MacBinaryTx tx;
     TCPiopb pb;
@@ -400,6 +525,9 @@ Boolean NetSendFile(const FSSpec *spec)
     char ourIpStr[32];
     char encId[128];
     char encName[128];
+    char encTarget[128];
+    const char *cleanTarget = (targetId && targetId[0]) ? targetId : "SERVER";
+    const char *cleanTargetName = (targetName && targetName[0]) ? targetName : "MacCompanion Server";
     wdsEntry wds[2];
     OSErr err;
     unsigned char *chunkBufA = NULL;
@@ -513,9 +641,10 @@ Boolean NetSendFile(const FSSpec *spec)
     FormatIP(gOurIP, ourIpStr);
     URLEncode(gClientID, encId, sizeof(encId));
     URLEncode(gClientName, encName, sizeof(encName));
+    URLEncode(cleanTarget, encTarget, sizeof(encTarget));
 
     sprintf(req,
-        "POST /api/macdrop/inbound/upload?id=%s&name=%s&ip=%s HTTP/1.0\r\n"
+        "POST /api/macdrop/inbound/upload?id=%s&name=%s&ip=%s&target_id=%s HTTP/1.0\r\n"
         "Host: %s:%u\r\n"
         "User-Agent: MacDrop-68k\r\n"
         "Content-Type: application/x-macbinary\r\n"
@@ -523,10 +652,11 @@ Boolean NetSendFile(const FSSpec *spec)
         "X-Client-Id: %s\r\n"
         "X-Client-Name: %s\r\n"
         "X-Client-IP: %s\r\n"
+        "X-Target-Id: %s\r\n"
         "X-Filename: %s\r\n"
         "Connection: close\r\n\r\n",
-        encId, encName, ourIpStr, hostStr, gServerPort, totalSize,
-        gClientID, gClientName, ourIpStr, tx.fileName);
+        encId, encName, ourIpStr, encTarget, hostStr, gServerPort, totalSize,
+        gClientID, gClientName, ourIpStr, cleanTarget, tx.fileName);
 
     wds[0].length = (unsigned short)strlen(req);
     wds[0].ptr    = (Ptr)req;
@@ -556,6 +686,8 @@ Boolean NetSendFile(const FSSpec *spec)
     gTransferSpeedBps    = 0;
     strncpy(gActiveTransferName, tx.fileName, sizeof(gActiveTransferName) - 1);
     gActiveTransferName[sizeof(gActiveTransferName) - 1] = '\0';
+    strncpy(gActiveUploadTargetName, cleanTargetName, sizeof(gActiveUploadTargetName) - 1);
+    gActiveUploadTargetName[sizeof(gActiveUploadTargetName) - 1] = '\0';
 
     OnTransferStarted(true);
 
@@ -1094,6 +1226,10 @@ static void PollChannelConnecting(void)
             gHttpHeaderLen    = 0;
 
             StartChannelRcv();
+
+            if (!gInitialPeersFetched) {
+                NetRefreshPeers();
+            }
         } else {
             /* Connection failed, retry later */
             NetStopChannel();
@@ -1209,8 +1345,23 @@ void NetIdle(void)
                         /* Check if this is an idle keepalive poll response (204 No Content or X-MacDrop-Status: POLL) */
                         if (strstr(gHttpHeaderBuf, " 204 ") != NULL ||
                             strstr(gHttpHeaderBuf, "X-MacDrop-Status: POLL") != NULL) {
+                            char *pPeers = strstr(gHttpHeaderBuf, "X-MacDrop-Peers: ");
+                            if (pPeers) {
+                                char peersVal[512];
+                                char *endP = strstr(pPeers + 17, "\r\n");
+                                if (!endP) endP = strstr(pPeers + 17, "\n");
+                                if (endP) {
+                                    short pLen = (short)(endP - (pPeers + 17));
+                                    if (pLen > (short)(sizeof(peersVal) - 1)) pLen = sizeof(peersVal) - 1;
+                                    memcpy(peersVal, pPeers + 17, pLen);
+                                    peersVal[pLen] = '\0';
+                                    ParsePeersHeaderString(peersVal);
+                                }
+                            }
                             NetStopChannel();
                             gLastChannelAttemptTick = 0; /* reconnect immediately for next poll */
+                            NetConnectChannel();
+                            PollChannelConnecting();
                             return;
                         }
 

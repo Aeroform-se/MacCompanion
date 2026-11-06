@@ -1043,7 +1043,7 @@
           <button type="button" id="macdrop-refresh-btn" class="macdrop-refresh-btn action-btn-sm pixel-pill-clip" onclick="triggerMacDropManualScan(event)" title="Scan & refresh connected Macs">
             <img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh
           </button>
-          <input type="file" id="macdrop-file-input" style="display:none;" multiple onchange="handleFileSelect(event)" />
+          <input type="file" id="macdrop-file-input" style="display:none;" multiple onclick="event.stopPropagation()" onchange="handleFileSelect(event)" />
           
           <div class="macdrop-devices-wrap" id="macdrop-devices-wrap">
             <!-- Dynamically populated connected devices (AirDrop style) -->
@@ -2306,7 +2306,10 @@
     function triggerMacDropTarget(targetId) {
       activeUploadTargetId = targetId;
       const fileInput = document.getElementById('macdrop-file-input');
-      if (fileInput) fileInput.click();
+      if (fileInput) {
+        fileInput.setAttribute('data-target-id', targetId || '');
+        fileInput.click();
+      }
     }
 
     function renderMacDrop(macdrop) {
@@ -2757,10 +2760,18 @@
 
         // Click dropzone background
         dropzone.addEventListener('click', (e) => {
-          if (!e.target.closest('.macdrop-device-item')) {
-            activeUploadTargetId = null;
-            const input = document.getElementById('macdrop-file-input');
-            if (input) input.click();
+          if (e.target.id === 'macdrop-file-input' ||
+              e.target.closest('.macdrop-device-item') ||
+              e.target.closest('#macdrop-refresh-btn') ||
+              e.target.closest('.macdrop-inbound-box') ||
+              e.target.closest('.macdrop-progress-box')) {
+            return;
+          }
+          activeUploadTargetId = null;
+          const input = document.getElementById('macdrop-file-input');
+          if (input) {
+            input.setAttribute('data-target-id', '');
+            input.click();
           }
         });
       }
@@ -2768,10 +2779,12 @@
 
     function handleFileSelect(event) {
       const files = event.target.files;
+      const chosenTarget = activeUploadTargetId || event.target.getAttribute('data-target-id') || null;
       if (files && files.length > 0) {
-        uploadFiles(Array.from(files), activeUploadTargetId);
+        uploadFiles(Array.from(files), chosenTarget);
       }
       activeUploadTargetId = null;
+      event.target.setAttribute('data-target-id', '');
       event.target.value = '';
     }
 
