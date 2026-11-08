@@ -161,7 +161,7 @@ short         gTorusZoomSmooth = 0;
 short         gTorusTwistPhase = 0;
 FaceQuad2D    gVisibleFaces[TORUS_FACES];
 
-unsigned char  gFsBits[FS_BITMAP_BYTES];
+unsigned char  gFsBits[FS_BITMAP_BYTES] __attribute__((aligned(4))); /* 68000: word/long access needs even addr */
 static unsigned short gByteDoubleLut[256];
 
 #else /* VIZ_BUILD_020: reference shared tables & state from 68000 TU */

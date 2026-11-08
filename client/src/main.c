@@ -251,8 +251,8 @@ static NowPlayingState gNowPlaying;
 static Boolean         gTimelineFrozen       = false;
 static unsigned long   gTrackLockUntilTicks  = 0;
 static char            gLoadedArtTrackId[64] = "";
-static unsigned char   gCurrentArtworkBits[5200];
-static unsigned char   gVisualizerBits[5200];
+static unsigned char   gCurrentArtworkBits[5200] __attribute__((aligned(4))); /* 68000: bitmap baseAddr must be even */
+static unsigned char   gVisualizerBits[5200] __attribute__((aligned(4)));     /* 68000: move.l clears & CopyBits need even addr */
 static Boolean         gVisualizerOpen       = false;
 static Boolean         gVizFullscreen        = false;
 static Boolean         gVizHover             = false;
@@ -263,7 +263,7 @@ static unsigned short  gAudioSampleRateHz    = 22255;
 #define FOR_YOU_COUNT  4
 static Boolean         gForYouViewOpen       = true;
 static ForYouItem      gForYouItems[FOR_YOU_COUNT];
-static unsigned char   gForYouIconBits[FOR_YOU_COUNT][282];
+static unsigned char   gForYouIconBits[FOR_YOU_COUNT][282] __attribute__((aligned(4)));
 
 /* Timing for periodic state & tick-anchored timeline updates */
 static unsigned long   gLastPollTicks        = 0;
@@ -283,7 +283,7 @@ static Boolean         gAudioConfigFetched   = false;
 #define FS_MINI_CACHE_H        72
 #define FS_MINI_CACHE_ROWBYTES 26  /* 208 / 8 */
 static GrafPort        gFsMiniCachePort;
-static unsigned char   gFsMiniCacheBits[FS_MINI_CACHE_ROWBYTES * FS_MINI_CACHE_H];
+static unsigned char   gFsMiniCacheBits[FS_MINI_CACHE_ROWBYTES * FS_MINI_CACHE_H] __attribute__((aligned(4)));
 static Boolean         gFsMiniCacheReady     = false;
 static Boolean         gFsMiniCacheValid     = false;
 static NowPlayingState gFsMiniCachedNP;
