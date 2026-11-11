@@ -1,17 +1,17 @@
 version: "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"
 options: "905ae9c2ebedd433f9475f04a5dca1875e1599197aaf4568b45f5c4beab838bb"
-build_start_time: [1794422599, 806232000]
-build_end_time: [1794422603, 333413000]
+build_start_time: [1794435148, 841827000]
+build_end_time: [1794435152, 671126000]
 inputs:
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/AppDelegate.swift": [1794412459, 372546840]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/AppMain.swift": [1794411273, 58731371]
-  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/DeviceDiscoveryManager.swift": [1794420854, 728838053]
+  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/DeviceDiscoveryManager.swift": [1794434417, 737003465]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/InboundChannelServer.swift": [1794422520, 920672643]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/MacBinaryEncoder.swift": [1794411570, 104463585]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/P2PTransferEngine.swift": [1794412466, 613819037]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Models/DiscoveredMac.swift": [1794411183, 302331721]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Models/TransferState.swift": [1794411190, 824982876]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/DeviceManagerPopover.swift": [1794411335, 310302377]
-  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/DropZoneView.swift": [1794422541, 827030706]
-  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/InvisibleNetPanel.swift": [1794422555, 894122864]
-  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/MenuBarIconManager.swift": [1794422595, 826452886]
+  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/DropZoneView.swift": [1794434470, 612950026]
+  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/InvisibleNetPanel.swift": [1794435142, 68092551]
+  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/MenuBarIconManager.swift": [1794430354, 411769426]

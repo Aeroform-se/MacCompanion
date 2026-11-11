@@ -56,6 +56,7 @@ if [ -f "$SCRIPT_DIR/Resources/AppIcon.png" ]; then
 
     if command -v iconutil >/dev/null 2>&1; then
         iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns" || true
+        cp "$RESOURCES_DIR/AppIcon.icns" "$SCRIPT_DIR/Resources/AppIcon.icns" || true
     fi
     rm -rf "$ICONSET_DIR"
 fi

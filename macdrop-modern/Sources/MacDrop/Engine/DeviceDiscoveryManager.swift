@@ -12,6 +12,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
     @Published public var devices: [DiscoveredMac] = []
     @Published public var selectedDevice: DiscoveredMac?
     @Published public var isScanning: Bool = false
+    @Published public var isManualRefreshing: Bool = false
     @Published public var serverAddress: String = "127.0.0.1"
 
     private var scanTimer: Timer?
@@ -21,19 +22,25 @@ public final class DeviceDiscoveryManager: ObservableObject {
     public init() {
         loadPersistedDevices()
         startPeriodicScan()
-        scanAll()
+        scanAll(isManual: false)
     }
 
     public func startPeriodicScan() {
         scanTimer?.invalidate()
         scanTimer = Timer.scheduledTimer(withTimeInterval: 12.0, repeats: true) { [weak self] _ in
-            self?.scanAll()
+            self?.scanAll(isManual: false)
         }
     }
 
     /// Kicks off all discovery channels in parallel.
-    public func scanAll() {
-        DispatchQueue.main.async { self.isScanning = true }
+    /// `isManual`: true only when user explicitly clicks "Refresh" in the menu.
+    public func scanAll(isManual: Bool = false) {
+        DispatchQueue.main.async {
+            self.isScanning = true
+            if isManual {
+                self.isManualRefreshing = true
+            }
+        }
 
         let group = DispatchGroup()
 
@@ -47,6 +54,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
         group.notify(queue: .main) {
             self.isScanning = false
+            self.isManualRefreshing = false
             self.persistDevices()
             if self.selectedDevice == nil, let first = self.devices.first(where: { $0.isOnline }) {
                 self.selectedDevice = first
