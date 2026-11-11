@@ -81,9 +81,13 @@ typedef struct {
     short           dataRefNum;
     short           rsrcRefNum;
     OSErr           lastError;
+
+    ParamBlockRec   writePB;
+    Boolean         writePending;
 } MacBinaryRx;
 
 void MacBinaryRx_Init(MacBinaryRx *rx);
+OSErr MacBinaryRx_WaitWrite(MacBinaryRx *rx);
 OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long count);
 void MacBinaryRx_Finish(MacBinaryRx *rx);
 void MacBinaryRx_FlushDestVolume(void);

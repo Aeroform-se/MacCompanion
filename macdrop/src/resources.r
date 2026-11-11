@@ -434,8 +434,8 @@ resource 'SIZE' (-1) {
     notDisplayManagerAware,
     reserved,
     reserved,
-    1536 * 1024,
-    512 * 1024
+    512 * 1024,
+    384 * 1024
 };
 
 /* Menu Bar Specification */

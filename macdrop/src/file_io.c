@@ -7,6 +7,7 @@
 #include <Gestalt.h>
 #include <OSUtils.h>
 #include <StandardFile.h>
+#include <Devices.h>
 
 short           gDestVRefNum       = 0;
 long            gDestDirID         = 0;
@@ -341,9 +342,29 @@ void MacBinaryRx_Init(MacBinaryRx *rx)
     rx->state = RX_HEADER;
 }
 
+OSErr MacBinaryRx_WaitWrite(MacBinaryRx *rx)
+{
+    if (!rx || !rx->writePending) return noErr;
+
+    while (rx->writePB.ioParam.ioResult > 0) {
+        /* Busy wait until disk driver finishes asynchronous write */
+    }
+
+    rx->writePending = false;
+    if (rx->writePB.ioParam.ioResult != noErr) {
+        rx->lastError = rx->writePB.ioParam.ioResult;
+        rx->state = RX_ERROR;
+        return rx->lastError;
+    }
+    return noErr;
+}
+
 void MacBinaryRx_Abort(MacBinaryRx *rx)
 {
     if (!rx) return;
+
+    MacBinaryRx_WaitWrite(rx);
+
     if (rx->dataRefNum != 0) {
         FSClose(rx->dataRefNum);
         rx->dataRefNum = 0;
@@ -480,20 +501,31 @@ OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long c
             }
 
             if (writeAmount > 0) {
-                long actWrite = writeAmount;
-                err = FSWrite(rx->dataRefNum, &actWrite, &buf[offset]);
-                if (err != noErr) {
+                err = MacBinaryRx_WaitWrite(rx);
+                if (err != noErr) return err;
+
+                memset(&rx->writePB, 0, sizeof(rx->writePB));
+                rx->writePB.ioParam.ioRefNum   = rx->dataRefNum;
+                rx->writePB.ioParam.ioBuffer   = (Ptr)&buf[offset];
+                rx->writePB.ioParam.ioReqCount = writeAmount;
+                rx->writePB.ioParam.ioPosMode  = fsAtMark;
+                err = PBWriteAsync((ParmBlkPtr)&rx->writePB);
+                if (err == noErr || rx->writePB.ioParam.ioResult > 0) {
+                    rx->writePending = true;
+                    rx->dataBytesWritten += writeAmount;
+                } else {
                     rx->lastError = err;
                     rx->state = RX_ERROR;
                     return err;
                 }
-                rx->dataBytesWritten += actWrite;
             }
 
             rx->dataBytesPadded += take;
             offset += take;
 
             if (rx->dataBytesPadded >= rx->dataBytesTarget) {
+                MacBinaryRx_WaitWrite(rx);
+                SetEOF(rx->dataRefNum, rx->dataLen);
                 FSClose(rx->dataRefNum);
                 rx->dataRefNum = 0;
 
@@ -519,20 +551,31 @@ OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long c
             }
 
             if (writeAmount > 0) {
-                long actWrite = writeAmount;
-                err = FSWrite(rx->rsrcRefNum, &actWrite, &buf[offset]);
-                if (err != noErr) {
+                err = MacBinaryRx_WaitWrite(rx);
+                if (err != noErr) return err;
+
+                memset(&rx->writePB, 0, sizeof(rx->writePB));
+                rx->writePB.ioParam.ioRefNum   = rx->rsrcRefNum;
+                rx->writePB.ioParam.ioBuffer   = (Ptr)&buf[offset];
+                rx->writePB.ioParam.ioReqCount = writeAmount;
+                rx->writePB.ioParam.ioPosMode  = fsAtMark;
+                err = PBWriteAsync((ParmBlkPtr)&rx->writePB);
+                if (err == noErr || rx->writePB.ioParam.ioResult > 0) {
+                    rx->writePending = true;
+                    rx->rsrcBytesWritten += writeAmount;
+                } else {
                     rx->lastError = err;
                     rx->state = RX_ERROR;
                     return err;
                 }
-                rx->rsrcBytesWritten += actWrite;
             }
 
             rx->rsrcBytesPadded += take;
             offset += take;
 
             if (rx->rsrcBytesPadded >= rx->rsrcBytesTarget) {
+                MacBinaryRx_WaitWrite(rx);
+                SetEOF(rx->rsrcRefNum, rx->rsrcLen);
                 FSClose(rx->rsrcRefNum);
                 rx->rsrcRefNum = 0;
                 rx->state = RX_COMPLETE;
@@ -551,11 +594,15 @@ void MacBinaryRx_Finish(MacBinaryRx *rx)
 
     if (!rx) return;
 
+    MacBinaryRx_WaitWrite(rx);
+
     if (rx->dataRefNum != 0) {
+        SetEOF(rx->dataRefNum, rx->dataLen);
         FSClose(rx->dataRefNum);
         rx->dataRefNum = 0;
     }
     if (rx->rsrcRefNum != 0) {
+        SetEOF(rx->rsrcRefNum, rx->rsrcLen);
         FSClose(rx->rsrcRefNum);
         rx->rsrcRefNum = 0;
     }

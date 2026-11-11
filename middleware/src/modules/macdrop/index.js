@@ -249,6 +249,7 @@ class MacDropModule {
         port: dev.port || (idx >= 0 ? knownDevices[idx].port : DEFAULT_MACDROP_PORT),
         version: dev.version || (idx >= 0 ? knownDevices[idx].version : ''),
         lastSeen: Date.now(),
+        lastMeasuredSpeedBps: dev.lastMeasuredSpeedBps || (idx >= 0 ? knownDevices[idx].lastMeasuredSpeedBps : null),
         source: dev.source || (idx >= 0 ? knownDevices[idx].source : 'reverse_channel'),
       };
 
@@ -573,6 +574,52 @@ class MacDropModule {
   }
 
   /**
+   * Reads the Linux kernel TCP send queue (/proc/net/tcp) for a given socket
+   * to determine the exact number of unacknowledged bytes still in transit across the wire.
+   * This allows 100% full unthrottled hardware transfer speed while tracking real-time client delivery.
+   */
+  _getSocketTxQueue(socket) {
+    if (!socket || !socket.localPort || !socket.remotePort) return 0;
+    try {
+      const localPortHex = socket.localPort.toString(16).toUpperCase().padStart(4, '0');
+      const remotePortHex = socket.remotePort.toString(16).toUpperCase().padStart(4, '0');
+
+      if (fs.existsSync('/proc/net/tcp')) {
+        const content = fs.readFileSync('/proc/net/tcp', 'utf8');
+        const lines = content.split('\n');
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const parts = line.split(/\s+/);
+          if (parts.length >= 5) {
+            if (parts[1].endsWith(':' + localPortHex) && parts[2].endsWith(':' + remotePortHex)) {
+              const [txHex] = parts[4].split(':');
+              return parseInt(txHex, 16) || 0;
+            }
+          }
+        }
+      }
+
+      if (fs.existsSync('/proc/net/tcp6')) {
+        const content = fs.readFileSync('/proc/net/tcp6', 'utf8');
+        const lines = content.split('\n');
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const parts = line.split(/\s+/);
+          if (parts.length >= 5) {
+            if (parts[1].endsWith(':' + localPortHex) && parts[2].endsWith(':' + remotePortHex)) {
+              const [txHex] = parts[4].split(':');
+              return parseInt(txHex, 16) || 0;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return (socket.writableLength || 0);
+  }
+
+  /**
    * Resolves the true LAN IPv4 of a connecting 68k Macintosh client,
    * preferring the client's self-reported LAN IP when sitting behind Docker NAT.
    */
@@ -835,13 +882,25 @@ class MacDropModule {
       req.socket.setKeepAlive(true, 3000);
 
       // If client was previously registered, close previous pending channel cleanly
+      let prevMeasuredSpeed = null;
       if (this.activeClients.has(clientId)) {
         const oldClient = this.activeClients.get(clientId);
+        if (oldClient.lastMeasuredSpeedBps) {
+          prevMeasuredSpeed = oldClient.lastMeasuredSpeedBps;
+        }
         try {
           if (oldClient.res && !oldClient.res.writableEnded) {
             oldClient.res.end();
           }
         } catch (_) {}
+      } else {
+        const data = this.store.load();
+        if (Array.isArray(data.knownDevices)) {
+          const kd = data.knownDevices.find(d => d.ip === remoteIp);
+          if (kd && kd.lastMeasuredSpeedBps) {
+            prevMeasuredSpeed = kd.lastMeasuredSpeedBps;
+          }
+        }
       }
 
       if (req.socket) {
@@ -864,10 +923,11 @@ class MacDropModule {
         writingDisk: false,
         probing: false,
         awaitingReconnect: false,
+        lastMeasuredSpeedBps: prevMeasuredSpeed,
       };
 
       this.activeClients.set(clientId, clientObj);
-      console.log(`[MacDrop] Reverse Channel connected: ${name} (${machine}) from ${remoteIp} [ID: ${clientId}]`);
+      console.log(`[MacDrop] Reverse Channel connected: ${name} (${machine}) from ${remoteIp} [ID: ${clientId}]${prevMeasuredSpeed ? ` (Learned speed: ${(prevMeasuredSpeed / 1024).toFixed(1)} kB/s)` : ''}`);
 
       // Persist to known devices
       this.recordKnownDevice({
@@ -984,27 +1044,12 @@ class MacDropModule {
     this.router.get('/progress', (req, res) => {
       if (this.activeTransfer) {
         const now = Date.now();
-        if (this.activeTransfer.status === 'STREAMING' && this.activeTransfer.drainStartedAt) {
-          const drainElapsedSec = Math.max(0, (now - this.activeTransfer.drainStartedAt) / 1000);
-          const drainSpeed = this.activeTransfer.drainSpeedBps || 650000;
-          const totalBytes = this.activeTransfer.totalBytes || 1;
-          const estBytes = Math.min(
-            totalBytes,
-            Math.round((this.activeTransfer.drainStartBytes || 0) + drainElapsedSec * drainSpeed)
-          );
-          this.activeTransfer.bytesSent = estBytes;
-          this.activeTransfer.percent = Math.min(96, Math.max(this.activeTransfer.percent || 0, Math.round((estBytes / totalBytes) * 96)));
-          if (estBytes >= totalBytes) {
-            this.activeTransfer.status = 'WRITING_DISK';
-            this.activeTransfer.writingDiskStartedAt = now;
-            this.activeTransfer.percent = Math.max(this.activeTransfer.percent, 97);
-            this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
-          }
-        } else if (this.activeTransfer.status === 'WRITING_DISK') {
+        if (this.activeTransfer.status === 'WRITING_DISK') {
           const elapsedMs = now - (this.activeTransfer.writingDiskStartedAt || now);
-          const startPct = this.activeTransfer.writingDiskStartPct || 97;
-          const steppedPct = startPct + Math.floor(elapsedMs / 350);
+          const startPct = this.activeTransfer.writingDiskStartPct || 96;
+          const steppedPct = startPct + Math.floor(elapsedMs / 400);
           this.activeTransfer.percent = Math.min(99, Math.max(this.activeTransfer.percent || startPct, steppedPct));
+          this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
         }
       }
       res.json({
@@ -1896,6 +1941,27 @@ class MacDropModule {
 
         const transferId = 'xfer_' + Date.now().toString(36);
         const primaryTarget = targetsToPush[0];
+        const targetMachine = (primaryTarget.machine || primaryTarget.name || '').toLowerCase();
+        const primaryIp = (primaryTarget.ip || '').toLowerCase();
+
+        let initialSpeedBps = primaryTarget.lastMeasuredSpeedBps || 360000;
+        if (!primaryTarget.lastMeasuredSpeedBps) {
+          if (
+            primaryIp.startsWith('192.168.97.') ||
+            primaryIp.startsWith('192.168.215.') ||
+            primaryIp.startsWith('10.0.2.') ||
+            primaryIp === '127.0.0.1' ||
+            targetMachine.includes('basilisk')
+          ) {
+            initialSpeedBps = 950000; // 950 kB/s confirmed in Basilisk II
+          } else if (targetMachine.includes('040') || targetMachine.includes('quadra') || targetMachine.includes('centris')) {
+            initialSpeedBps = 750000;
+          } else if (targetMachine.includes('se/30') || targetMachine.includes('iici') || targetMachine.includes('030')) {
+            initialSpeedBps = 360000;
+          } else if (targetMachine.includes('classic') || targetMachine.includes('plus') || targetMachine.includes('portable') || targetMachine.includes('se')) {
+            initialSpeedBps = 180000;
+          }
+        }
 
         this.activeTransfer = {
           transferId,
@@ -1904,8 +1970,10 @@ class MacDropModule {
           totalBytes: macBinaryBuffer.length,
           bytesSent: 0,
           percent: 0,
-          speedBps: 0,
-          speedFormatted: '0 kB/s',
+          speedBps: initialSpeedBps,
+          speedFormatted: initialSpeedBps >= 1048576
+            ? `${(initialSpeedBps / 1048576).toFixed(2)} MB/s`
+            : `${(initialSpeedBps / 1024).toFixed(1)} kB/s`,
           status: 'STREAMING',
           startedAt: Date.now(),
           lastProgressAt: Date.now(),
@@ -2120,128 +2188,156 @@ class MacDropModule {
             'X-Transfer-Id': transferId,
           });
 
-          const CHUNK_SIZE = 32768; // 32 KB chunk streaming for smooth progress & low socket buffer inflation
+          const CHUNK_SIZE = 32768; // 32 KB chunk streaming
           let offset = 0;
-          let firstDrainOffset = 0;
-          let firstDrainAt = 0;
-          let trueSpeedBps = 0;
-          let lastSpeedSampleTime = Date.now();
-          let lastSpeedSampleBytes = 0;
+          let transferAborted = false;
+          let abortReason = null;
 
+          const onStreamError = (err) => {
+            transferAborted = true;
+            abortReason = new Error(`Network error during transfer: ${err.message || err}`);
+          };
+
+          const onStreamClose = () => {
+            transferAborted = true;
+            abortReason = new Error('Macintosh client closed connection during file streaming');
+          };
+
+          clientRes.on('error', onStreamError);
+          clientRes.on('close', onStreamClose);
+
+          const streamStartTime = Date.now();
+
+          // Stream chunks at 100% MAXIMUM HARDWARE SPEED (zero artificial delay/throttling)
+          // Uses TCP backpressure and kernel tx_queue tracking for exact, real-time UI progress.
           while (offset < buffer.length) {
+            if (transferAborted) {
+              throw abortReason;
+            }
             if (clientRes.destroyed || (clientRes.socket && clientRes.socket.destroyed)) {
               throw new Error('Connection aborted by Macintosh client during file transfer');
             }
 
             const chunkEnd = Math.min(offset + CHUNK_SIZE, buffer.length);
             const chunk = buffer.subarray(offset, chunkEnd);
-            const ok = clientRes.write(chunk);
             offset = chunkEnd;
 
-            if (!ok && firstDrainOffset === 0) {
-              firstDrainOffset = offset;
-              firstDrainAt = Date.now();
-              lastSpeedSampleTime = firstDrainAt;
-              lastSpeedSampleBytes = offset;
-            }
-
+            const ok = clientRes.write(chunk);
             target.lastSeen = Date.now();
             const now = Date.now();
 
+            // Track genuine wire-delivered bytes via kernel TCP send queue
+            const txQueue = this._getSocketTxQueue(clientRes.socket);
+            const delivered = Math.max(0, offset - txQueue);
+
             if (this.activeTransfer) {
-              // Account for Docker/OrbStack kernel TCP send buffer (~4MB) so the Web UI
-              // reports true bytes received by the 68k Mac rather than jumping ahead and
-              // waiting 7s at "Finalizing on Macintosh..." while the kernel drains.
-              const kernelBuffered = firstDrainOffset > 0 ? firstDrainOffset : 0;
-              const estimatedMacBytes = firstDrainOffset > 0
-                ? Math.max(Math.min(offset, CHUNK_SIZE), offset - kernelBuffered)
-                : offset;
-
-              this.activeTransfer.bytesSent = estimatedMacBytes;
-              this.activeTransfer.percent = Math.min(95, Math.round((estimatedMacBytes / buffer.length) * 95));
-              this.activeTransfer.lastProgressAt = now;
-
-              const speedElapsed = (now - lastSpeedSampleTime) / 1000;
-              if (speedElapsed >= 0.35) {
-                const bytesDelta = offset - lastSpeedSampleBytes;
-                const currentBps = Math.round(bytesDelta / speedElapsed);
-                if (firstDrainAt > 0 && (now - firstDrainAt) >= 250) {
-                  trueSpeedBps = Math.round((offset - firstDrainOffset) / ((now - firstDrainAt) / 1000));
-                }
-                const displayBps = trueSpeedBps > 0 ? trueSpeedBps : currentBps;
-                this.activeTransfer.speedBps = displayBps;
-                if (displayBps >= 1048576) {
-                  this.activeTransfer.speedFormatted = `${(displayBps / 1048576).toFixed(2)} MB/s`;
-                } else {
-                  this.activeTransfer.speedFormatted = `${(displayBps / 1024).toFixed(1)} kB/s`;
-                }
-                lastSpeedSampleTime = now;
-                lastSpeedSampleBytes = offset;
+              if (delivered > (this.activeTransfer.bytesSent || 0)) {
+                this.activeTransfer.bytesSent = delivered;
               }
+              const pct = Math.min(95, Math.round((this.activeTransfer.bytesSent / buffer.length) * 95));
+              if (pct > (this.activeTransfer.percent || 0)) {
+                this.activeTransfer.percent = pct;
+              }
+
+              const elapsedSec = Math.max(0.1, (now - streamStartTime) / 1000);
+              if (elapsedSec >= 0.5 && this.activeTransfer.bytesSent > 65536) {
+                const liveBps = Math.round(this.activeTransfer.bytesSent / elapsedSec);
+                this.activeTransfer.speedBps = liveBps;
+                if (liveBps >= 1048576) {
+                  this.activeTransfer.speedFormatted = `${(liveBps / 1048576).toFixed(2)} MB/s`;
+                } else {
+                  this.activeTransfer.speedFormatted = `${(liveBps / 1024).toFixed(1)} kB/s`;
+                }
+              }
+              this.activeTransfer.lastProgressAt = now;
             }
 
             if (!ok) {
+              // Socket buffer saturated: wait for native TCP drain
               await new Promise((resolveDrain, rejectDrain) => {
-                let drainTimer = setTimeout(() => {
+                let stallTimer = setTimeout(() => {
                   cleanup();
                   rejectDrain(new Error('Transfer stalled: Macintosh client stopped accepting data for 30s'));
                 }, 30000);
-
-                const onDrain = () => {
-                  cleanup();
-                  resolveDrain();
-                };
-                const onError = (e) => {
-                  cleanup();
-                  rejectDrain(new Error(`Network error during transfer: ${e.message || e}`));
-                };
-                const onClose = () => {
-                  cleanup();
-                  rejectDrain(new Error('Macintosh client closed connection during file streaming'));
-                };
+                const onDrain = () => { cleanup(); resolveDrain(); };
+                const onErr = (e) => { cleanup(); rejectDrain(e); };
+                const onClose = () => { cleanup(); rejectDrain(new Error('Macintosh client closed connection during file transfer')); };
                 const cleanup = () => {
-                  clearTimeout(drainTimer);
+                  clearTimeout(stallTimer);
                   clientRes.removeListener('drain', onDrain);
-                  clientRes.removeListener('error', onError);
+                  clientRes.removeListener('error', onErr);
                   clientRes.removeListener('close', onClose);
                 };
-
                 clientRes.once('drain', onDrain);
-                clientRes.once('error', onError);
+                clientRes.once('error', onErr);
                 clientRes.once('close', onClose);
               });
             }
           }
 
-          // Mark disk-write phase before clientRes.end() so socket close events
-          // are recognized as normal end-of-stream rather than mid-stream abort.
+          // All chunks have been queued into the socket.
+          // Now wait for the remaining kernel socket buffer to actually drain across the wire to the Mac!
+          while (!transferAborted && !clientRes.destroyed) {
+            const txQueue = this._getSocketTxQueue(clientRes.socket);
+            const now = Date.now();
+            const delivered = Math.max(0, buffer.length - txQueue);
+
+            if (this.activeTransfer) {
+              if (delivered > (this.activeTransfer.bytesSent || 0)) {
+                this.activeTransfer.bytesSent = delivered;
+              }
+              const pct = Math.min(95, Math.round((this.activeTransfer.bytesSent / buffer.length) * 95));
+              if (pct > (this.activeTransfer.percent || 0)) {
+                this.activeTransfer.percent = pct;
+              }
+              const elapsedSec = Math.max(0.1, (now - streamStartTime) / 1000);
+              if (elapsedSec >= 0.5 && this.activeTransfer.bytesSent > 65536) {
+                const liveBps = Math.round(this.activeTransfer.bytesSent / elapsedSec);
+                this.activeTransfer.speedBps = liveBps;
+                if (liveBps >= 1048576) {
+                  this.activeTransfer.speedFormatted = `${(liveBps / 1048576).toFixed(2)} MB/s`;
+                } else {
+                  this.activeTransfer.speedFormatted = `${(liveBps / 1024).toFixed(1)} kB/s`;
+                }
+              }
+              this.activeTransfer.lastProgressAt = now;
+            }
+
+            if (txQueue <= 0) break;
+            await new Promise(r => setTimeout(r, 40));
+          }
+
+          // Wait for any remaining buffer in socket to drain to wire
+          if (clientRes.socket && clientRes.socket.writableLength > 0) {
+            await new Promise((resolveDrain) => {
+              let timer = setTimeout(resolveDrain, 5000);
+              clientRes.socket.once('drain', () => {
+                clearTimeout(timer);
+                resolveDrain();
+              });
+            });
+          }
+
+          clientRes.removeListener('error', onStreamError);
+          clientRes.removeListener('close', onStreamClose);
+
+          if (transferAborted) {
+            throw abortReason;
+          }
+
+          // Mark disk-write phase ONLY now that ALL bytes have genuinely been transmitted over the wire
           target.transferInProgress = false;
           target.writingDisk = true;
           target.lastSeen = Date.now();
 
           if (this.activeTransfer) {
-            const kernelBuffered = firstDrainOffset > 0 ? Math.min(firstDrainOffset, buffer.length) : 0;
-            const estimatedMacBytes = Math.max(0, buffer.length - kernelBuffered);
-            if (kernelBuffered > 65536 && estimatedMacBytes < buffer.length) {
-              // Kernel TCP buffer still holds ~kernelBuffered bytes draining to the 68k Mac.
-              // Keep status = 'STREAMING' in the Web UI and let /api/macdrop/progress advance smoothly
-              // at the measured wire speed until all bytes reach the Mac!
-              this.activeTransfer.bytesSent = estimatedMacBytes;
-              this.activeTransfer.percent = Math.min(95, Math.round((estimatedMacBytes / buffer.length) * 95));
-              this.activeTransfer.status = 'STREAMING';
-              this.activeTransfer.drainStartedAt = Date.now();
-              this.activeTransfer.drainStartBytes = estimatedMacBytes;
-              this.activeTransfer.drainSpeedBps = trueSpeedBps > 0 ? trueSpeedBps : 750000;
-              this.activeTransfer.lastProgressAt = Date.now();
-            } else {
-              this.activeTransfer.bytesSent = buffer.length;
-              this.activeTransfer.percent = 97;
-              this.activeTransfer.writingDiskStartPct = 97;
-              this.activeTransfer.status = 'WRITING_DISK';
-              this.activeTransfer.writingDiskStartedAt = Date.now();
-              this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
-              this.activeTransfer.lastProgressAt = Date.now();
-            }
+            this.activeTransfer.writingDisk = true;
+            this.activeTransfer.status = 'WRITING_DISK';
+            this.activeTransfer.writingDiskStartedAt = Date.now();
+            this.activeTransfer.writingDiskStartPct = Math.max(96, this.activeTransfer.percent || 96);
+            this.activeTransfer.percent = this.activeTransfer.writingDiskStartPct;
+            this.activeTransfer.speedFormatted = 'Finalizing on Macintosh...';
+            this.activeTransfer.lastProgressAt = Date.now();
           }
 
           // Complete HTTP stream and send TCP FIN immediately (Connection: close)
@@ -2253,6 +2349,22 @@ class MacDropModule {
           // Base 45s + 1s per 3MB (e.g. 200MB gets 45 + 66 = 111s)
           const diskWriteTimeoutMs = Math.max(45000, 45000 + Math.ceil(buffer.length / (3 * 1024 * 1024)) * 1000);
           const ack = await this.waitForTransferAck(transferId, diskWriteTimeoutMs, target.id);
+
+          // Measure the true transfer duration and update target's learned speed
+          const totalSec = Math.max(0.5, (Date.now() - streamStartTime) / 1000);
+          const measuredSpeedBps = Math.round(buffer.length / totalSec);
+          if (measuredSpeedBps > 50000 && measuredSpeedBps < 20000000) {
+            target.lastMeasuredSpeedBps = measuredSpeedBps;
+            this.recordKnownDevice({
+              id: target.id,
+              name: target.name,
+              machine: target.machine,
+              version: target.version,
+              ip: target.ip,
+              lastMeasuredSpeedBps: measuredSpeedBps,
+            });
+            console.log(`[MacDrop] Transfer complete: ${buffer.length} bytes in ${totalSec.toFixed(2)}s (${(measuredSpeedBps / 1024).toFixed(1)} kB/s) to ${target.name || target.ip}`);
+          }
 
           target.writingDisk = false;
           target.lastSeen = Date.now();
@@ -2286,34 +2398,38 @@ class MacDropModule {
 
         socket.on('connect', async () => {
           try {
-            const CHUNK_SIZE = 65536;
+            const CHUNK_SIZE = 32768;
             let offset = 0;
-            let lastSpeedSampleTime = Date.now();
-            let lastSpeedSampleBytes = 0;
+            const directStartTime = Date.now();
 
             while (offset < buffer.length) {
               if (socket.destroyed) break;
               const chunkEnd = Math.min(offset + CHUNK_SIZE, buffer.length);
               const chunk = buffer.subarray(offset, chunkEnd);
-              const ok = socket.write(chunk);
               offset = chunkEnd;
 
+              const ok = socket.write(chunk);
               const now = Date.now();
+              const txQueue = this._getSocketTxQueue(socket);
+              const delivered = Math.max(0, offset - txQueue);
+
               if (this.activeTransfer) {
-                this.activeTransfer.bytesSent = offset;
-                this.activeTransfer.percent = Math.min(88, Math.round((offset / buffer.length) * 88));
+                if (delivered > (this.activeTransfer.bytesSent || 0)) {
+                  this.activeTransfer.bytesSent = delivered;
+                }
+                const pct = Math.min(88, Math.round((this.activeTransfer.bytesSent / buffer.length) * 88));
+                if (pct > (this.activeTransfer.percent || 0)) {
+                  this.activeTransfer.percent = pct;
+                }
                 this.activeTransfer.lastProgressAt = now;
 
-                const speedElapsed = (now - lastSpeedSampleTime) / 1000;
-                if (speedElapsed >= 0.4) {
-                  const bytesDelta = offset - lastSpeedSampleBytes;
-                  const currentBps = Math.round(bytesDelta / speedElapsed);
-                  this.activeTransfer.speedBps = currentBps;
-                  this.activeTransfer.speedFormatted = currentBps >= 1048576
-                    ? `${(currentBps / 1048576).toFixed(2)} MB/s`
-                    : `${(currentBps / 1024).toFixed(1)} kB/s`;
-                  lastSpeedSampleTime = now;
-                  lastSpeedSampleBytes = offset;
+                const elapsedSec = Math.max(0.1, (now - directStartTime) / 1000);
+                if (elapsedSec >= 0.5 && this.activeTransfer.bytesSent > 65536) {
+                  const liveBps = Math.round(this.activeTransfer.bytesSent / elapsedSec);
+                  this.activeTransfer.speedBps = liveBps;
+                  this.activeTransfer.speedFormatted = liveBps >= 1048576
+                    ? `${(liveBps / 1048576).toFixed(2)} MB/s`
+                    : `${(liveBps / 1024).toFixed(1)} kB/s`;
                 }
               }
 
