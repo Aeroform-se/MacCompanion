@@ -53,6 +53,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        InvisibleNetPanelController.shared.stopProximityMonitoring()
         if let monitor = globalMonitor {
             NSEvent.removeMonitor(monitor)
         }
