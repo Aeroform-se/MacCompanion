@@ -22,6 +22,9 @@ public struct DropZoneView: View {
 
     @State private var manualIP = ""
     @State private var manualName = ""
+    @State private var manualStatusMessage: String?
+    @State private var isManualStatusError: Bool = false
+    @State private var isProbingManual: Bool = false
     @State private var editingDeviceName = ""
 
     public init(hoveredDeviceId: Binding<String?>) {
@@ -79,6 +82,21 @@ public struct DropZoneView: View {
                     discovery.scanAll(isManual: true)
                 }
             )
+
+            // Server Indicator (when connected to external MacCompanion node server)
+            if let srv = discovery.activeServer {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 6, height: 6)
+                    Text("MacCompanion: \(srv):6800")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+            }
 
             // Add Client Manually Row
             PopoverMenuItemRow(
@@ -170,14 +188,28 @@ public struct DropZoneView: View {
     // MARK: - Manual Entry Drawer
 
     private var manualDrawer: some View {
-        VStack(spacing: 6) {
-            TextField("IP Address (e.g. 192.168.1.68)", text: $manualIP)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Add Vintage Mac or Server IP")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.primary)
+
+            TextField("IP Address (e.g. 192.168.1.10)", text: $manualIP)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 11, design: .monospaced))
+                .disabled(isProbingManual)
 
             TextField("Optional Name (e.g. SE/30)", text: $manualName)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 11))
+                .disabled(isProbingManual)
+
+            if let msg = manualStatusMessage {
+                Text(msg)
+                    .font(.system(size: 9.5))
+                    .foregroundColor(isManualStatusError ? .red : .green)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 2)
+            }
 
             HStack {
                 Button("Cancel") {
@@ -185,23 +217,27 @@ public struct DropZoneView: View {
                         panelController.showingAddManual = false
                         manualIP = ""
                         manualName = ""
+                        manualStatusMessage = nil
+                        isProbingManual = false
                     }
                 }
                 .font(.system(size: 10))
                 .buttonStyle(.plain)
+                .disabled(isProbingManual)
 
                 Spacer()
 
-                Button("Add & Connect") {
-                    discovery.addManualDevice(ip: manualIP, name: manualName)
-                    withAnimation(.easeInOut(duration: 0.22)) {
-                        panelController.showingAddManual = false
-                        manualIP = ""
-                        manualName = ""
-                    }
+                if isProbingManual {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 14, height: 14)
+                }
+
+                Button("Save & Connect") {
+                    submitManualDevice()
                 }
                 .font(.system(size: 10, weight: .semibold))
-                .disabled(manualIP.isEmpty)
+                .disabled(manualIP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isProbingManual)
             }
         }
         .padding(8)
@@ -209,6 +245,37 @@ public struct DropZoneView: View {
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.primary.opacity(0.04))
         )
+    }
+
+    private func submitManualDevice() {
+        let cleanIp = manualIP.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanIp.isEmpty else { return }
+
+        isProbingManual = true
+        manualStatusMessage = "Connecting to \(cleanIp)..."
+        isManualStatusError = false
+
+        discovery.addManualDevice(ip: cleanIp, name: manualName) { result in
+            DispatchQueue.main.async {
+                isProbingManual = false
+                switch result {
+                case .success(let msg):
+                    manualStatusMessage = "✓ \(msg)"
+                    isManualStatusError = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            panelController.showingAddManual = false
+                            manualIP = ""
+                            manualName = ""
+                            manualStatusMessage = nil
+                        }
+                    }
+                case .failure(let err):
+                    manualStatusMessage = err
+                    isManualStatusError = true
+                }
+            }
+        }
     }
 
     // MARK: - Settings Drawer (Custom Device Name)
@@ -273,12 +340,18 @@ public struct DropZoneView: View {
     private var deviceDropSlots: some View {
         VStack(spacing: 8) {
             let onlineDevices = discovery.devices.filter { $0.isOnline }
+            let manualOfflineDevices = discovery.devices.filter { !$0.isOnline && $0.source == "manual" }
 
-            if onlineDevices.isEmpty {
+            if onlineDevices.isEmpty && manualOfflineDevices.isEmpty {
                 emptyState
             } else {
                 ForEach(onlineDevices) { dev in
                     deviceSlotRow(dev)
+                }
+                if !manualOfflineDevices.isEmpty {
+                    ForEach(manualOfflineDevices) { dev in
+                        deviceSlotRow(dev)
+                    }
                 }
             }
         }
@@ -301,10 +374,11 @@ public struct DropZoneView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 22, height: 28)
+                        .opacity(dev.isOnline ? 1.0 : 0.45)
                 } else {
                     Image(systemName: "desktopcomputer")
                         .font(.system(size: 16))
-                        .foregroundColor(isHovered ? .white : .primary)
+                        .foregroundColor(isHovered ? .white : (dev.isOnline ? .primary : .secondary))
                 }
             }
 
@@ -312,10 +386,10 @@ public struct DropZoneView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(dev.name)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.primary)
+                    .foregroundColor(dev.isOnline ? .primary : .secondary)
                     .lineLimit(1)
 
-                Text(dev.subtitle)
+                Text(dev.isOnline ? dev.subtitle : "\(dev.subtitle) · Offline")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
@@ -323,7 +397,7 @@ public struct DropZoneView: View {
 
             Spacer()
 
-            // Online Badge / Drop indicator
+            // Online Badge / Drop indicator / Delete manual button
             if isHovered {
                 Text("Drop to Send")
                     .font(.system(size: 10, weight: .bold))
@@ -334,9 +408,23 @@ public struct DropZoneView: View {
                         Capsule().fill(Color.accentColor.opacity(0.15))
                     )
             } else {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 8, height: 8)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(dev.isOnline ? Color.green : Color.secondary.opacity(0.4))
+                        .frame(width: 8, height: 8)
+
+                    if dev.source == "manual" {
+                        Button(action: {
+                            discovery.removeDevice(id: dev.id)
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary.opacity(0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Remove manual target")
+                    }
+                }
             }
         }
         .padding(8)
@@ -364,9 +452,15 @@ public struct DropZoneView: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
 
-            Text("Launch MacDrop on your 68k Mac to connect")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary.opacity(0.8))
+            if let srv = discovery.activeServer {
+                Text("MacCompanion: \(srv):6800")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.8))
+            } else {
+                Text("Launch MacDrop on your 68k Mac to connect")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.8))
+            }
         }
         .padding(.vertical, 16)
         .frame(maxWidth: .infinity)

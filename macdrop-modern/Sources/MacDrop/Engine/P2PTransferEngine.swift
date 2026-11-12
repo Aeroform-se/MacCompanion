@@ -13,6 +13,7 @@ public final class P2PTransferEngine: ObservableObject {
     @Published public var lastDeliveredFile: String?
 
     private var activeConnection: NWConnection?
+    private var activeUploadTask: URLSessionUploadTask?
     private var isCancelled: Bool = false
     private let queue = DispatchQueue(label: "se.aeroform.macdrop.p2p", qos: .userInitiated)
     private var clearLastDeliveredTimer: Timer?
@@ -70,6 +71,8 @@ public final class P2PTransferEngine: ObservableObject {
             self.isCancelled = true
             self.activeConnection?.cancel()
             self.activeConnection = nil
+            self.activeUploadTask?.cancel()
+            self.activeUploadTask = nil
 
             DispatchQueue.main.async {
                 if var xfer = self.currentTransfer {
@@ -185,6 +188,14 @@ public final class P2PTransferEngine: ObservableObject {
                     return
                 }
 
+                // Check if target is reachable via an active MacCompanion relay server (e.g. 192.168.1.40)
+                let relayServer = target.relayServerIP ?? DeviceDiscoveryManager.shared.serverForClient(target.id, ip: target.ip)
+                if let serverIP = relayServer {
+                    DebugLogger.log("[P2P] Streaming via MacCompanion relay server at \(serverIP) for \(target.name)...")
+                    self.streamViaServer(serverIP: serverIP, target: target, fileName: fileName, data: encoded.fullMacBinaryData)
+                    return
+                }
+
                 // 2. Setup TCP connection to vintage Mac port 6803
                 DebugLogger.log("[P2P] Setting up direct TCP connection to \(target.ip):\(target.port)...")
                 let host = NWEndpoint.Host(target.ip)
@@ -242,6 +253,11 @@ public final class P2PTransferEngine: ObservableObject {
                 )
 
             case .failed(let err):
+                if let fallbackServer = DeviceDiscoveryManager.shared.serverForClient(target.id, ip: target.ip) {
+                    DebugLogger.log("[P2P] Direct TCP failed (\(err)), falling back to relay server at \(fallbackServer)...")
+                    self.streamViaServer(serverIP: fallbackServer, target: target, fileName: target.name, data: data)
+                    return
+                }
                 self.handleFailure(message: "Connection failed: \(err.localizedDescription)")
 
             case .cancelled:
@@ -396,5 +412,86 @@ public final class P2PTransferEngine: ObservableObject {
         }
         self.activeConnection?.cancel()
         self.activeConnection = nil
+        self.activeUploadTask?.cancel()
+        self.activeUploadTask = nil
+    }
+
+    // MARK: - MacCompanion Server Relay Streaming
+
+    private func streamViaServer(serverIP: String, target: DiscoveredMac, fileName: String, data: Data) {
+        let startTime = Date()
+        DispatchQueue.main.async {
+            if var xfer = self.currentTransfer {
+                xfer.status = .streaming
+                xfer.fileSize = Int64(data.count)
+                xfer.bytesSent = 0
+                self.currentTransfer = xfer
+            }
+        }
+
+        guard let encodedName = fileName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "http://\(serverIP):6800/api/macdrop/upload?target_id=\(target.id)&filename=\(encodedName)") else {
+            self.handleFailure(message: "Invalid upload URL for server \(serverIP)")
+            return
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/x-macbinary", forHTTPHeaderField: "Content-Type")
+        req.setValue(fileName, forHTTPHeaderField: "X-Filename")
+        req.setValue(target.id, forHTTPHeaderField: "X-Target-Id")
+        req.timeoutInterval = 300
+
+        let delegate = ServerUploadProgressDelegate { [weak self] bytesSent, totalExpected in
+            DispatchQueue.main.async {
+                guard let self = self, var xfer = self.currentTransfer, xfer.status == .streaming else { return }
+                xfer.bytesSent = bytesSent
+                let elapsed = max(0.1, Date().timeIntervalSince(startTime))
+                xfer.speedBps = Double(bytesSent) / elapsed
+                self.currentTransfer = xfer
+            }
+        }
+
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let task = session.uploadTask(with: req, from: data) { [weak self] resData, response, error in
+            session.finishTasksAndInvalidate()
+            guard let self = self else { return }
+
+            if let error = error {
+                DebugLogger.log("[P2P] Server upload error: \(error)")
+                self.handleFailure(message: "Transfer failed: \(error.localizedDescription)")
+                return
+            }
+
+            guard let httpRes = response as? HTTPURLResponse, (200...299).contains(httpRes.statusCode) else {
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 500
+                let errMsg: String
+                if let d = resData, let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any], let msg = json["error"] as? String {
+                    errMsg = msg
+                } else {
+                    errMsg = "Server returned HTTP \(status)"
+                }
+                DebugLogger.log("[P2P] Server upload rejected: \(errMsg)")
+                self.handleFailure(message: errMsg)
+                return
+            }
+
+            DebugLogger.log("[P2P] Server relay completed successfully!")
+            self.markCompleted(totalBytes: Int64(data.count), startTime: startTime)
+        }
+        self.activeUploadTask = task
+        task.resume()
+    }
+}
+
+final class ServerUploadProgressDelegate: NSObject, URLSessionTaskDelegate {
+    private let onProgress: (Int64, Int64) -> Void
+
+    init(onProgress: @escaping (Int64, Int64) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        onProgress(totalBytesSent, totalBytesExpectedToSend)
     }
 }

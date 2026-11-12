@@ -11,6 +11,7 @@ public struct DiscoveredMac: Identifiable, Hashable, Codable {
     public var isOnline: Bool
     public var lastSeen: Date
     public var source: String // "direct_tcp", "server_api", "udp_broadcast", "manual"
+    public var relayServerIP: String?
 
     public init(
         id: String? = nil,
@@ -21,7 +22,8 @@ public struct DiscoveredMac: Identifiable, Hashable, Codable {
         version: String = "0.2.16",
         isOnline: Bool = true,
         lastSeen: Date = Date(),
-        source: String = "direct_tcp"
+        source: String = "direct_tcp",
+        relayServerIP: String? = nil
     ) {
         self.id = id ?? "mac_\(ip.replacingOccurrences(of: ".", with: "_"))_\(port)"
         self.name = name.isEmpty ? "Macintosh (\(ip))" : name
@@ -32,6 +34,7 @@ public struct DiscoveredMac: Identifiable, Hashable, Codable {
         self.isOnline = isOnline
         self.lastSeen = lastSeen
         self.source = source
+        self.relayServerIP = relayServerIP
     }
 
     /// Clean model subtitle for UI display.
