@@ -202,6 +202,14 @@ public final class InboundChannelServer {
 
         guard clientFd >= 0 else { return }
 
+        // Optimize TCP socket performance & safety
+        var nosigpipe: Int32 = 1
+        setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+        var rcvBuf: Int32 = 262144 // 256 KB buffer for high wire speed
+        setsockopt(clientFd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, socklen_t(MemoryLayout<Int32>.size))
+        var noDelay: Int32 = 1
+        setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+
         var ipBuf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
         inet_ntop(AF_INET, &clientAddr.sin_addr, &ipBuf, socklen_t(INET_ADDRSTRLEN))
         let remoteIP = String(cString: ipBuf)
@@ -509,6 +517,10 @@ public final class InboundChannelServer {
         let expectedTotal = contentLength.map { Int64($0) } ?? 0
         let startTime = Date()
 
+        if let expected = contentLength, expected > 0 {
+            bodyData.reserveCapacity(expected)
+        }
+
         // 1. Notify user that a file is being received
         Self.postNotification(
             title: "MacDrop",
@@ -539,7 +551,7 @@ public final class InboundChannelServer {
             bodyData.append(contentsOf: chunk.prefix(n))
 
             let now = Date()
-            if now.timeIntervalSince(lastUpdate) >= 0.08 || bodyData.count >= targetLength {
+            if now.timeIntervalSince(lastUpdate) >= 0.20 || bodyData.count >= targetLength {
                 lastUpdate = now
                 let currentBytes = Int64(bodyData.count)
                 let elapsed = max(0.05, now.timeIntervalSince(startTime))
@@ -569,9 +581,8 @@ public final class InboundChannelServer {
 
         print("[ChannelServer] Successfully received upload from \(clientName): \(savedName) (\(bodyData.count) bytes)")
 
-        // Notify user and update UI
+        // Notify user and update UI (notification sound is played by UNNotification, avoiding duplicate sounds)
         DispatchQueue.main.async {
-            NSSound(named: "Glass")?.play()
             P2PTransferEngine.shared.currentTransfer?.status = .completed
             P2PTransferEngine.shared.currentTransfer?.bytesSent = Int64(bodyData.count)
             P2PTransferEngine.shared.currentTransfer?.completedAt = Date()
@@ -587,7 +598,7 @@ public final class InboundChannelServer {
         )
     }
 
-    /// Helper to post system notifications with MacDrop icon attachment
+    /// Helper to post system notifications using standard macOS banner layout
     public static func postNotification(title: String, subtitle: String, body: String, sound: UNNotificationSound? = nil) {
         let content = UNMutableNotificationContent()
         content.title = title
@@ -595,14 +606,6 @@ public final class InboundChannelServer {
         content.body = body
         if let sound = sound {
             content.sound = sound
-        }
-
-        // Attach icon if available in bundle
-        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png") ??
-                         Bundle.main.url(forResource: "HappyMac", withExtension: "png") {
-            if let attachment = try? UNNotificationAttachment(identifier: UUID().uuidString, url: iconURL, options: nil) {
-                content.attachments = [attachment]
-            }
         }
 
         let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)

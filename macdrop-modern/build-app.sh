@@ -36,12 +36,31 @@ if [ -d "$SCRIPT_DIR/Resources" ]; then
     cp -R "$SCRIPT_DIR/Resources/"* "$RESOURCES_DIR/" || true
 fi
 
-# Generate AppIcon.icns from Resources/AppIcon.png if available
+# Generate AppIcon.icns and Assets.car from Resources/AppIcon.png if available
 if [ -f "$SCRIPT_DIR/Resources/AppIcon.png" ]; then
-    echo "==> Generating AppIcon.icns..."
+    echo "==> Generating AppIcon.icns & Assets.car..."
     ICONSET_DIR="/tmp/$APP_NAME.iconset"
-    rm -rf "$ICONSET_DIR"
-    mkdir -p "$ICONSET_DIR"
+    ASSET_DIR="/tmp/$APP_NAME.xcassets"
+    rm -rf "$ICONSET_DIR" "$ASSET_DIR"
+    mkdir -p "$ICONSET_DIR" "$ASSET_DIR/AppIcon.appiconset"
+
+    cat << 'EOF' > "$ASSET_DIR/AppIcon.appiconset/Contents.json"
+{
+  "images" : [
+    { "size" : "16x16",   "idiom" : "mac", "filename" : "icon_16x16.png",    "scale" : "1x" },
+    { "size" : "16x16",   "idiom" : "mac", "filename" : "icon_16x16@2x.png", "scale" : "2x" },
+    { "size" : "32x32",   "idiom" : "mac", "filename" : "icon_32x32.png",    "scale" : "1x" },
+    { "size" : "32x32",   "idiom" : "mac", "filename" : "icon_32x32@2x.png", "scale" : "2x" },
+    { "size" : "128x128", "idiom" : "mac", "filename" : "icon_128x128.png",   "scale" : "1x" },
+    { "size" : "128x128", "idiom" : "mac", "filename" : "icon_128x128@2x.png", "scale" : "2x" },
+    { "size" : "256x256", "idiom" : "mac", "filename" : "icon_256x256.png",   "scale" : "1x" },
+    { "size" : "256x256", "idiom" : "mac", "filename" : "icon_256x256@2x.png", "scale" : "2x" },
+    { "size" : "512x512", "idiom" : "mac", "filename" : "icon_512x512.png",   "scale" : "1x" },
+    { "size" : "512x512", "idiom" : "mac", "filename" : "icon_512x512@2x.png", "scale" : "2x" }
+  ],
+  "info" : { "version" : 1, "author" : "xcode" }
+}
+EOF
 
     sips -z 16 16     "$SCRIPT_DIR/Resources/AppIcon.png" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null 2>&1 || true
     sips -z 32 32     "$SCRIPT_DIR/Resources/AppIcon.png" --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null 2>&1 || true
@@ -54,11 +73,23 @@ if [ -f "$SCRIPT_DIR/Resources/AppIcon.png" ]; then
     sips -z 512 512   "$SCRIPT_DIR/Resources/AppIcon.png" --out "$ICONSET_DIR/icon_512x512.png" >/dev/null 2>&1 || true
     sips -z 1024 1024 "$SCRIPT_DIR/Resources/AppIcon.png" --out "$ICONSET_DIR/icon_512x512@2x.png" >/dev/null 2>&1 || true
 
+    cp "$ICONSET_DIR/"*.png "$ASSET_DIR/AppIcon.appiconset/"
+
+    # Compile Assets.car for macOS Notification Center banner app icon
+    if command -v actool >/dev/null 2>&1 || xcrun -find actool >/dev/null 2>&1; then
+        xcrun actool "$ASSET_DIR" --compile "$RESOURCES_DIR" --platform macosx --minimum-deployment-target 13.0 --app-icon AppIcon --output-partial-info-plist /tmp/appicon_partial.plist >/dev/null 2>&1 || true
+        if [ -f "$RESOURCES_DIR/Assets.car" ]; then
+            cp "$RESOURCES_DIR/Assets.car" "$SCRIPT_DIR/Resources/Assets.car" || true
+        fi
+        rm -f /tmp/appicon_partial.plist
+    fi
+
+    # Compile AppIcon.icns for Finder & Dock
     if command -v iconutil >/dev/null 2>&1; then
         iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/AppIcon.icns" || true
         cp "$RESOURCES_DIR/AppIcon.icns" "$SCRIPT_DIR/Resources/AppIcon.icns" || true
     fi
-    rm -rf "$ICONSET_DIR"
+    rm -rf "$ICONSET_DIR" "$ASSET_DIR"
 fi
 
 echo "==> Stripping extended attributes before signing..."

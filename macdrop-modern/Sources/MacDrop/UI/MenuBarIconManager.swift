@@ -224,7 +224,12 @@ final class MenuBarDropTargetOverlay: NSView {
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
-        InvisibleNetPanelController.shared.scheduleDismissCheck()
+        let mouseLoc = NSEvent.mouseLocation
+        if InvisibleNetPanelController.shared.isMouseInProximity(mouseLoc) {
+            InvisibleNetPanelController.shared.scheduleDismissCheck(delay: 0.10)
+        } else {
+            InvisibleNetPanelController.shared.hideDropZone(animated: true)
+        }
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {

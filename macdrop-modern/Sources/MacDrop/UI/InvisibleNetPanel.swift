@@ -109,14 +109,9 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         let clampedX = min(max(x, screen.minX + 8), screen.maxX - targetWidth - 8)
         let newFrame = NSRect(x: clampedX, y: y, width: targetWidth, height: targetHeight)
 
-        // Keep containerView and hostingView perfectly synchronized to the content frame
-        let contentBounds = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
-        containerView.frame = contentBounds
-        hostingView.frame = contentBounds
-
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.22
+                ctx.duration = 0.20
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 panel.animator().setFrame(newFrame, display: true)
             }, completionHandler: { [weak self] in
@@ -149,13 +144,9 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         let clampedX = min(max(x, screen.minX + 8), screen.maxX - targetWidth - 8)
         let newFrame = NSRect(x: clampedX, y: y, width: targetWidth, height: targetHeight)
 
-        let contentBounds = NSRect(x: 0, y: 0, width: targetWidth, height: targetHeight)
-        containerView.frame = contentBounds
-        hostingView.frame = contentBounds
-
         if animated && isExpanded && panel.isVisible {
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.22
+                ctx.duration = 0.20
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 panel.animator().setFrame(newFrame, display: true)
             }, completionHandler: { [weak self] in
@@ -182,7 +173,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.22
+                ctx.duration = 0.20
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1.0
             }
@@ -192,8 +183,10 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         isExpanded = true
     }
 
-    public func hideDropZone(animated: Bool = true) {
-        guard !P2PTransferEngine.shared.isTransferring else { return }
+    public func hideDropZone(animated: Bool = true, force: Bool = false) {
+        if !force && P2PTransferEngine.shared.isTransferring {
+            return
+        }
         isPinnedOpen = false
         showingSettings = false
         showingAddManual = false
@@ -227,7 +220,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
     public func toggleVisibility() {
         if isExpanded && panel.alphaValue > 0.5 {
             isPinnedOpen = false
-            hideDropZone()
+            hideDropZone(animated: true, force: true)
         } else {
             isPinnedOpen = true
             showDropZone()
@@ -417,14 +410,22 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
             let engine = P2PTransferEngine.shared
             if engine.currentTransfer?.status == .completed {
                 timer.invalidate()
-                // Wait 2.5 seconds to show "Delivered!" then retract
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                    self.hideDropZone(animated: true)
+                // Wait 4.0 seconds so user clearly sees "Delivered!", then reset state to revert to device list
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                    engine.currentTransfer = nil
+                    engine.isTransferring = false
+                    if !self.isPinnedOpen {
+                        self.hideDropZone(animated: true)
+                    }
                 }
             } else if engine.currentTransfer?.status == .failed || engine.currentTransfer?.status == .cancelled {
                 timer.invalidate()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                    self.hideDropZone(animated: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                    engine.currentTransfer = nil
+                    engine.isTransferring = false
+                    if !self.isPinnedOpen {
+                        self.hideDropZone(animated: true)
+                    }
                 }
             }
         }

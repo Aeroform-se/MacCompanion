@@ -4,8 +4,7 @@ import UniformTypeIdentifiers
 struct DropZoneHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let n = nextValue()
-        if n > 0 { value = n }
+        value = nextValue()
     }
 }
 
@@ -354,6 +353,8 @@ public struct DropZoneView: View {
 
     // MARK: - Active Transfer HUD
 
+    private let successGreen = Color(red: 0.10, green: 0.52, blue: 0.20)
+
     private func activeTransferHUD(_ xfer: TransferProgress) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             // Target & File Info
@@ -370,8 +371,8 @@ public struct DropZoneView: View {
                             .lineLimit(2)
                     } else if xfer.status == .completed {
                         Text("Delivered to \(xfer.targetName)")
-                            .font(.system(size: 10))
-                            .foregroundColor(.green)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(successGreen)
                     } else {
                         Text(xfer.isReceiving ? "Receiving from \(xfer.targetName)..." : "Sending to \(xfer.targetName)...")
                             .font(.system(size: 10))
@@ -386,19 +387,35 @@ public struct DropZoneView: View {
                         .foregroundColor(.red)
                 } else if xfer.status == .completed {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                } else if xfer.status == .streaming || xfer.status == .connecting {
-                    Button(action: {
-                        transfer.cancelCurrentTransfer()
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+                        .foregroundColor(successGreen)
+                } else {
+                    HStack(spacing: 6) {
+                        Button(action: {
+                            InvisibleNetPanelController.shared.hideDropZone(animated: true, force: true)
+                        }) {
+                            Image(systemName: "chevron.up.circle")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Hide window (transfer continues in background)")
+
+                        if xfer.status == .streaming || xfer.status == .connecting {
+                            Button(action: {
+                                transfer.cancelCurrentTransfer()
+                            }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Cancel transfer")
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
-            // Progress Bar (colored red on error, green on complete, accent on streaming)
+            // Progress Bar (colored red on error, successGreen on complete, accent on streaming)
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 4)
@@ -406,7 +423,7 @@ public struct DropZoneView: View {
                         .frame(height: 8)
 
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(xfer.status == .failed ? Color.red : (xfer.status == .completed ? Color.green : Color.accentColor))
+                        .fill(xfer.status == .failed ? Color.red : (xfer.status == .completed ? successGreen : Color.accentColor))
                         .frame(width: max(8, geo.size.width * CGFloat(xfer.status == .completed ? 1.0 : xfer.progressFraction)), height: 8)
                         .animation(.easeOut(duration: 0.2), value: xfer.progressFraction)
                 }
@@ -417,7 +434,7 @@ public struct DropZoneView: View {
             HStack {
                 Text(xfer.status == .completed ? "100%" : (xfer.status == .failed ? "Failed" : "\(xfer.percentInt)%"))
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
-                    .foregroundColor(xfer.status == .failed ? .red : (xfer.status == .completed ? .green : .primary))
+                    .foregroundColor(xfer.status == .failed ? .red : (xfer.status == .completed ? successGreen : .primary))
 
                 if !xfer.formattedSpeed.isEmpty && xfer.status != .failed {
                     Text("· \(xfer.formattedSpeed)")
@@ -448,7 +465,7 @@ public struct DropZoneView: View {
                 .fill(Color.primary.opacity(0.04))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(xfer.status == .failed ? Color.red.opacity(0.3) : (xfer.status == .completed ? Color.green.opacity(0.3) : Color.primary.opacity(0.1)), lineWidth: 1)
+                        .stroke(xfer.status == .failed ? Color.red.opacity(0.3) : (xfer.status == .completed ? successGreen.opacity(0.4) : Color.primary.opacity(0.1)), lineWidth: 1)
                 )
         )
     }

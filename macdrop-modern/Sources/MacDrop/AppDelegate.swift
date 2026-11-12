@@ -59,7 +59,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
             // Handle Escape key to dismiss drop zone popover
             if event.keyCode == 53 {
                 if InvisibleNetPanelController.shared.panel?.isVisible == true {
-                    InvisibleNetPanelController.shared.hideDropZone(animated: true)
+                    InvisibleNetPanelController.shared.hideDropZone(animated: true, force: true)
                     return nil
                 }
             }
@@ -74,10 +74,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
     }
 
     private func handleOutsideClick() {
-        // Only collapse if there is NO active transfer running
-        if !P2PTransferEngine.shared.isTransferring {
-            InvisibleNetPanelController.shared.hideDropZone(animated: true)
-        }
+        // Collapse drop zone popover on outside click (transfers continue in background)
+        InvisibleNetPanelController.shared.hideDropZone(animated: true, force: true)
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
