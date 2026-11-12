@@ -134,8 +134,19 @@ public struct DropZoneView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 14)
-        .padding(.bottom, 10)
+        .padding(.bottom, 12)
         .frame(width: 300)
+        .fixedSize(horizontal: false, vertical: true)
+        .onChange(of: transfer.isTransferring) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+            }
+        }
+        .onChange(of: transfer.currentTransfer?.status) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+            }
+        }
         .background(GeometryReader { geo in
             Color.clear.preference(key: DropZoneHeightKey.self, value: geo.size.height)
         })

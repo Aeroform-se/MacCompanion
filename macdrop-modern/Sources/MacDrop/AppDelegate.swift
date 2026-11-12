@@ -14,6 +14,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
         // Prevent app from quitting when all windows are closed
         NSApp.setActivationPolicy(.accessory)
 
+        // Explicitly set runtime application icon
+        if let iconPath = Bundle.main.path(forResource: "AppIcon", ofType: "icns"),
+           let iconImg = NSImage(contentsOfFile: iconPath) {
+            NSApp.applicationIconImage = iconImg
+        } else if let pngPath = Bundle.main.path(forResource: "AppIcon", ofType: "png"),
+                  let iconImg = NSImage(contentsOfFile: pngPath) {
+            NSApp.applicationIconImage = iconImg
+        }
+
         // Register UNUserNotificationCenter delegate to display notification banners even while app is running
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in

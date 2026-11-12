@@ -26,6 +26,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
     private var dismissTimer: Timer?
     private var dragMonitor: Any?
     private var mouseUpMonitor: Any?
+    private var lastDragY: CGFloat = 0
 
     public weak var statusItemButton: NSStatusBarButton? {
         didSet {
@@ -99,7 +100,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         // Measure exact content fitting height directly from the SwiftUI layout
         hostingView.layoutSubtreeIfNeeded()
         let fitting = hostingView.fittingSize
-        let targetHeight = max(130.0, ceil(fitting.height))
+        let targetHeight = max(140.0, ceil(fitting.height))
 
         let x = buttonFrame.midX - (targetWidth / 2)
         let y = buttonFrame.minY - targetHeight // Anchor top edge flush below menu bar
@@ -108,6 +109,11 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         let screen = NSScreen.main?.visibleFrame ?? .zero
         let clampedX = min(max(x, screen.minX + 8), screen.maxX - targetWidth - 8)
         let newFrame = NSRect(x: clampedX, y: y, width: targetWidth, height: targetHeight)
+
+        // Don't animate if already matching
+        if abs(panel.frame.height - targetHeight) < 1.0 && abs(panel.frame.origin.y - y) < 1.0 && abs(panel.frame.origin.x - clampedX) < 1.0 {
+            return
+        }
 
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in
@@ -130,7 +136,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         let buttonFrame = window.convertToScreen(button.frame)
 
         let targetWidth: CGFloat = 300
-        let targetHeight = max(130.0, ceil(newHeight))
+        let targetHeight = max(140.0, ceil(newHeight))
 
         // Don't resize if already matching
         if abs(panel.frame.height - targetHeight) < 1.0 && abs(panel.frame.width - targetWidth) < 1.0 {
@@ -162,6 +168,13 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         dismissTimer?.invalidate()
         dismissTimer = nil
         autoDismissTimer?.invalidate()
+
+        // If already expanded and fully solid, avoid redundant opacity re-animations to prevent flickers
+        if isExpanded && panel.isVisible && panel.alphaValue >= 0.99 {
+            updatePanelPosition(animated: animated)
+            return
+        }
+
         updatePanelPosition()
 
         if isPinnedOpen {
@@ -173,7 +186,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
         if animated {
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.20
+                ctx.duration = 0.15
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 panel.animator().alphaValue = 1.0
             }
@@ -187,6 +200,12 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         if !force && P2PTransferEngine.shared.isTransferring {
             return
         }
+
+        // If already hidden or currently fading out, avoid redundant animation
+        if !isExpanded && (!panel.isVisible || panel.alphaValue <= 0.01) {
+            return
+        }
+
         isPinnedOpen = false
         showingSettings = false
         showingAddManual = false
@@ -196,7 +215,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
         if animated {
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.10
+                ctx.duration = 0.12
                 panel.animator().alphaValue = 0.0
             }, completionHandler: { [weak self] in
                 self?.panel.orderOut(nil)
@@ -248,8 +267,8 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
     public func draggingExited(_ sender: NSDraggingInfo?) {
         let mouseLoc = NSEvent.mouseLocation
-        if isMouseInProximity(mouseLoc) {
-            scheduleDismissCheck(delay: 0.10)
+        if isMouseInProximity(mouseLoc) || panel.frame.contains(mouseLoc) {
+            scheduleDismissCheck(delay: 0.25)
         } else {
             dismissTimer?.invalidate()
             dismissTimer = nil
@@ -257,7 +276,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         }
     }
 
-    public func scheduleDismissCheck(delay: TimeInterval = 0.10) {
+    public func scheduleDismissCheck(delay: TimeInterval = 0.25) {
         guard !P2PTransferEngine.shared.isTransferring && !isPinnedOpen else { return }
         dismissTimer?.invalidate()
         dismissTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
@@ -267,7 +286,8 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
                 let btnRect = win.convertToScreen(button.frame)
                 if btnRect.contains(mouseLoc) { return }
             }
-            if self.panel.frame.contains(mouseLoc) { return }
+            // Keep window rock solid if mouse is inside window bounds or sense zone
+            if self.panel.frame.contains(mouseLoc) || self.isMouseInProximity(mouseLoc) { return }
             if !P2PTransferEngine.shared.isTransferring && !self.isPinnedOpen {
                 self.hideDropZone(animated: true)
             }
@@ -280,13 +300,13 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         guard let button = statusItemButton, let window = button.window else { return false }
         let buttonScreenFrame = window.convertToScreen(button.frame)
 
-        // Proximity detection zone:
-        // Horizontal: within 220px of icon center (covers 300px drop window + margin)
-        // Vertical: from top of menu bar down to 320px below it
-        let triggerMinX = buttonScreenFrame.midX - 220
-        let triggerMaxX = buttonScreenFrame.midX + 220
-        let triggerMinY = buttonScreenFrame.minY - 320
-        let triggerMaxY = buttonScreenFrame.maxY + 20
+        // Proximity detection zone (shrunk to half vertical reach as requested):
+        // Horizontal: within 160px of icon center (covers 300px drop window + 10px margin)
+        // Vertical: from top of menu bar down to 150px below it (previously 320px)
+        let triggerMinX = buttonScreenFrame.midX - 160
+        let triggerMaxX = buttonScreenFrame.midX + 160
+        let triggerMinY = buttonScreenFrame.minY - 150
+        let triggerMaxY = buttonScreenFrame.maxY + 10
 
         return (mouseLoc.x >= triggerMinX && mouseLoc.x <= triggerMaxX &&
                 mouseLoc.y >= triggerMinY && mouseLoc.y <= triggerMaxY)
@@ -324,15 +344,23 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
         let mouseLoc = NSEvent.mouseLocation
         let isInProximity = isMouseInProximity(mouseLoc)
+        let isMovingTowardsMenuBar = (mouseLoc.y >= lastDragY - 2)
+        lastDragY = mouseLoc.y
 
         if isInProximity {
-            dismissTimer?.invalidate()
-            dismissTimer = nil
+            // Only expand if moving towards the menu bar (prevents desktop files from triggering on downward drags)
             if !isExpanded {
-                showDropZone(animated: true)
+                if isMovingTowardsMenuBar {
+                    dismissTimer?.invalidate()
+                    dismissTimer = nil
+                    showDropZone(animated: true)
+                }
+            } else {
+                dismissTimer?.invalidate()
+                dismissTimer = nil
             }
         } else if isExpanded {
-            // Immediately retract with zero delay when mouse pointer leaves the sense zone
+            // Immediately retract when mouse pointer leaves the sense zone
             dismissTimer?.invalidate()
             dismissTimer = nil
             hideDropZone(animated: true)
@@ -391,6 +419,11 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         let file = fileURLs[0]
         DebugLogger.log("[DropZone] Initiating send of \(file.lastPathComponent) to \(chosenTarget.name)")
         P2PTransferEngine.shared.send(fileURL: file, to: chosenTarget)
+
+        // Immediately update panel position and fitting height on the main thread
+        DispatchQueue.main.async { [weak self] in
+            self?.updatePanelPosition(animated: true)
+        }
 
         // Ensure window stays visible without re-triggering entrance positioning jumps
         if !panel.isVisible {

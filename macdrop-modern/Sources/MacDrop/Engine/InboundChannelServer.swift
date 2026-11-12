@@ -541,6 +541,7 @@ public final class InboundChannelServer {
             P2PTransferEngine.shared.currentTransfer = prog
             P2PTransferEngine.shared.isTransferring = true
             InvisibleNetPanelController.shared.showDropZone(animated: true)
+            InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
         }
 
         var lastUpdate = Date()

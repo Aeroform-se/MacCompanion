@@ -98,8 +98,10 @@ xattr -cr "$APP_BUNDLE"
 echo "==> Ad-hoc code signing $APP_NAME.app..."
 codesign -s - --force --deep "$APP_BUNDLE"
 
-echo "==> Registering with LaunchServices database..."
+echo "==> Registering with LaunchServices database & resetting notification daemon cache..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP_BUNDLE" || true
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" || true
+killall usernoted NotificationCenter 2>/dev/null || true
 
 echo "==> Successfully created $APP_BUNDLE!"
 echo "    You can run it with: open \"$APP_BUNDLE\""
