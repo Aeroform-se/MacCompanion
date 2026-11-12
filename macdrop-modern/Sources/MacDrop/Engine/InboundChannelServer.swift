@@ -530,6 +530,7 @@ public final class InboundChannelServer {
 
         // 2. Initialize UI progress HUD and menu bar progress ring
         DispatchQueue.main.async {
+            P2PTransferEngine.shared.resetTransferTimers()
             var prog = TransferProgress()
             prog.fileName = fallbackFileName
             prog.targetName = clientName
@@ -584,10 +585,7 @@ public final class InboundChannelServer {
 
         // Notify user and update UI (notification sound is played by UNNotification, avoiding duplicate sounds)
         DispatchQueue.main.async {
-            P2PTransferEngine.shared.currentTransfer?.status = .completed
-            P2PTransferEngine.shared.currentTransfer?.bytesSent = Int64(bodyData.count)
-            P2PTransferEngine.shared.currentTransfer?.completedAt = Date()
-            P2PTransferEngine.shared.lastDeliveredFile = "Received \"\(savedName)\""
+            P2PTransferEngine.shared.markInboundCompleted(fileName: savedName, bytes: Int64(bodyData.count))
             InvisibleNetPanelController.shared.scheduleAutoDismissWatcher()
         }
 

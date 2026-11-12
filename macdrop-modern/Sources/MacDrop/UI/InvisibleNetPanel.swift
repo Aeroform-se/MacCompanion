@@ -108,10 +108,13 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         // Keep within screen bounds
         let screen = NSScreen.main?.visibleFrame ?? .zero
         let clampedX = min(max(x, screen.minX + 8), screen.maxX - targetWidth - 8)
-        let newFrame = NSRect(x: clampedX, y: y, width: targetWidth, height: targetHeight)
+
+        // Lock X coordinate while visible so content updates don't cause accidental X shifts
+        let finalX = (isExpanded && panel.isVisible && abs(panel.frame.width - targetWidth) < 1.0) ? panel.frame.origin.x : clampedX
+        let newFrame = NSRect(x: finalX, y: y, width: targetWidth, height: targetHeight)
 
         // Don't animate if already matching
-        if abs(panel.frame.height - targetHeight) < 1.0 && abs(panel.frame.origin.y - y) < 1.0 && abs(panel.frame.origin.x - clampedX) < 1.0 {
+        if abs(panel.frame.height - targetHeight) < 1.0 && abs(panel.frame.origin.y - y) < 1.0 && abs(panel.frame.origin.x - finalX) < 1.0 {
             return
         }
 
@@ -138,17 +141,20 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         let targetWidth: CGFloat = 300
         let targetHeight = max(140.0, ceil(newHeight))
 
-        // Don't resize if already matching
-        if abs(panel.frame.height - targetHeight) < 1.0 && abs(panel.frame.width - targetWidth) < 1.0 {
-            return
-        }
-
         let x = buttonFrame.midX - (targetWidth / 2)
         let y = buttonFrame.minY - targetHeight // Top edge stays flush below menu bar
 
         let screen = NSScreen.main?.visibleFrame ?? .zero
         let clampedX = min(max(x, screen.minX + 8), screen.maxX - targetWidth - 8)
-        let newFrame = NSRect(x: clampedX, y: y, width: targetWidth, height: targetHeight)
+
+        // Lock X coordinate while visible so vertical height changes NEVER cause horizontal jitter
+        let finalX = (isExpanded && panel.isVisible && abs(panel.frame.width - targetWidth) < 1.0) ? panel.frame.origin.x : clampedX
+        let newFrame = NSRect(x: finalX, y: y, width: targetWidth, height: targetHeight)
+
+        // Don't resize if already matching
+        if abs(panel.frame.height - targetHeight) < 1.0 && abs(panel.frame.width - targetWidth) < 1.0 && abs(panel.frame.origin.x - finalX) < 1.0 && abs(panel.frame.origin.y - y) < 1.0 {
+            return
+        }
 
         if animated && isExpanded && panel.isVisible {
             NSAnimationContext.runAnimationGroup({ ctx in

@@ -15,8 +15,53 @@ public final class P2PTransferEngine: ObservableObject {
     private var activeConnection: NWConnection?
     private var isCancelled: Bool = false
     private let queue = DispatchQueue(label: "se.aeroform.macdrop.p2p", qos: .userInitiated)
+    private var clearLastDeliveredTimer: Timer?
+    private var dismissHUDTimer: Timer?
 
     public init() {}
+
+    /// Sets a temporary delivery notice (e.g. "Sent ...", "Received ...") and clears it automatically after 5 seconds.
+    public func setDeliveredNotice(_ message: String) {
+        clearLastDeliveredTimer?.invalidate()
+        lastDeliveredFile = message
+        clearLastDeliveredTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.lastDeliveredFile = nil
+                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+            }
+        }
+    }
+
+    /// Resets all temporary transfer HUD & notice timers and clears the delivery notice.
+    public func resetTransferTimers() {
+        dismissHUDTimer?.invalidate()
+        dismissHUDTimer = nil
+        clearLastDeliveredTimer?.invalidate()
+        clearLastDeliveredTimer = nil
+        lastDeliveredFile = nil
+    }
+
+    /// Marks an inbound transfer completed, sets delivered notice, and schedules the HUD to revert to device list after 4 seconds.
+    public func markInboundCompleted(fileName: String, bytes: Int64) {
+        if var xfer = self.currentTransfer {
+            xfer.status = .completed
+            xfer.bytesSent = bytes
+            xfer.completedAt = Date()
+            self.currentTransfer = xfer
+        }
+        self.isTransferring = false
+        self.setDeliveredNotice("Received \"\(fileName)\"")
+
+        self.dismissHUDTimer?.invalidate()
+        self.dismissHUDTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                if self?.currentTransfer?.status == .completed || self?.currentTransfer?.status == .failed {
+                    self?.currentTransfer = nil
+                    InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                }
+            }
+        }
+    }
 
     /// Cancels any currently active transfer.
     public func cancelCurrentTransfer() {
@@ -33,6 +78,16 @@ public final class P2PTransferEngine: ObservableObject {
                     self.currentTransfer = xfer
                 }
                 self.isTransferring = false
+
+                self.dismissHUDTimer?.invalidate()
+                self.dismissHUDTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+                    DispatchQueue.main.async {
+                        if self?.currentTransfer?.status == .cancelled {
+                            self?.currentTransfer = nil
+                            InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                        }
+                    }
+                }
             }
         }
     }
@@ -46,6 +101,7 @@ public final class P2PTransferEngine: ObservableObject {
 
         // Immediately mark transfer state on the main thread so dismissal checks & HUD respond instantly
         let setupBlock = {
+            self.resetTransferTimers()
             var xfer = TransferProgress()
             xfer.status = .preparing
             xfer.fileName = fileName
@@ -295,15 +351,27 @@ public final class P2PTransferEngine: ObservableObject {
         let avgSpeed = Double(totalBytes) / duration
 
         DispatchQueue.main.async {
+            var fileName = "file"
             if var xfer = self.currentTransfer, xfer.status != .completed {
                 xfer.status = .completed
                 xfer.bytesSent = totalBytes
                 xfer.completedAt = Date()
                 xfer.speedBps = avgSpeed
+                fileName = xfer.fileName
                 self.currentTransfer = xfer
-                self.lastDeliveredFile = xfer.fileName
             }
             self.isTransferring = false
+            self.setDeliveredNotice("Sent \"\(fileName)\"")
+
+            self.dismissHUDTimer?.invalidate()
+            self.dismissHUDTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+                DispatchQueue.main.async {
+                    if self?.currentTransfer?.status == .completed || self?.currentTransfer?.status == .failed {
+                        self?.currentTransfer = nil
+                        InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                    }
+                }
+            }
         }
     }
 
@@ -315,6 +383,16 @@ public final class P2PTransferEngine: ObservableObject {
                 self.currentTransfer = xfer
             }
             self.isTransferring = false
+
+            self.dismissHUDTimer?.invalidate()
+            self.dismissHUDTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+                DispatchQueue.main.async {
+                    if self?.currentTransfer?.status == .failed {
+                        self?.currentTransfer = nil
+                        InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                    }
+                }
+            }
         }
         self.activeConnection?.cancel()
         self.activeConnection = nil

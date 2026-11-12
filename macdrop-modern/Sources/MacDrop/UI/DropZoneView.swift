@@ -147,6 +147,16 @@ public struct DropZoneView: View {
                 InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
             }
         }
+        .onChange(of: transfer.currentTransfer == nil) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+            }
+        }
+        .onChange(of: transfer.lastDeliveredFile) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+            }
+        }
         .background(GeometryReader { geo in
             Color.clear.preference(key: DropZoneHeightKey.self, value: geo.size.height)
         })
