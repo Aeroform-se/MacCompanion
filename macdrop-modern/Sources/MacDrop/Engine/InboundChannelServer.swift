@@ -364,10 +364,6 @@ public final class InboundChannelServer {
         if activeSessions.values.contains(where: { $0.isOpen && ($0.deviceId == deviceId || (ip != nil && ($0.remoteIP == ip || $0.reportedIP == ip))) }) {
             return true
         }
-        // Fallback: if there is any open channel session
-        if activeSessions.values.contains(where: { $0.isOpen }) {
-            return true
-        }
         return false
     }
 
@@ -385,8 +381,6 @@ public final class InboundChannelServer {
         if let s = activeSessions[id], s.isOpen {
             targetSession = s
         } else if let s = activeSessions.values.first(where: { $0.isOpen && ($0.deviceId == id || (ip != nil && ($0.remoteIP == ip || $0.reportedIP == ip))) }) {
-            targetSession = s
-        } else if let s = activeSessions.values.first(where: { $0.isOpen }) {
             targetSession = s
         }
 

@@ -368,12 +368,14 @@ public final class P2PTransferEngine: ObservableObject {
 
         DispatchQueue.main.async {
             var fileName = "file"
+            var targetName = "Macintosh"
             if var xfer = self.currentTransfer, xfer.status != .completed {
                 xfer.status = .completed
                 xfer.bytesSent = totalBytes
                 xfer.completedAt = Date()
                 xfer.speedBps = avgSpeed
                 fileName = xfer.fileName
+                targetName = xfer.targetName
                 self.currentTransfer = xfer
             }
             self.isTransferring = false
@@ -388,6 +390,14 @@ public final class P2PTransferEngine: ObservableObject {
                     }
                 }
             }
+
+            // Post system notification alert for sent file
+            InboundChannelServer.postNotification(
+                title: "MacDrop",
+                subtitle: "File delivered to \(targetName)",
+                body: "Sent \"\(fileName)\" successfully",
+                sound: .default
+            )
         }
     }
 

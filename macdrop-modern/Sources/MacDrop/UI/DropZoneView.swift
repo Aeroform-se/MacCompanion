@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 struct DropZoneHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+        value = max(value, nextValue())
     }
 }
 
@@ -152,27 +152,53 @@ public struct DropZoneView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 14)
-        .padding(.bottom, 12)
+        .padding(.bottom, 16)
         .frame(width: 300)
         .fixedSize(horizontal: false, vertical: true)
         .onChange(of: transfer.isTransferring) { _ in
             DispatchQueue.main.async {
-                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
             }
         }
         .onChange(of: transfer.currentTransfer?.status) { _ in
             DispatchQueue.main.async {
-                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
             }
         }
         .onChange(of: transfer.currentTransfer == nil) { _ in
             DispatchQueue.main.async {
-                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
             }
         }
         .onChange(of: transfer.lastDeliveredFile) { _ in
             DispatchQueue.main.async {
-                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+            }
+        }
+        .onChange(of: panelController.showingSettings) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+            }
+        }
+        .onChange(of: panelController.showingAddManual) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+            }
+        }
+        .onChange(of: discovery.devices.count) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+            }
+        }
+        .onChange(of: discovery.activeServer) { _ in
+            DispatchQueue.main.async {
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
             }
         }
         .background(GeometryReader { geo in

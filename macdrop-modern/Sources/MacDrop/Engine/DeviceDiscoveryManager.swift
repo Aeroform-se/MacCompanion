@@ -31,6 +31,10 @@ public final class DeviceDiscoveryManager: ObservableObject {
     public init() {
         loadPersistedServers()
         loadPersistedDevices()
+        for idx in self.devices.indices {
+            self.devices[idx].isOnline = false
+        }
+        self.activeServer = nil
         startPeriodicScan()
         scanAll(isManual: false)
     }
@@ -76,7 +80,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
             let queryGroup = DispatchGroup()
 
-            // 2. Query all known MacCompanion servers (e.g. 192.168.1.40, local, etc.)
+            // 2. Query all known MacCompanion servers (discovered dynamically via UDP or added manually)
             queryGroup.enter()
             self.queryAllServers { queryGroup.leave() }
 
@@ -170,8 +174,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
     // MARK: - MacCompanion Server API Query
 
     private func queryAllServers(completion: @escaping () -> Void) {
-        var serversToQuery = Set(knownServers)
-        serversToQuery.insert("192.168.1.40")
+        let serversToQuery = Set(knownServers)
 
         let group = DispatchGroup()
 
@@ -202,7 +205,25 @@ public final class DeviceDiscoveryManager: ObservableObject {
         req.timeoutInterval = 1.5
 
         URLSession.shared.dataTask(with: req) { [weak self] data, response, error in
-            guard let self = self, let data = data, error == nil else {
+            guard let self = self, let data = data, error == nil,
+                  let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                DispatchQueue.main.async {
+                    if self?.activeServer == serverIP {
+                        self?.activeServer = nil
+                    }
+                    var changed = false
+                    if let self = self {
+                        for idx in self.devices.indices {
+                            if self.devices[idx].relayServerIP == serverIP && self.devices[idx].source == "server_api" {
+                                self.devices[idx].isOnline = false
+                                changed = true
+                            }
+                        }
+                        if changed {
+                            self.persistDevices()
+                        }
+                    }
+                }
                 completion()
                 return
             }
@@ -278,12 +299,20 @@ public final class DeviceDiscoveryManager: ObservableObject {
                         }
                     }
 
-                    // 3. Purge any stale server_api devices that are no longer reported by this server
+                    // 3. Mark stale server_api devices that are no longer reported by this server as offline
                     DispatchQueue.main.async {
-                        self.devices.removeAll { dev in
-                            dev.source == "server_api" && dev.relayServerIP == serverIP && !activeServerIps.contains(dev.ip)
+                        var changed = false
+                        for idx in self.devices.indices {
+                            if self.devices[idx].source == "server_api" && self.devices[idx].relayServerIP == serverIP {
+                                if !activeServerIps.contains(self.devices[idx].ip) {
+                                    self.devices[idx].isOnline = false
+                                    changed = true
+                                }
+                            }
                         }
-                        self.persistDevices()
+                        if changed {
+                            self.persistDevices()
+                        }
                     }
                 }
             } catch {}
@@ -295,17 +324,20 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
     private func probeKnownDevices(completion: @escaping () -> Void) {
         let currentIps = devices.map { $0.ip }
-        var targetIps = Set(currentIps)
-
-        targetIps.insert("192.168.97.1")
+        let targetIps = Set(currentIps)
 
         let group = DispatchGroup()
         for ip in targetIps {
             if ip.hasPrefix("10.0.2.") {
+                if let dev = devices.first(where: { $0.ip == ip }) {
+                    if !InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
+                        self.markDeviceOffline(ip: ip)
+                    }
+                }
                 continue
             }
             if let dev = devices.first(where: { $0.ip == ip }),
-               InboundChannelServer.shared.hasActiveChannel(for: dev.id) {
+               InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
                 continue
             }
 
@@ -589,13 +621,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
         DispatchQueue.main.async {
             if let idx = self.devices.firstIndex(where: { $0.ip == ip }) {
                 let dev = self.devices[idx]
-                if InboundChannelServer.shared.hasActiveChannel(for: dev.id) {
-                    return
-                }
-                if dev.source == "reverse_channel" && Date().timeIntervalSince(dev.lastSeen) < 45.0 {
-                    return
-                }
-                if dev.source == "server_api" && Date().timeIntervalSince(dev.lastSeen) < 30.0 {
+                if InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
                     return
                 }
 
@@ -603,6 +629,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
                 if self.selectedDevice?.ip == ip {
                     self.selectedDevice?.isOnline = false
                 }
+                self.persistDevices()
             }
         }
     }
@@ -634,9 +661,9 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
     private func loadPersistedServers() {
         if let saved = UserDefaults.standard.stringArray(forKey: serversKey), !saved.isEmpty {
-            self.knownServers = saved
+            self.knownServers = saved.filter { $0 != "192.168.1.40" }
         } else {
-            self.knownServers = ["192.168.1.40", "127.0.0.1"]
+            self.knownServers = ["127.0.0.1"]
         }
     }
 

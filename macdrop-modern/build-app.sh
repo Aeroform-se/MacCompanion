@@ -99,6 +99,7 @@ echo "==> Ad-hoc code signing $APP_NAME.app..."
 codesign -s - --force --deep "$APP_BUNDLE"
 
 echo "==> Registering with LaunchServices database & resetting notification daemon cache..."
+touch "$APP_BUNDLE"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP_BUNDLE" || true
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" || true
 killall usernoted NotificationCenter 2>/dev/null || true

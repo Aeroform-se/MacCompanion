@@ -100,7 +100,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         // Measure exact content fitting height directly from the SwiftUI layout
         hostingView.layoutSubtreeIfNeeded()
         let fitting = hostingView.fittingSize
-        let targetHeight = max(140.0, ceil(fitting.height))
+        let targetHeight = max(140.0, ceil(fitting.height) + 4)
 
         let x = buttonFrame.midX - (targetWidth / 2)
         let y = buttonFrame.minY - targetHeight // Anchor top edge flush below menu bar
@@ -132,6 +132,15 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         }
     }
 
+    /// Measures the exact SwiftUI fitting size and resizes the panel smoothly without clipping
+    public func refreshPanelHeight(animated: Bool = true) {
+        guard let button = statusItemButton, button.window != nil else { return }
+        hostingView.layoutSubtreeIfNeeded()
+        let fitting = hostingView.fittingSize
+        let targetHeight = max(140.0, ceil(fitting.height) + 4)
+        updatePanelHeight(targetHeight, animated: animated)
+    }
+
     /// Dynamically resizes the panel height when SwiftUI content expands/collapses (e.g. drawers, device list).
     /// Expands downward by keeping the top edge anchored directly below the menu bar.
     public func updatePanelHeight(_ newHeight: CGFloat, animated: Bool = true) {
@@ -139,7 +148,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         let buttonFrame = window.convertToScreen(button.frame)
 
         let targetWidth: CGFloat = 300
-        let targetHeight = max(140.0, ceil(newHeight))
+        let targetHeight = max(140.0, ceil(newHeight) + 4)
 
         let x = buttonFrame.midX - (targetWidth / 2)
         let y = buttonFrame.minY - targetHeight // Top edge stays flush below menu bar
