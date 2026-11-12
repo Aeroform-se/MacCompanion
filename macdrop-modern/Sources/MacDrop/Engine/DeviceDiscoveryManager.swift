@@ -88,6 +88,10 @@ public final class DeviceDiscoveryManager: ObservableObject {
             queryGroup.enter()
             self.probeKnownDevices { queryGroup.leave() }
 
+            // 4. Sweep local /24 subnet for any newly connected vintage Macs on TCP 6803
+            queryGroup.enter()
+            self.sweepSubnetForVintageMacs { queryGroup.leave() }
+
             queryGroup.notify(queue: .main) {
                 self.isScanning = false
                 self.isManualRefreshing = false
@@ -358,6 +362,109 @@ public final class DeviceDiscoveryManager: ObservableObject {
         }
     }
 
+    // MARK: - Subnet Sweep for Vintage Macs on TCP 6803
+
+    private func sweepSubnetForVintageMacs(completion: @escaping () -> Void) {
+        guard let localIP = Self.getLocalIPv4() else {
+            completion()
+            return
+        }
+        let parts = localIP.components(separatedBy: ".")
+        guard parts.count == 4 else {
+            completion()
+            return
+        }
+        let prefix = "\(parts[0]).\(parts[1]).\(parts[2])."
+        let ourLastOctet = Int(parts[3]) ?? 0
+
+        // Only scan unknown IPs on local /24 subnet
+        let knownIps = Set(devices.map { $0.ip })
+        var candidateIps: [String] = []
+        for i in 1...254 {
+            if i == ourLastOctet { continue }
+            let ip = "\(prefix)\(i)"
+            if !knownIps.contains(ip) {
+                candidateIps.append(ip)
+            }
+        }
+
+        guard !candidateIps.isEmpty else {
+            completion()
+            return
+        }
+
+        let responsive = fastPort6803Sweep(ips: candidateIps, timeoutSec: 0.5)
+        guard !responsive.isEmpty else {
+            completion()
+            return
+        }
+
+        let group = DispatchGroup()
+        for ip in responsive {
+            group.enter()
+            probeSingleIP(ip) { [weak self] online, meta in
+                if let meta = meta {
+                    self?.updateOrAddDevice(meta)
+                }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: queue) {
+            completion()
+        }
+    }
+
+    private func fastPort6803Sweep(ips: [String], timeoutSec: Double = 0.5) -> [String] {
+        let port = in_port_t(6803).bigEndian
+        var sockets: [(Int32, String)] = []
+        sockets.reserveCapacity(ips.count)
+
+        for ip in ips {
+            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            if fd < 0 { continue }
+
+            let flags = fcntl(fd, F_GETFL, 0)
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = port
+            inet_pton(AF_INET, ip, &addr.sin_addr)
+
+            _ = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+            sockets.append((fd, ip))
+        }
+
+        guard !sockets.isEmpty else { return [] }
+
+        var pollFds = sockets.map { pollfd(fd: $0.0, events: Int16(POLLOUT), revents: 0) }
+        _ = poll(&pollFds, nfds_t(pollFds.count), Int32(timeoutSec * 1000))
+
+        var responding: [String] = []
+        for i in 0..<sockets.count {
+            let fd = sockets[i].0
+            let ip = sockets[i].1
+            let revents = pollFds[i].revents
+
+            if (revents & Int16(POLLOUT)) != 0 {
+                var err: Int32 = 0
+                var len = socklen_t(MemoryLayout<Int32>.size)
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)
+                if err == 0 {
+                    responding.append(ip)
+                }
+            }
+            close(fd)
+        }
+        return responding
+    }
+
     public func probeSingleIP(_ ip: String, completion: @escaping (Bool, DiscoveredMac?) -> Void) {
         let host = NWEndpoint.Host(ip)
         let port = NWEndpoint.Port(integerLiteral: 6803)
@@ -379,7 +486,8 @@ public final class DeviceDiscoveryManager: ObservableObject {
         conn.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                let helloData = Data("MACDROP_HELLO\n".utf8)
+                let localIP = Self.getLocalIPv4() ?? "127.0.0.1"
+                let helloData = Data("MACDROP_HELLO|\(localIP)|6800\n".utf8)
                 conn.send(content: helloData, completion: .contentProcessed { err in
                     if err != nil {
                         finishOnce(false, nil)

@@ -243,35 +243,42 @@ public final class InboundChannelServer {
         let _ = parts[0]
         let path = parts[1]
 
-        // 1. Reverse Push Channel: GET /api/macdrop/channel?id=...
-        if path.hasPrefix("/api/macdrop/channel") {
-            handleChannelRegistration(clientFd: clientFd, remoteIP: remoteIP, urlString: path)
-            return
-        }
-
-        // 2. Peer List Request: GET /api/macdrop/peers
-        if path.hasPrefix("/api/macdrop/peers") {
+        // 0. Server Verification Ping: GET /api/ping (Required by 68k client NetVerifyServer)
+        if path.hasPrefix("/api/ping") {
             let localIP = Self.getLocalIPAddress()
-            let devName = DeviceSettingsManager.shared.effectiveDeviceName
-            let machine = DeviceSettingsManager.shared.machineName
-            let peerPayload = "PEER|modern_mac|\(devName)|\(machine)|\(localIP)|6800\n"
-
-            // Encode payload using macOSRoman with lossy fallback so System 7 displays Swedish accents/umlauts natively
-            let payloadData = peerPayload.data(using: .macOSRoman, allowLossyConversion: true) ?? Data(peerPayload.utf8)
-            let header = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(payloadData.count)\r\nConnection: close\r\n\r\n"
-            var fullResponse = header.data(using: .ascii) ?? Data()
-            fullResponse.append(payloadData)
-
-            fullResponse.withUnsafeBytes { raw in
-                if let ptr = raw.baseAddress {
-                    _ = send(clientFd, ptr, fullResponse.count, 0)
-                }
+            let respText = "MACCOMPANION_SERVER|\(localIP)|6800|macdrop\n"
+            let resp = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(respText.utf8.count)\r\nConnection: close\r\n\r\n\(respText)"
+            if let d = resp.data(using: .ascii) {
+                _ = d.withUnsafeBytes { send(clientFd, $0.baseAddress, d.count, 0) }
             }
             close(clientFd)
             return
         }
 
-        // 3. Status/Ping: GET /api/macdrop/status
+        // 1. Transfer Ack: GET /api/macdrop/ack
+        if path.hasPrefix("/api/macdrop/ack") {
+            let json = "{\"status\":\"ok\",\"acknowledged\":true}\n"
+            let resp = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(json.utf8.count)\r\nConnection: close\r\n\r\n\(json)"
+            if let d = resp.data(using: .ascii) {
+                _ = d.withUnsafeBytes { send(clientFd, $0.baseAddress, d.count, 0) }
+            }
+            close(clientFd)
+            return
+        }
+
+        // 2. Reverse Push Channel: GET /api/macdrop/channel?id=...
+        if path.hasPrefix("/api/macdrop/channel") {
+            handleChannelRegistration(clientFd: clientFd, remoteIP: remoteIP, urlString: path)
+            return
+        }
+
+        // 3. Dynamic Peer List Request: GET /api/macdrop/peers
+        if path.hasPrefix("/api/macdrop/peers") {
+            handlePeersRequest(clientFd: clientFd, remoteIP: remoteIP, urlString: path)
+            return
+        }
+
+        // 4. Status/Ping: GET /api/macdrop/status
         if path.hasPrefix("/api/macdrop/status") {
             let devName = DeviceSettingsManager.shared.effectiveDeviceName.replacingOccurrences(of: "\"", with: "\\\"")
             let json = "{\"status\":\"ok\",\"service\":\"MacDrop Modern Companion\",\"name\":\"\(devName)\"}\n"
@@ -283,9 +290,9 @@ public final class InboundChannelServer {
             return
         }
 
-        // 4. Inbound Upload from 68k Mac: POST /api/macdrop/inbound/upload
+        // 5. Inbound Upload from 68k Mac (Direct or Peer Relay): POST /api/macdrop/inbound/upload
         if path.hasPrefix("/api/macdrop/inbound/upload") || path.hasPrefix("/api/macdrop/upload") {
-            handleInboundUpload(clientFd: clientFd, initialBuffer: buf, initialBytesRead: bytesRead, remoteIP: remoteIP)
+            handleInboundUpload(clientFd: clientFd, initialBuffer: buf, initialBytesRead: bytesRead, remoteIP: remoteIP, urlPath: path)
             return
         }
 
@@ -293,6 +300,48 @@ public final class InboundChannelServer {
         let notFound = "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         if let d = notFound.data(using: .ascii) {
             _ = d.withUnsafeBytes { send(clientFd, $0.baseAddress, d.count, 0) }
+        }
+        close(clientFd)
+    }
+
+    private func handlePeersRequest(clientFd: Int32, remoteIP: String, urlString: String) {
+        var excludeId = ""
+        if let comps = URLComponents(string: urlString) {
+            excludeId = comps.queryItems?.first(where: { $0.name == "id" })?.value ?? ""
+        }
+
+        let devName = DeviceSettingsManager.shared.effectiveDeviceName
+        let machine = DeviceSettingsManager.shared.machineName
+
+        var lines: [String] = []
+        lines.append("SERVER|MacDrop (\(devName))|\(machine)")
+
+        var peerTokens: [String] = []
+        let onlineDevices = DeviceDiscoveryManager.shared.devices.filter { $0.isOnline }
+        for dev in onlineDevices {
+            // Exclude the requesting client itself
+            if !excludeId.isEmpty && dev.id == excludeId {
+                continue
+            }
+            if dev.ip == remoteIP && dev.source == "reverse_channel" {
+                continue
+            }
+            lines.append("PEER|\(dev.id)|\(dev.name)|\(dev.machine)")
+            peerTokens.append("\(dev.id)|\(dev.name)|\(dev.machine)")
+        }
+
+        let peerHeaderVal = peerTokens.isEmpty ? "NONE" : peerTokens.joined(separator: ";")
+        let peerPayload = lines.joined(separator: "\n") + "\n"
+
+        let payloadData = peerPayload.data(using: .macOSRoman, allowLossyConversion: true) ?? Data(peerPayload.utf8)
+        let header = "HTTP/1.0 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nX-MacDrop-Peers: \(peerHeaderVal)\r\nContent-Length: \(payloadData.count)\r\nConnection: close\r\n\r\n"
+        var fullResponse = header.data(using: .ascii) ?? Data()
+        fullResponse.append(payloadData)
+
+        fullResponse.withUnsafeBytes { raw in
+            if let ptr = raw.baseAddress {
+                _ = send(clientFd, ptr, fullResponse.count, 0)
+            }
         }
         close(clientFd)
     }
@@ -469,14 +518,24 @@ public final class InboundChannelServer {
         }
     }
 
-    // MARK: - Inbound File Upload (68k Mac -> Modern Mac)
+    // MARK: - Inbound File Upload (68k Mac -> Modern Mac OR Peer Relay)
 
-    private func handleInboundUpload(clientFd: Int32, initialBuffer: [UInt8], initialBytesRead: Int, remoteIP: String) {
+    private func handleInboundUpload(clientFd: Int32, initialBuffer: [UInt8], initialBytesRead: Int, remoteIP: String, urlPath: String) {
         var headerData = Data(initialBuffer.prefix(initialBytesRead))
         var bodyData = Data()
         var contentLength: Int? = nil
         var fallbackFileName = "VintageMacFile"
         var clientName = "Macintosh"
+        var targetId = ""
+
+        if let comps = URLComponents(string: urlPath) {
+            if let t = comps.queryItems?.first(where: { $0.name == "target_id" })?.value, !t.isEmpty {
+                targetId = t
+            }
+            if let n = comps.queryItems?.first(where: { $0.name == "name" })?.value, !n.isEmpty {
+                clientName = n
+            }
+        }
 
         let delim = "\r\n\r\n".data(using: .ascii)!
         let delim2 = "\n\n".data(using: .ascii)!
@@ -488,7 +547,7 @@ public final class InboundChannelServer {
                 if headerEnd < headerData.count {
                     bodyData = headerData.subdata(in: headerEnd..<headerData.count)
                 }
-                parseUploadHeaders(data: headerBytes, contentLength: &contentLength, fileName: &fallbackFileName, clientName: &clientName)
+                parseUploadHeaders(data: headerBytes, contentLength: &contentLength, fileName: &fallbackFileName, clientName: &clientName, targetId: &targetId)
                 break
             } else if let range = headerData.range(of: delim2) {
                 let headerEnd = range.upperBound
@@ -496,7 +555,7 @@ public final class InboundChannelServer {
                 if headerEnd < headerData.count {
                     bodyData = headerData.subdata(in: headerEnd..<headerData.count)
                 }
-                parseUploadHeaders(data: headerBytes, contentLength: &contentLength, fileName: &fallbackFileName, clientName: &clientName)
+                parseUploadHeaders(data: headerBytes, contentLength: &contentLength, fileName: &fallbackFileName, clientName: &clientName, targetId: &targetId)
                 break
             }
 
@@ -515,11 +574,13 @@ public final class InboundChannelServer {
             bodyData.reserveCapacity(expected)
         }
 
-        // 1. Notify user that a file is being received
+        let isPeerRelay = !targetId.isEmpty && targetId.uppercased() != "SERVER" && targetId != "modern_mac"
+
+        // 1. Notify user that a file is being received or relayed
         Self.postNotification(
             title: "MacDrop",
-            subtitle: "Receiving file from \(clientName)...",
-            body: "Downloading \"\(fallbackFileName)\""
+            subtitle: isPeerRelay ? "Relaying file from \(clientName)..." : "Receiving file from \(clientName)...",
+            body: "\(isPeerRelay ? "Forwarding" : "Downloading") \"\(fallbackFileName)\""
         )
 
         // 2. Initialize UI progress HUD and menu bar progress ring
@@ -527,7 +588,7 @@ public final class InboundChannelServer {
             P2PTransferEngine.shared.resetTransferTimers()
             var prog = TransferProgress()
             prog.fileName = fallbackFileName
-            prog.targetName = clientName
+            prog.targetName = isPeerRelay ? "\(clientName) → \(targetId)" : clientName
             prog.fileSize = expectedTotal
             prog.bytesSent = Int64(bodyData.count)
             prog.status = .streaming
@@ -561,6 +622,35 @@ public final class InboundChannelServer {
 
         DispatchQueue.main.async {
             P2PTransferEngine.shared.currentTransfer?.status = .finalizing
+        }
+
+        if isPeerRelay {
+            let targetDev = DeviceDiscoveryManager.shared.devices.first(where: {
+                $0.id == targetId || $0.ip == targetId || $0.name.lowercased() == targetId.lowercased()
+            })
+            let targetLabel = targetDev?.name ?? targetId
+
+            // Send HTTP 200 response to sender immediately
+            let responseBody = "{\"status\":\"ok\",\"delivered\":true,\"relayed\":true}\n"
+            let response = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(responseBody.utf8.count)\r\nConnection: close\r\n\r\n\(responseBody)"
+            if let d = response.data(using: .ascii) {
+                _ = d.withUnsafeBytes { send(clientFd, $0.baseAddress, d.count, 0) }
+            }
+            close(clientFd)
+
+            print("[ChannelServer] Relaying \"\(fallbackFileName)\" (\(bodyData.count) bytes) from \(clientName) -> \(targetLabel)")
+            DebugLogger.log("[ChannelServer] Relaying \"\(fallbackFileName)\" from \(clientName) -> \(targetLabel)")
+
+            DispatchQueue.main.async {
+                let dest = targetDev ?? DiscoveredMac(name: targetLabel, ip: targetId)
+                P2PTransferEngine.shared.relayMacBinary(
+                    data: bodyData,
+                    fileName: fallbackFileName,
+                    senderName: clientName,
+                    to: dest
+                )
+            }
+            return
         }
 
         // Unpack MacBinary or save file into ~/Downloads
@@ -609,7 +699,7 @@ public final class InboundChannelServer {
         }
     }
 
-    private func parseUploadHeaders(data: Data, contentLength: inout Int?, fileName: inout String, clientName: inout String) {
+    private func parseUploadHeaders(data: Data, contentLength: inout Int?, fileName: inout String, clientName: inout String, targetId: inout String) {
         guard let headerStr = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else { return }
         for line in headerStr.components(separatedBy: "\r\n") {
             let lower = line.lowercased()
@@ -622,6 +712,9 @@ public final class InboundChannelServer {
             } else if lower.hasPrefix("x-client-name:") {
                 let val = line.components(separatedBy: ":").dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespaces)
                 if !val.isEmpty { clientName = val }
+            } else if lower.hasPrefix("x-target-id:") {
+                let val = line.components(separatedBy: ":").dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespaces)
+                if !val.isEmpty { targetId = val }
             }
         }
     }

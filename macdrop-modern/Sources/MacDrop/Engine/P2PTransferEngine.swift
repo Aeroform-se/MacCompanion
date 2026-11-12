@@ -227,6 +227,71 @@ public final class P2PTransferEngine: ObservableObject {
         }
     }
 
+    // MARK: - 68k Peer-to-Peer Relay Stream
+
+    public func relayMacBinary(data: Data, fileName: String, senderName: String, to target: DiscoveredMac) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            let startTime = Date()
+            let totalBytes = Int64(data.count)
+
+            DispatchQueue.main.async {
+                self.resetTransferTimers()
+                var prog = TransferProgress()
+                prog.fileName = fileName
+                prog.targetName = "\(senderName) → \(target.name)"
+                prog.fileSize = totalBytes
+                prog.bytesSent = 0
+                prog.status = .streaming
+                prog.isReceiving = false
+                prog.startedAt = startTime
+                self.currentTransfer = prog
+                self.isTransferring = true
+                InvisibleNetPanelController.shared.showDropZone(animated: true)
+                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+            }
+
+            // Check if target has an active reverse channel
+            if InboundChannelServer.shared.hasActiveChannel(for: target.id, ip: target.ip) {
+                DebugLogger.log("[P2P] Relaying down active reverse channel to \(target.name)...")
+                InboundChannelServer.shared.streamToDevice(
+                    id: target.id,
+                    ip: target.ip,
+                    fileName: fileName,
+                    fileData: data,
+                    onProgress: { [weak self] sent, speed in
+                        DispatchQueue.main.async {
+                            self?.currentTransfer?.bytesSent = sent
+                            self?.currentTransfer?.speedBps = speed
+                        }
+                    },
+                    completion: { [weak self] err in
+                        guard let self = self else { return }
+                        if let err = err {
+                            DebugLogger.log("[P2P] Peer relay stream failed: \(err)")
+                            self.handleFailure(message: "Relay failed: \(err.localizedDescription)")
+                        } else {
+                            DebugLogger.log("[P2P] Peer relay completed successfully!")
+                            self.markCompleted(totalBytes: totalBytes, startTime: startTime)
+                        }
+                    }
+                )
+                return
+            }
+
+            // Direct TCP 6803 stream if reachable
+            DebugLogger.log("[P2P] Relaying via direct TCP to \(target.ip):\(target.port)...")
+            let host = NWEndpoint.Host(target.ip)
+            let port = NWEndpoint.Port(integerLiteral: UInt16(target.port))
+            let tcpOptions = NWProtocolTCP.Options()
+            tcpOptions.noDelay = true
+            let params = NWParameters(tls: nil, tcp: tcpOptions)
+            let connection = NWConnection(host: host, port: port, using: params)
+            self.activeConnection = connection
+            self.streamData(connection: connection, data: data, target: target)
+        }
+    }
+
     private func streamData(connection: NWConnection, data: Data, target: DiscoveredMac) {
         let startTime = Date()
         let chunkSize = 32768 // 32 KB chunk streaming matching 68k Mac buffer size
