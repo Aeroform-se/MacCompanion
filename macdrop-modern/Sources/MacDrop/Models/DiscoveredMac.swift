@@ -2,7 +2,7 @@ import Foundation
 
 /// Represents a vintage Macintosh peer discovered on the local network.
 public struct DiscoveredMac: Identifiable, Hashable, Codable {
-    public let id: String
+    public var id: String
     public var name: String
     public var machine: String
     public var ip: String

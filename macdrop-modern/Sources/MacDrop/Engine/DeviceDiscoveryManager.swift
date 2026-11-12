@@ -110,6 +110,8 @@ public final class DeviceDiscoveryManager: ObservableObject {
             )
 
             if let idx = self.devices.firstIndex(where: { $0.id == dev.id || $0.ip == ip }) {
+                self.devices[idx].id = dev.id
+                self.devices[idx].ip = dev.ip
                 self.devices[idx].isOnline = true
                 self.devices[idx].name = dev.name
                 self.devices[idx].machine = dev.machine

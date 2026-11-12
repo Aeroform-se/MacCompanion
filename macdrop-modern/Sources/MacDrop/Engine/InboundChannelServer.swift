@@ -244,10 +244,20 @@ public final class InboundChannelServer {
         // 2. Peer List Request: GET /api/macdrop/peers
         if path.hasPrefix("/api/macdrop/peers") {
             let localIP = Self.getLocalIPAddress()
-            let peerPayload = "PEER|modern_mac|Modern Mac|Macintosh|\(localIP)|6800\n"
-            let resp = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(peerPayload.utf8.count)\r\nConnection: close\r\n\r\n\(peerPayload)"
-            if let d = resp.data(using: .ascii) {
-                _ = d.withUnsafeBytes { send(clientFd, $0.baseAddress, d.count, 0) }
+            let devName = DeviceSettingsManager.shared.effectiveDeviceName
+            let machine = DeviceSettingsManager.shared.machineName
+            let peerPayload = "PEER|modern_mac|\(devName)|\(machine)|\(localIP)|6800\n"
+
+            // Encode payload using macOSRoman with lossy fallback so System 7 displays Swedish accents/umlauts natively
+            let payloadData = peerPayload.data(using: .macOSRoman, allowLossyConversion: true) ?? Data(peerPayload.utf8)
+            let header = "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(payloadData.count)\r\nConnection: close\r\n\r\n"
+            var fullResponse = header.data(using: .ascii) ?? Data()
+            fullResponse.append(payloadData)
+
+            fullResponse.withUnsafeBytes { raw in
+                if let ptr = raw.baseAddress {
+                    _ = send(clientFd, ptr, fullResponse.count, 0)
+                }
             }
             close(clientFd)
             return
@@ -255,9 +265,10 @@ public final class InboundChannelServer {
 
         // 3. Status/Ping: GET /api/macdrop/status
         if path.hasPrefix("/api/macdrop/status") {
-            let json = "{\"status\":\"ok\",\"service\":\"MacDrop Modern Companion\"}\n"
+            let devName = DeviceSettingsManager.shared.effectiveDeviceName.replacingOccurrences(of: "\"", with: "\\\"")
+            let json = "{\"status\":\"ok\",\"service\":\"MacDrop Modern Companion\",\"name\":\"\(devName)\"}\n"
             let resp = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(json.utf8.count)\r\nConnection: close\r\n\r\n\(json)"
-            if let d = resp.data(using: .ascii) {
+            if let d = resp.data(using: .utf8) ?? resp.data(using: .ascii) {
                 _ = d.withUnsafeBytes { send(clientFd, $0.baseAddress, d.count, 0) }
             }
             close(clientFd)
@@ -300,11 +311,12 @@ public final class InboundChannelServer {
         if let old = activeSessions[deviceId] {
             old.close()
         }
-        let session = ChannelSession(clientFd: clientFd, deviceId: deviceId, remoteIP: remoteIP)
+        let session = ChannelSession(clientFd: clientFd, deviceId: deviceId, remoteIP: remoteIP, reportedIP: reportedIP)
         activeSessions[deviceId] = session
         sessionsLock.unlock()
 
         print("[ChannelServer] Vintage Mac Connected: \(deviceName) (\(machineName)) at \(remoteIP)")
+        DebugLogger.log("[ChannelServer] Vintage Mac Connected: \(deviceName) (\(machineName)) at \(remoteIP), id=\(deviceId)")
 
         // Register device in DeviceDiscoveryManager
         DeviceDiscoveryManager.shared.registerChannelDevice(
@@ -335,10 +347,17 @@ public final class InboundChannelServer {
 
     // MARK: - Streaming down Active Channel
 
-    public func hasActiveChannel(for deviceId: String) -> Bool {
+    public func hasActiveChannel(for deviceId: String, ip: String? = nil) -> Bool {
         sessionsLock.lock()
         defer { sessionsLock.unlock() }
         if let s = activeSessions[deviceId], s.isOpen {
+            return true
+        }
+        if activeSessions.values.contains(where: { $0.isOpen && ($0.deviceId == deviceId || (ip != nil && ($0.remoteIP == ip || $0.reportedIP == ip))) }) {
+            return true
+        }
+        // Fallback: if there is any open channel session
+        if activeSessions.values.contains(where: { $0.isOpen }) {
             return true
         }
         return false
@@ -346,26 +365,43 @@ public final class InboundChannelServer {
 
     public func streamToDevice(
         id: String,
+        ip: String? = nil,
         fileName: String,
         fileData: Data,
         onProgress: @escaping (Int64, Double) -> Void,
         completion: @escaping (Error?) -> Void
     ) {
         sessionsLock.lock()
-        guard let session = activeSessions[id], session.isOpen else {
+        var targetSession: ChannelSession? = nil
+
+        if let s = activeSessions[id], s.isOpen {
+            targetSession = s
+        } else if let s = activeSessions.values.first(where: { $0.isOpen && ($0.deviceId == id || (ip != nil && ($0.remoteIP == ip || $0.reportedIP == ip))) }) {
+            targetSession = s
+        } else if let s = activeSessions.values.first(where: { $0.isOpen }) {
+            targetSession = s
+        }
+
+        guard let session = targetSession, session.isOpen else {
+            let activeKeys = activeSessions.keys.joined(separator: ", ")
             sessionsLock.unlock()
-            completion(NSError(domain: "MacDrop", code: -1, userInfo: [NSLocalizedDescriptionKey: "No active channel for device"]))
+            let err = "No active channel for device id=\(id), ip=\(ip ?? "nil") (known active: [\(activeKeys)])"
+            DebugLogger.log("[ChannelServer] \(err)")
+            completion(NSError(domain: "MacDrop", code: -1, userInfo: [NSLocalizedDescriptionKey: err]))
             return
         }
+
         session.isStreaming = true
         session.cancelKeepalive()
         sessionsLock.unlock()
+
+        DebugLogger.log("[ChannelServer] Found channel session for \(session.deviceId) (clientFd=\(session.clientFd), remoteIP=\(session.remoteIP), reportedIP=\(session.reportedIP))")
 
         queue.async {
             let clientFd = session.clientFd
             let transferId = "xfer_\(UUID().uuidString.prefix(8).lowercased())"
 
-            // 1. Send HTTP Header
+            // 1. Send HTTP Header (using UTF-8 with fallback so Swedish accents never fail)
             let cleanName = fileName.replacingOccurrences(of: "\"", with: "")
             let headerStr = "HTTP/1.0 200 OK\r\n" +
                             "Content-Type: application/octet-stream\r\n" +
@@ -373,14 +409,18 @@ public final class InboundChannelServer {
                             "X-MacDrop-File: \(cleanName)\r\n" +
                             "Connection: close\r\n\r\n"
 
-            guard let headerData = headerStr.data(using: .ascii) else {
+            guard let headerData = headerStr.data(using: .utf8) ?? headerStr.data(using: .ascii) else {
+                DebugLogger.log("[ChannelServer] Header encoding error for \(cleanName)")
                 completion(NSError(domain: "MacDrop", code: -2, userInfo: [NSLocalizedDescriptionKey: "Header encoding error"]))
                 return
             }
 
+            DebugLogger.log("[ChannelServer] Sending HTTP header (\(headerData.count) bytes) down clientFd \(clientFd)...")
             let headSent = headerData.withUnsafeBytes { send(clientFd, $0.baseAddress, headerData.count, 0) }
             guard headSent > 0 else {
-                completion(NSError(domain: "MacDrop", code: -3, userInfo: [NSLocalizedDescriptionKey: "Failed to write header to channel"]))
+                let errStr = "Failed to write header to channel (send returned \(headSent), errno=\(errno))"
+                DebugLogger.log("[ChannelServer] \(errStr)")
+                completion(NSError(domain: "MacDrop", code: -3, userInfo: [NSLocalizedDescriptionKey: errStr]))
                 return
             }
 
@@ -390,13 +430,16 @@ public final class InboundChannelServer {
             var offset = 0
             let startTime = Date()
 
+            DebugLogger.log("[ChannelServer] Streaming \(total) bytes in 32KB chunks...")
             while offset < total {
                 let chunkEnd = min(offset + chunkSize, total)
                 let chunk = fileData.subdata(in: offset..<chunkEnd)
 
                 let written = chunk.withUnsafeBytes { send(clientFd, $0.baseAddress, chunk.count, 0) }
                 if written <= 0 {
-                    completion(NSError(domain: "MacDrop", code: -4, userInfo: [NSLocalizedDescriptionKey: "Socket error streaming chunk"]))
+                    let errStr = "Socket error streaming chunk at offset \(offset)/\(total) (errno=\(errno))"
+                    DebugLogger.log("[ChannelServer] \(errStr)")
+                    completion(NSError(domain: "MacDrop", code: -4, userInfo: [NSLocalizedDescriptionKey: errStr]))
                     return
                 }
 
@@ -407,13 +450,19 @@ public final class InboundChannelServer {
                 onProgress(Int64(offset), speedBps)
             }
 
+            DebugLogger.log("[ChannelServer] All \(total) bytes written! Shutting down write side...")
             // 3. Finalize: Shutdown write side to signal EOF to 68k Mac
             shutdown(clientFd, SHUT_WR)
 
             // Allow 68k Mac time to read EOF and flush to disk
             usleep(250_000)
 
+            self.sessionsLock.lock()
+            self.activeSessions.removeValue(forKey: session.deviceId)
+            self.sessionsLock.unlock()
+
             session.close()
+            DebugLogger.log("[ChannelServer] Stream completed successfully!")
             completion(nil)
         }
     }
@@ -457,11 +506,53 @@ public final class InboundChannelServer {
 
         // Read remaining body until contentLength is reached or connection closed
         let targetLength = contentLength ?? Int.max
+        let expectedTotal = contentLength.map { Int64($0) } ?? 0
+        let startTime = Date()
+
+        // 1. Notify user that a file is being received
+        Self.postNotification(
+            title: "MacDrop",
+            subtitle: "Receiving file from \(clientName)...",
+            body: "Downloading \"\(fallbackFileName)\""
+        )
+
+        // 2. Initialize UI progress HUD and menu bar progress ring
+        DispatchQueue.main.async {
+            var prog = TransferProgress()
+            prog.fileName = fallbackFileName
+            prog.targetName = clientName
+            prog.fileSize = expectedTotal
+            prog.bytesSent = Int64(bodyData.count)
+            prog.status = .streaming
+            prog.isReceiving = true
+            prog.startedAt = startTime
+            P2PTransferEngine.shared.currentTransfer = prog
+            P2PTransferEngine.shared.isTransferring = true
+            InvisibleNetPanelController.shared.showDropZone(animated: true)
+        }
+
+        var lastUpdate = Date()
         while bodyData.count < targetLength {
             var chunk = [UInt8](repeating: 0, count: 32768)
             let n = recv(clientFd, &chunk, chunk.count, 0)
             if n <= 0 { break }
             bodyData.append(contentsOf: chunk.prefix(n))
+
+            let now = Date()
+            if now.timeIntervalSince(lastUpdate) >= 0.08 || bodyData.count >= targetLength {
+                lastUpdate = now
+                let currentBytes = Int64(bodyData.count)
+                let elapsed = max(0.05, now.timeIntervalSince(startTime))
+                let speedBps = Double(currentBytes) / elapsed
+                DispatchQueue.main.async {
+                    P2PTransferEngine.shared.currentTransfer?.bytesSent = currentBytes
+                    P2PTransferEngine.shared.currentTransfer?.speedBps = speedBps
+                }
+            }
+        }
+
+        DispatchQueue.main.async {
+            P2PTransferEngine.shared.currentTransfer?.status = .finalizing
         }
 
         // Unpack MacBinary or save file into ~/Downloads
@@ -479,24 +570,45 @@ public final class InboundChannelServer {
         print("[ChannelServer] Successfully received upload from \(clientName): \(savedName) (\(bodyData.count) bytes)")
 
         // Notify user and update UI
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            DispatchQueue.main.async {
-                NSSound(named: "Glass")?.play()
-                P2PTransferEngine.shared.lastDeliveredFile = "Received \"\(savedName)\""
+        DispatchQueue.main.async {
+            NSSound(named: "Glass")?.play()
+            P2PTransferEngine.shared.currentTransfer?.status = .completed
+            P2PTransferEngine.shared.currentTransfer?.bytesSent = Int64(bodyData.count)
+            P2PTransferEngine.shared.currentTransfer?.completedAt = Date()
+            P2PTransferEngine.shared.lastDeliveredFile = "Received \"\(savedName)\""
+            InvisibleNetPanelController.shared.scheduleAutoDismissWatcher()
+        }
 
-                if settings.authorizationStatus == .authorized {
-                    // Notification banner approved: show banner only, do not pop open the main window
-                    let content = UNMutableNotificationContent()
-                    content.title = "MacDrop"
-                    content.subtitle = "File received from \(clientName)"
-                    content.body = "Saved \"\(savedName)\" to Downloads"
-                    content.sound = .default
-                    let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-                    UNUserNotificationCenter.current().add(req)
-                } else {
-                    // Notifications not approved or denied: open drop zone window as fallback feedback
-                    InvisibleNetPanelController.shared.showDropZone(animated: true)
-                }
+        Self.postNotification(
+            title: "MacDrop",
+            subtitle: "File received from \(clientName)",
+            body: "Saved \"\(savedName)\" to Downloads",
+            sound: .default
+        )
+    }
+
+    /// Helper to post system notifications with MacDrop icon attachment
+    public static func postNotification(title: String, subtitle: String, body: String, sound: UNNotificationSound? = nil) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = subtitle
+        content.body = body
+        if let sound = sound {
+            content.sound = sound
+        }
+
+        // Attach icon if available in bundle
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png") ??
+                         Bundle.main.url(forResource: "HappyMac", withExtension: "png") {
+            if let attachment = try? UNNotificationAttachment(identifier: UUID().uuidString, url: iconURL, options: nil) {
+                content.attachments = [attachment]
+            }
+        }
+
+        let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req) { error in
+            if let error = error {
+                print("[ChannelServer] Notification post error: \(error)")
             }
         }
     }
@@ -641,14 +753,16 @@ final class ChannelSession {
     let clientFd: Int32
     let deviceId: String
     let remoteIP: String
+    let reportedIP: String
     var isOpen: Bool = true
     var isStreaming: Bool = false
     private var pollTimer: Timer?
 
-    init(clientFd: Int32, deviceId: String, remoteIP: String) {
+    init(clientFd: Int32, deviceId: String, remoteIP: String, reportedIP: String = "") {
         self.clientFd = clientFd
         self.deviceId = deviceId
         self.remoteIP = remoteIP
+        self.reportedIP = reportedIP
 
         // Disable SIGPIPE on this socket so broken connections return EPIPE rather than killing the app
         var yes: Int32 = 1

@@ -15,8 +15,8 @@ public enum TransferStatus: String, Codable {
         case .idle: return "Ready"
         case .preparing: return "Preparing..."
         case .connecting: return "Connecting to Mac..."
-        case .streaming: return "Sending..."
-        case .finalizing: return "Finalizing on Macintosh..."
+        case .streaming: return "Transferring..."
+        case .finalizing: return "Finalizing..."
         case .completed: return "Delivered!"
         case .failed: return "Transfer Failed"
         case .cancelled: return "Cancelled"
@@ -27,6 +27,7 @@ public enum TransferStatus: String, Codable {
 public struct TransferProgress: Identifiable {
     public let id = UUID()
     public var status: TransferStatus = .idle
+    public var isReceiving: Bool = false
     public var fileName: String = ""
     public var fileSize: Int64 = 0
     public var bytesSent: Int64 = 0

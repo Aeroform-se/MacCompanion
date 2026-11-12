@@ -39,24 +39,38 @@ public final class P2PTransferEngine: ObservableObject {
 
     /// Sends a file directly to a vintage Mac's port 6803 over TCP.
     public func send(fileURL: URL, to target: DiscoveredMac) {
+        let resolvedURL = (fileURL as NSURL).filePathURL?.standardizedFileURL ?? fileURL.resolvingSymlinksInPath().standardizedFileURL
+        let fileName = resolvedURL.lastPathComponent
+
+        DebugLogger.log("[P2P] send called for '\(fileName)' to '\(target.name)' (ip=\(target.ip), id=\(target.id))")
+
+        // Immediately mark transfer state on the main thread so dismissal checks & HUD respond instantly
+        let setupBlock = {
+            var xfer = TransferProgress()
+            xfer.status = .preparing
+            xfer.fileName = fileName
+            xfer.targetName = target.name
+            xfer.targetIP = target.ip
+            xfer.startedAt = Date()
+            self.currentTransfer = xfer
+            self.isTransferring = true
+        }
+
+        if Thread.isMainThread {
+            setupBlock()
+        } else {
+            DispatchQueue.main.sync(execute: setupBlock)
+        }
+
         queue.async { [weak self] in
             guard let self = self else { return }
             self.isCancelled = false
 
-            DispatchQueue.main.async {
-                var xfer = TransferProgress()
-                xfer.status = .preparing
-                xfer.fileName = fileURL.lastPathComponent
-                xfer.targetName = target.name
-                xfer.targetIP = target.ip
-                xfer.startedAt = Date()
-                self.currentTransfer = xfer
-                self.isTransferring = true
-            }
-
             do {
                 // 1. Encode file to standard MacBinary II
-                let encoded = try MacBinaryEncoder.encode(fileURL: fileURL)
+                DebugLogger.log("[P2P] Encoding MacBinary for '\(resolvedURL.path)'...")
+                let encoded = try MacBinaryEncoder.encode(fileURL: resolvedURL)
+                DebugLogger.log("[P2P] MacBinary encoded successfully (\(encoded.totalStreamSize) bytes)")
 
                 DispatchQueue.main.async {
                     if var xfer = self.currentTransfer {
@@ -67,7 +81,10 @@ public final class P2PTransferEngine: ObservableObject {
                 }
 
                 // Check if target is connected via inbound reverse channel (e.g. Basilisk II SLIRP NAT)
-                if InboundChannelServer.shared.hasActiveChannel(for: target.id) {
+                let hasChannel = InboundChannelServer.shared.hasActiveChannel(for: target.id, ip: target.ip)
+                DebugLogger.log("[P2P] Checking reverse channel for \(target.id) (ip=\(target.ip)): \(hasChannel)")
+
+                if hasChannel {
                     let startTime = Date()
                     DispatchQueue.main.async {
                         if var xfer = self.currentTransfer {
@@ -76,9 +93,11 @@ public final class P2PTransferEngine: ObservableObject {
                         }
                     }
 
+                    DebugLogger.log("[P2P] Streaming down active channel to \(target.name)...")
                     InboundChannelServer.shared.streamToDevice(
                         id: target.id,
-                        fileName: fileURL.lastPathComponent,
+                        ip: target.ip,
+                        fileName: fileName,
                         fileData: encoded.fullMacBinaryData,
                         onProgress: { [weak self] bytesSent, speedBps in
                             DispatchQueue.main.async {
@@ -92,8 +111,10 @@ public final class P2PTransferEngine: ObservableObject {
                         completion: { [weak self] error in
                             guard let self = self else { return }
                             if let error = error {
+                                DebugLogger.log("[P2P] Reverse channel stream failed: \(error.localizedDescription)")
                                 self.handleFailure(message: error.localizedDescription)
                             } else {
+                                DebugLogger.log("[P2P] Reverse channel stream completed successfully!")
                                 self.markCompleted(totalBytes: encoded.totalStreamSize, startTime: startTime)
                             }
                         }
@@ -101,7 +122,15 @@ public final class P2PTransferEngine: ObservableObject {
                     return
                 }
 
+                if target.ip.hasPrefix("10.0.2.") {
+                    let msg = "No active connection from \(target.name). Make sure MacDrop is running inside Basilisk II."
+                    DebugLogger.log("[P2P] SLIRP target has no active channel: \(msg)")
+                    self.handleFailure(message: msg)
+                    return
+                }
+
                 // 2. Setup TCP connection to vintage Mac port 6803
+                DebugLogger.log("[P2P] Setting up direct TCP connection to \(target.ip):\(target.port)...")
                 let host = NWEndpoint.Host(target.ip)
                 let port = NWEndpoint.Port(integerLiteral: UInt16(target.port))
 
@@ -118,6 +147,7 @@ public final class P2PTransferEngine: ObservableObject {
                 self.streamData(connection: connection, data: streamData, target: target)
 
             } catch {
+                DebugLogger.log("[P2P] Exception in send: \(error)")
                 DispatchQueue.main.async {
                     if var xfer = self.currentTransfer {
                         xfer.status = .failed

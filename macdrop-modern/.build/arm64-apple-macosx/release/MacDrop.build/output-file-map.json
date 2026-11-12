@@ -14,10 +14,20 @@
     "swiftmodule": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppMain~partial.swiftmodule",
     "swift-dependencies": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppMain.swiftdeps"
   },
+  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/DebugLogger.swift": {
+    "object": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DebugLogger.swift.o",
+    "swiftmodule": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DebugLogger~partial.swiftmodule",
+    "swift-dependencies": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DebugLogger.swiftdeps"
+  },
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/DeviceDiscoveryManager.swift": {
     "object": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swift.o",
     "swiftmodule": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager~partial.swiftmodule",
     "swift-dependencies": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swiftdeps"
+  },
+  "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/DeviceSettingsManager.swift": {
+    "object": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swift.o",
+    "swiftmodule": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceSettingsManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swiftdeps"
   },
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/Engine/InboundChannelServer.swift": {
     "object": "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/InboundChannelServer.swift.o",

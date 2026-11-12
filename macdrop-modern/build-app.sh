@@ -67,5 +67,8 @@ xattr -cr "$APP_BUNDLE"
 echo "==> Ad-hoc code signing $APP_NAME.app..."
 codesign -s - --force --deep "$APP_BUNDLE"
 
+echo "==> Registering with LaunchServices database..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" || true
+
 echo "==> Successfully created $APP_BUNDLE!"
 echo "    You can run it with: open \"$APP_BUNDLE\""
