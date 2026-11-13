@@ -141,7 +141,10 @@ public final class P2PTransferEngine: ObservableObject {
                     }
                 }
 
-                // Check if target is connected via inbound reverse channel (e.g. Basilisk II SLIRP NAT)
+                // Brief grace wait in case a NAT'ed reverse_channel client just finished a transfer and is reconnecting
+                Self.waitForActiveChannelIfNeeded(for: target)
+
+                // Check if target is connected via inbound reverse channel (e.g. Basilisk II SLIRP NAT or NAT bridge)
                 let hasChannel = InboundChannelServer.shared.hasActiveChannel(for: target.id, ip: target.ip)
                 DebugLogger.log("[P2P] Checking reverse channel for \(target.id) (ip=\(target.ip)): \(hasChannel)")
 
@@ -252,6 +255,9 @@ public final class P2PTransferEngine: ObservableObject {
                 InvisibleNetPanelController.shared.showDropZone(animated: true)
                 InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
             }
+
+            // Brief grace wait in case a NAT'ed reverse_channel client just finished a transfer and is reconnecting
+            Self.waitForActiveChannelIfNeeded(for: target)
 
             // Check if target has an active reverse channel
             if InboundChannelServer.shared.hasActiveChannel(for: target.id, ip: target.ip) {
@@ -561,6 +567,24 @@ public final class P2PTransferEngine: ObservableObject {
         }
         self.activeUploadTask = task
         task.resume()
+    }
+
+    private static func waitForActiveChannelIfNeeded(for target: DiscoveredMac, maxWait: TimeInterval = 2.5) {
+        guard !Thread.isMainThread else { return }
+        let shouldWait = target.source == "reverse_channel" || target.supportsDirectTCP != true || target.ip.hasPrefix("10.0.2.")
+        guard shouldWait else { return }
+        if InboundChannelServer.shared.hasActiveChannel(for: target.id, ip: target.ip) {
+            return
+        }
+
+        let deadline = Date().addingTimeInterval(maxWait)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+            if InboundChannelServer.shared.hasActiveChannel(for: target.id, ip: target.ip) {
+                DebugLogger.log("[P2P] Reverse channel reconnected for \(target.name) during grace wait")
+                return
+            }
+        }
     }
 }
 

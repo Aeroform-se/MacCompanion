@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UserNotifications
+import Darwin
 
 /// Main application delegate controlling menu bar life cycle,
 /// invisible net proximity registration, outside-click dismissal,
@@ -11,6 +12,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificat
     private var keyDownMonitor: Any?
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        // Ignore SIGPIPE process-wide so unexpected socket disconnects never kill the app
+        signal(SIGPIPE, SIG_IGN)
+
+        // Ensure LaunchAgent points to current app bundle path if moved
+        DeviceSettingsManager.shared.syncLaunchAtLoginPathIfNeeded()
+
         // Prevent app from quitting when all windows are closed
         NSApp.setActivationPolicy(.accessory)
 

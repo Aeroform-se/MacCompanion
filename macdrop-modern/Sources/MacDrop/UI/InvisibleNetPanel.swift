@@ -20,6 +20,8 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
     @Published public var hoveredDeviceId: String? = nil
     @Published public var showingAddManual: Bool = false
     @Published public var showingSettings: Bool = false
+    public var deviceRowFrames: [String: CGRect] = [:]
+    public var isDraggingOverPanel: Bool = false
     private var isExpanded: Bool = false
     public var isPinnedOpen: Bool = false
     private var autoDismissTimer: Timer?
@@ -184,9 +186,12 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         dismissTimer = nil
         autoDismissTimer?.invalidate()
 
-        // If already expanded and fully solid, avoid redundant opacity re-animations to prevent flickers
-        if isExpanded && panel.isVisible && panel.alphaValue >= 0.99 {
-            updatePanelPosition(animated: animated)
+        // If already expanded and visible, avoid redundant opacity re-animations or position jumps
+        if isExpanded && panel.isVisible {
+            updatePanelPosition(animated: false)
+            if panel.alphaValue < 0.99 {
+                panel.alphaValue = 1.0
+            }
             return
         }
 
@@ -222,6 +227,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         }
 
         isPinnedOpen = false
+        isDraggingOverPanel = false
         showingSettings = false
         showingAddManual = false
         dismissTimer?.invalidate()
@@ -265,6 +271,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
     public func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard canAcceptDrag(sender) else { return [] }
+        isDraggingOverPanel = true
         dismissTimer?.invalidate()
         dismissTimer = nil
         showDropZone(animated: true)
@@ -274,6 +281,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
     public func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         guard canAcceptDrag(sender) else { return [] }
+        isDraggingOverPanel = true
         dismissTimer?.invalidate()
         dismissTimer = nil
         updateHoveredTarget(from: sender)
@@ -281,6 +289,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
     }
 
     public func draggingExited(_ sender: NSDraggingInfo?) {
+        isDraggingOverPanel = false
         let mouseLoc = NSEvent.mouseLocation
         if isMouseInProximity(mouseLoc) || panel.frame.contains(mouseLoc) {
             scheduleDismissCheck(delay: 0.25)
@@ -397,6 +406,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
 
     public func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         DebugLogger.log("[DropZone] performDragOperation invoked")
+        isDraggingOverPanel = false
         guard let fileURLs = extractFileURLs(from: sender), !fileURLs.isEmpty else {
             DebugLogger.log("[DropZone] extractFileURLs returned nil or empty!")
             hideDropZone(animated: true)
@@ -546,7 +556,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
     }
 
     private func updateHoveredTarget(from sender: NSDraggingInfo) {
-        let mouseLocationInWindow = sender.draggingLocation
+        let pointInContainer = containerView.convert(sender.draggingLocation, from: nil)
         let onlineDevices = DeviceDiscoveryManager.shared.devices.filter { $0.isOnline }
 
         guard onlineDevices.count > 1 else {
@@ -554,21 +564,41 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
             return
         }
 
-        // Approximate row height hit test within the drop zone window
-        let contentHeight = panel.frame.height
-        let relativeY = contentHeight - mouseLocationInWindow.y - 48 // skip header
-
-        if relativeY > 0 {
-            let rowIndex = Int(relativeY / 54)
-            if rowIndex >= 0 && rowIndex < onlineDevices.count {
-                let targetId = onlineDevices[rowIndex].id
-                if hoveredDeviceId != targetId {
-                    hoveredDeviceId = targetId
+        // Pixel-exact hit-testing against live SwiftUI row frames (inset vertically to bridge 8pt VStack gap cleanly)
+        for dev in onlineDevices {
+            if let frame = deviceRowFrames[dev.id], frame.insetBy(dx: -8, dy: -4).contains(pointInContainer) {
+                if hoveredDeviceId != dev.id {
+                    hoveredDeviceId = dev.id
                 }
                 return
             }
         }
-        hoveredDeviceId = DeviceDiscoveryManager.shared.selectedDevice?.id ?? onlineDevices.first?.id
+
+        // Fallback approximate math only if row frames have not yet laid out
+        if deviceRowFrames.isEmpty {
+            let relativeY = pointInContainer.y - 36
+            if relativeY > 0 {
+                let rowIndex = Int(relativeY / 62)
+                if rowIndex >= 0 && rowIndex < onlineDevices.count {
+                    let targetId = onlineDevices[rowIndex].id
+                    if hoveredDeviceId != targetId {
+                        hoveredDeviceId = targetId
+                    }
+                    return
+                }
+            }
+        }
+
+        if hoveredDeviceId == nil || !onlineDevices.contains(where: { $0.id == hoveredDeviceId }) {
+            hoveredDeviceId = DeviceDiscoveryManager.shared.selectedDevice?.id ?? onlineDevices.first?.id
+        }
+    }
+}
+
+struct DeviceRowFramesKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
 

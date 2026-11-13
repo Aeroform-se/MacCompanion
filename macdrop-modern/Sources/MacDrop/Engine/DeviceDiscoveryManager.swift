@@ -327,25 +327,42 @@ public final class DeviceDiscoveryManager: ObservableObject {
     // MARK: - Direct TCP 6803 Probing
 
     private func probeKnownDevices(isManual: Bool = false, completion: @escaping () -> Void) {
-        let currentIps = devices.map { $0.ip }
-        let targetIps = Set(currentIps)
+        let (snapshotDevices, isDragging) = DispatchQueue.main.sync {
+            (self.devices, InvisibleNetPanelController.shared.isDraggingOverPanel)
+        }
+
+        // Never destabilize the client list while the user is actively dragging a file over the drop zone
+        if !isManual && isDragging {
+            completion()
+            return
+        }
+
+        var uniqueByIP: [String: DiscoveredMac] = [:]
+        for dev in snapshotDevices where uniqueByIP[dev.ip] == nil {
+            uniqueByIP[dev.ip] = dev
+        }
 
         let group = DispatchGroup()
-        for ip in targetIps {
+        for (ip, dev) in uniqueByIP {
             if ip.hasPrefix("10.0.2.") {
-                if let dev = devices.first(where: { $0.ip == ip }) {
-                    if !InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
-                        self.markDeviceOffline(ip: ip)
+                let hasChannel = InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip)
+                if !hasChannel {
+                    let withinGrace = !isManual && Date().timeIntervalSince(dev.lastSeen) < 45.0
+                    if !withinGrace {
+                        self.markDeviceOffline(ip: ip, force: isManual)
                     }
                 }
                 continue
             }
 
-            // On manual refresh, ALWAYS actively probe every known IP to catch offline Macs instantly!
-            // During background auto-scan, we skip if an active reverse channel is already confirmed live.
+            // During background auto-scan, skip probing if an active reverse channel is live,
+            // or if a NAT'ed reverse-channel client is within its brief post-transfer reconnect grace window.
+            let isLikelyNAT = (dev.source == "reverse_channel" || dev.supportsDirectTCP != true)
             if !isManual {
-                if let dev = devices.first(where: { $0.ip == ip }),
-                   InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
+                if InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
+                    continue
+                }
+                if isLikelyNAT && Date().timeIntervalSince(dev.lastSeen) < 45.0 {
                     continue
                 }
             }
@@ -353,16 +370,44 @@ public final class DeviceDiscoveryManager: ObservableObject {
             group.enter()
             probeSingleIP(ip) { [weak self] online, meta in
                 guard let self = self else { group.leave(); return }
-                if let meta = meta {
+                if var meta = meta {
+                    meta.supportsDirectTCP = true
                     self.updateOrAddDevice(meta)
+                    group.leave()
                 } else if !online {
-                    // Direct probe failed: close any stale reverse channel and force offline immediately
-                    if let dev = self.devices.first(where: { $0.ip == ip }) {
-                        InboundChannelServer.shared.closeChannel(for: dev.id)
+                    let latestDev: DiscoveredMac = DispatchQueue.main.sync {
+                        self.devices.first(where: { $0.id == dev.id || $0.ip == ip }) ?? dev
                     }
+                    let hasLiveChannel = InboundChannelServer.shared.hasActiveChannel(for: latestDev.id, ip: ip)
+                    let stillLikelyNAT = (latestDev.source == "reverse_channel" || latestDev.supportsDirectTCP != true)
+
+                    if !isManual && stillLikelyNAT && (hasLiveChannel || Date().timeIntervalSince(latestDev.lastSeen) < 45.0) {
+                        // NAT'ed client cannot accept direct TCP 6803; keep online via reverse channel / grace window
+                        group.leave()
+                        return
+                    }
+
+                    if isManual && stillLikelyNAT && hasLiveChannel {
+                        // Manual refresh on NAT'ed client: verify reverse channel via liveness check/poll before marking offline
+                        InboundChannelServer.shared.pingChannel(for: latestDev.id)
+                        self.queue.asyncAfter(deadline: .now() + 2.5) {
+                            if InboundChannelServer.shared.hasActiveChannel(for: latestDev.id, ip: ip) {
+                                self.touchDevice(id: latestDev.id)
+                            } else {
+                                self.markDeviceOffline(ip: ip, force: true)
+                            }
+                            group.leave()
+                        }
+                        return
+                    }
+
+                    // Direct probe failed and not protected by NAT reverse channel: close stale channel and mark offline
+                    InboundChannelServer.shared.closeChannel(for: latestDev.id)
                     self.markDeviceOffline(ip: ip, force: true)
+                    group.leave()
+                } else {
+                    group.leave()
                 }
-                group.leave()
             }
         }
 
@@ -387,7 +432,9 @@ public final class DeviceDiscoveryManager: ObservableObject {
         let ourLastOctet = Int(parts[3]) ?? 0
 
         // Only scan unknown IPs on local /24 subnet
-        let knownIps = Set(devices.map { $0.ip })
+        let knownIps: Set<String> = DispatchQueue.main.sync {
+            Set(self.devices.map { $0.ip })
+        }
         var candidateIps: [String] = []
         for i in 1...254 {
             if i == ourLastOctet { continue }
@@ -505,7 +552,8 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
                     conn.receive(minimumIncompleteLength: 1, maximumLength: 512) { data, _, _, recvErr in
                         guard let data = data, let text = String(data: data, encoding: .utf8), recvErr == nil else {
-                            let mac = DiscoveredMac(name: "Macintosh (\(ip))", machine: "Macintosh 68k", ip: ip, isOnline: true)
+                            var mac = DiscoveredMac(name: "Macintosh (\(ip))", machine: "Macintosh 68k", ip: ip, isOnline: true)
+                            mac.supportsDirectTCP = true
                             finishOnce(true, mac)
                             return
                         }
@@ -526,11 +574,12 @@ public final class DeviceDiscoveryManager: ObservableObject {
                                 version: ver,
                                 isOnline: true,
                                 lastSeen: Date(),
-                                source: "direct_tcp"
+                                source: "direct_tcp",
+                                supportsDirectTCP: true
                             )
                             finishOnce(true, dev)
                         } else {
-                            let dev = DiscoveredMac(name: "Macintosh (\(ip))", machine: "Macintosh 68k", ip: ip, isOnline: true)
+                            let dev = DiscoveredMac(name: "Macintosh (\(ip))", machine: "Macintosh 68k", ip: ip, isOnline: true, supportsDirectTCP: true)
                             finishOnce(true, dev)
                         }
                     }
@@ -691,6 +740,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
                 self.devices[idx].version = ver.isEmpty ? existing.version : ver
                 self.devices[idx].lastSeen = Date()
                 self.devices[idx].source = "reverse_channel"
+                self.devices[idx].supportsDirectTCP = existing.supportsDirectTCP
             } else {
                 let dev = DiscoveredMac(
                     id: id,
@@ -716,6 +766,19 @@ public final class DeviceDiscoveryManager: ObservableObject {
         }
     }
 
+    public func touchDevice(id: String) {
+        DispatchQueue.main.async {
+            if let idx = self.devices.firstIndex(where: { $0.id == id }) {
+                self.devices[idx].lastSeen = Date()
+                self.devices[idx].isOnline = true
+                if self.selectedDevice?.id == id {
+                    self.selectedDevice?.lastSeen = self.devices[idx].lastSeen
+                    self.selectedDevice?.isOnline = true
+                }
+            }
+        }
+    }
+
     // MARK: - State Management & Persistence
 
     private func updateOrAddDevice(_ dev: DiscoveredMac) {
@@ -736,6 +799,9 @@ public final class DeviceDiscoveryManager: ObservableObject {
                 self.devices[idx].isOnline = dev.isOnline
                 self.devices[idx].lastSeen = Date()
                 self.devices[idx].source = dev.source
+                if let direct = dev.supportsDirectTCP {
+                    self.devices[idx].supportsDirectTCP = direct
+                }
                 if let relay = dev.relayServerIP {
                     self.devices[idx].relayServerIP = relay
                 }
@@ -764,15 +830,27 @@ public final class DeviceDiscoveryManager: ObservableObject {
                 unique.append(d)
             }
         }
-        self.devices = unique
+        self.devices = unique.sorted { a, b in
+            let cmp = a.name.localizedCaseInsensitiveCompare(b.name)
+            if cmp != .orderedSame {
+                return cmp == .orderedAscending
+            }
+            return a.id < b.id
+        }
     }
 
     private func markDeviceOffline(ip: String, force: Bool = false) {
         DispatchQueue.main.async {
             if let idx = self.devices.firstIndex(where: { $0.ip == ip }) {
                 let dev = self.devices[idx]
-                if !force && InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
-                    return
+                if !force {
+                    if InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
+                        return
+                    }
+                    if (dev.source == "reverse_channel" || dev.supportsDirectTCP != true) &&
+                        Date().timeIntervalSince(dev.lastSeen) < 45.0 {
+                        return
+                    }
                 }
 
                 self.devices[idx].isOnline = false
@@ -804,7 +882,13 @@ public final class DeviceDiscoveryManager: ObservableObject {
                     unique.append(d)
                 }
             }
-            self.devices = unique
+            self.devices = unique.sorted { a, b in
+                let cmp = a.name.localizedCaseInsensitiveCompare(b.name)
+                if cmp != .orderedSame {
+                    return cmp == .orderedAscending
+                }
+                return a.id < b.id
+            }
         }
     }
 

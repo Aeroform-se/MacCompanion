@@ -137,6 +137,27 @@ public struct DropZoneView: View {
                 settingsDrawer
             }
 
+            // Start at login toggle (directly under Set client name)
+            HStack(spacing: 8) {
+                Image(systemName: "power")
+                    .font(.system(size: 12))
+                    .foregroundColor(.primary.opacity(0.75))
+                    .frame(width: 16, alignment: .center)
+                Text("Start at login")
+                    .font(.system(size: 13))
+                    .foregroundColor(.primary.opacity(0.9))
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { settings.launchAtLogin },
+                    set: { settings.setLaunchAtLogin($0) }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+
             // Separator line before Quit
             Divider()
                 .padding(.horizontal, -4)
@@ -193,21 +214,28 @@ public struct DropZoneView: View {
         }
         .onChange(of: discovery.devices.count) { _ in
             DispatchQueue.main.async {
-                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+                let isDragging = InvisibleNetPanelController.shared.isDraggingOverPanel
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: !isDragging)
             }
         }
         .onChange(of: discovery.activeServer) { _ in
             DispatchQueue.main.async {
-                InvisibleNetPanelController.shared.refreshPanelHeight(animated: true)
+                let isDragging = InvisibleNetPanelController.shared.isDraggingOverPanel
+                InvisibleNetPanelController.shared.refreshPanelHeight(animated: !isDragging)
             }
         }
+        .coordinateSpace(name: "DropZoneRoot")
         .background(GeometryReader { geo in
             Color.clear.preference(key: DropZoneHeightKey.self, value: geo.size.height)
         })
         .onPreferenceChange(DropZoneHeightKey.self) { newHeight in
             if newHeight > 50 {
-                InvisibleNetPanelController.shared.updatePanelHeight(newHeight, animated: true)
+                let isDragging = InvisibleNetPanelController.shared.isDraggingOverPanel
+                InvisibleNetPanelController.shared.updatePanelHeight(newHeight, animated: !isDragging)
             }
+        }
+        .onPreferenceChange(DeviceRowFramesKey.self) { frames in
+            InvisibleNetPanelController.shared.deviceRowFrames = frames
         }
     }
 
@@ -461,6 +489,14 @@ public struct DropZoneView: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(isHovered ? Color.accentColor : Color.clear, lineWidth: 1.5)
                 )
+        )
+        .background(
+            GeometryReader { rowGeo in
+                Color.clear.preference(
+                    key: DeviceRowFramesKey.self,
+                    value: [dev.id: rowGeo.frame(in: .named("DropZoneRoot"))]
+                )
+            }
         )
         .contentShape(Rectangle())
         .onTapGesture {

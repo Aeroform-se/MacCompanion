@@ -11,6 +11,7 @@ public final class InboundChannelServer {
     public static let shared = InboundChannelServer()
 
     private let queue = DispatchQueue(label: "se.aeroform.macdrop.channelserver", qos: .userInitiated)
+    private let workerQueue = DispatchQueue(label: "se.aeroform.macdrop.channelworker", qos: .userInitiated, attributes: .concurrent)
     private var udpSource: DispatchSourceRead?
     private var tcpSource: DispatchSourceRead?
     private var udpFd: Int32 = -1
@@ -22,6 +23,7 @@ public final class InboundChannelServer {
     public init() {}
 
     public func start() {
+        signal(SIGPIPE, SIG_IGN)
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         queue.async { [weak self] in
             self?.startUDPDiscovery()
@@ -214,8 +216,8 @@ public final class InboundChannelServer {
         inet_ntop(AF_INET, &clientAddr.sin_addr, &ipBuf, socklen_t(INET_ADDRSTRLEN))
         let remoteIP = String(cString: ipBuf)
 
-        // Read initial HTTP request
-        queue.async { [weak self] in
+        // Read initial HTTP request on concurrent workerQueue so streaming/uploads never block accept()
+        workerQueue.async { [weak self] in
             self?.handleClientConnection(clientFd: clientFd, remoteIP: remoteIP)
         }
     }
@@ -318,7 +320,9 @@ public final class InboundChannelServer {
 
         var peerTokens: [String] = []
         var seenPeerIds = Set<String>()
-        let onlineDevices = DeviceDiscoveryManager.shared.devices.filter { $0.isOnline }
+        let onlineDevices: [DiscoveredMac] = DispatchQueue.main.sync {
+            DeviceDiscoveryManager.shared.devices.filter { $0.isOnline }
+        }
         for dev in onlineDevices {
             // Exclude the requesting client itself
             if !excludeId.isEmpty && dev.id == excludeId {
@@ -397,18 +401,29 @@ public final class InboundChannelServer {
         // If no file transfer begins within 30 seconds, reply with HTTP 204 No Content
         // so the 68k Mac client closes and immediately reconnects, keeping the channel live.
         session.scheduleKeepalivePoll { [weak self, weak session] in
-            guard let self = self, let s = session, s.isOpen, !s.isStreaming else { return }
-            let pollResp = "HTTP/1.0 204 No Content\r\nX-MacDrop-Status: POLL\r\nConnection: close\r\n\r\n"
-            if let d = pollResp.data(using: .ascii) {
-                _ = d.withUnsafeBytes { send(s.clientFd, $0.baseAddress, d.count, 0) }
+            guard let self = self, let s = session else { return }
+            self.workerQueue.async {
+                self.sendKeepalivePollIfIdle(session: s)
             }
-            self.sessionsLock.lock()
-            if self.activeSessions[s.deviceId]?.clientFd == s.clientFd {
-                self.activeSessions.removeValue(forKey: s.deviceId)
-            }
-            self.sessionsLock.unlock()
-            s.close()
         }
+    }
+
+    private func sendKeepalivePollIfIdle(session s: ChannelSession) {
+        sessionsLock.lock()
+        guard s.tryBeginClosingForPoll() else {
+            sessionsLock.unlock()
+            return
+        }
+        if activeSessions[s.deviceId]?.clientFd == s.clientFd {
+            activeSessions.removeValue(forKey: s.deviceId)
+        }
+        sessionsLock.unlock()
+
+        let pollResp = "HTTP/1.0 204 No Content\r\nX-MacDrop-Status: POLL\r\nConnection: close\r\n\r\n"
+        if let d = pollResp.data(using: .ascii) {
+            _ = d.withUnsafeBytes { send(s.clientFd, $0.baseAddress, d.count, 0) }
+        }
+        s.close()
     }
 
     // MARK: - Streaming down Active Channel
@@ -417,7 +432,7 @@ public final class InboundChannelServer {
         sessionsLock.lock()
         defer { sessionsLock.unlock() }
 
-        // Prune any dead or closed channel sockets immediately
+        // Prune any dead or closed channel sockets immediately (skipping currently streaming sessions)
         var deadKeys: [String] = []
         for (k, s) in activeSessions {
             if !s.isOpen || !s.checkLiveness() {
@@ -437,13 +452,24 @@ public final class InboundChannelServer {
         return false
     }
 
+    /// Triggers an immediate HTTP 204 keepalive poll so a live 68k client will immediately reconnect
+    public func pingChannel(for deviceId: String) {
+        sessionsLock.lock()
+        let session = activeSessions[deviceId]
+        sessionsLock.unlock()
+        if let s = session {
+            workerQueue.async { [weak self] in
+                self?.sendKeepalivePollIfIdle(session: s)
+            }
+        }
+    }
+
     /// Explicitly closes and removes an active channel session (e.g. when direct probe fails)
     public func closeChannel(for deviceId: String) {
         sessionsLock.lock()
-        defer { sessionsLock.unlock() }
-        if let s = activeSessions.removeValue(forKey: deviceId) {
-            s.close()
-        }
+        let session = activeSessions.removeValue(forKey: deviceId)
+        sessionsLock.unlock()
+        session?.close()
     }
 
     public func streamToDevice(
@@ -463,7 +489,7 @@ public final class InboundChannelServer {
             targetSession = s
         }
 
-        guard let session = targetSession, session.isOpen else {
+        guard let session = targetSession, session.tryStartStreaming() else {
             let activeKeys = activeSessions.keys.joined(separator: ", ")
             sessionsLock.unlock()
             let err = "No active channel for device id=\(id), ip=\(ip ?? "nil") (known active: [\(activeKeys)])"
@@ -471,16 +497,22 @@ public final class InboundChannelServer {
             completion(NSError(domain: "MacDrop", code: -1, userInfo: [NSLocalizedDescriptionKey: err]))
             return
         }
-
-        session.isStreaming = true
-        session.cancelKeepalive()
         sessionsLock.unlock()
 
         DebugLogger.log("[ChannelServer] Found channel session for \(session.deviceId) (clientFd=\(session.clientFd), remoteIP=\(session.remoteIP), reportedIP=\(session.reportedIP))")
 
-        queue.async {
+        workerQueue.async {
             let clientFd = session.clientFd
             let transferId = "xfer_\(UUID().uuidString.prefix(8).lowercased())"
+
+            let cleanupSession = {
+                self.sessionsLock.lock()
+                if self.activeSessions[session.deviceId]?.clientFd == session.clientFd {
+                    self.activeSessions.removeValue(forKey: session.deviceId)
+                }
+                self.sessionsLock.unlock()
+                session.close()
+            }
 
             // 1. Send HTTP Header (using UTF-8 with fallback so Swedish accents never fail)
             let cleanName = fileName.replacingOccurrences(of: "\"", with: "")
@@ -492,6 +524,7 @@ public final class InboundChannelServer {
 
             guard let headerData = headerStr.data(using: .utf8) ?? headerStr.data(using: .ascii) else {
                 DebugLogger.log("[ChannelServer] Header encoding error for \(cleanName)")
+                cleanupSession()
                 completion(NSError(domain: "MacDrop", code: -2, userInfo: [NSLocalizedDescriptionKey: "Header encoding error"]))
                 return
             }
@@ -501,6 +534,7 @@ public final class InboundChannelServer {
             guard headSent > 0 else {
                 let errStr = "Failed to write header to channel (send returned \(headSent), errno=\(errno))"
                 DebugLogger.log("[ChannelServer] \(errStr)")
+                cleanupSession()
                 completion(NSError(domain: "MacDrop", code: -3, userInfo: [NSLocalizedDescriptionKey: errStr]))
                 return
             }
@@ -520,6 +554,7 @@ public final class InboundChannelServer {
                 if written <= 0 {
                     let errStr = "Socket error streaming chunk at offset \(offset)/\(total) (errno=\(errno))"
                     DebugLogger.log("[ChannelServer] \(errStr)")
+                    cleanupSession()
                     completion(NSError(domain: "MacDrop", code: -4, userInfo: [NSLocalizedDescriptionKey: errStr]))
                     return
                 }
@@ -538,11 +573,9 @@ public final class InboundChannelServer {
             // Allow 68k Mac time to read EOF and flush to disk
             usleep(250_000)
 
-            self.sessionsLock.lock()
-            self.activeSessions.removeValue(forKey: session.deviceId)
-            self.sessionsLock.unlock()
-
-            session.close()
+            cleanupSession()
+            // Refresh lastSeen so post-transfer reconnect doesn't trigger a false offline drop
+            DeviceDiscoveryManager.shared.touchDevice(id: session.deviceId)
             DebugLogger.log("[ChannelServer] Stream completed successfully!")
             completion(nil)
         }
@@ -608,7 +641,7 @@ public final class InboundChannelServer {
 
         // 1. Notify user that a file is being received or relayed
         Self.postNotification(
-            title: "MacDrop",
+            title: "MacDrop X",
             subtitle: isPeerRelay ? "Relaying file from \(clientName)..." : "Receiving file from \(clientName)...",
             body: "\(isPeerRelay ? "Forwarding" : "Downloading") \"\(fallbackFileName)\""
         )
@@ -655,9 +688,11 @@ public final class InboundChannelServer {
         }
 
         if isPeerRelay {
-            let targetDev = DeviceDiscoveryManager.shared.devices.first(where: {
-                $0.id == targetId || $0.ip == targetId || $0.name.lowercased() == targetId.lowercased()
-            })
+            let targetDev: DiscoveredMac? = DispatchQueue.main.sync {
+                DeviceDiscoveryManager.shared.devices.first(where: {
+                    $0.id == targetId || $0.ip == targetId || $0.name.lowercased() == targetId.lowercased()
+                })
+            }
             let targetLabel = targetDev?.name ?? targetId
 
             // Send HTTP 200 response to sender immediately
@@ -875,6 +910,7 @@ final class ChannelSession {
     let reportedIP: String
     var isOpen: Bool = true
     var isStreaming: Bool = false
+    private let stateLock = NSLock()
     private var pollTimer: Timer?
 
     init(clientFd: Int32, deviceId: String, remoteIP: String, reportedIP: String = "") {
@@ -886,6 +922,23 @@ final class ChannelSession {
         // Disable SIGPIPE on this socket so broken connections return EPIPE rather than killing the app
         var yes: Int32 = 1
         setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    func tryStartStreaming() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard isOpen && !isStreaming else { return false }
+        isStreaming = true
+        return true
+    }
+
+    func tryBeginClosingForPoll() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard isOpen && !isStreaming else { return false }
+        isOpen = false
+        Darwin.close(clientFd)
+        return true
     }
 
     func scheduleKeepalivePoll(action: @escaping () -> Void) {
@@ -907,9 +960,20 @@ final class ChannelSession {
     /// Checks if the underlying TCP channel socket is still open and alive.
     /// Uses non-blocking MSG_PEEK to detect EOF (peer closed) or socket errors.
     func checkLiveness() -> Bool {
-        guard isOpen else { return false }
+        stateLock.lock()
+        if !isOpen {
+            stateLock.unlock()
+            return false
+        }
+        if isStreaming {
+            stateLock.unlock()
+            return true
+        }
+        let fd = clientFd
+        stateLock.unlock()
+
         var b: UInt8 = 0
-        let r = recv(clientFd, &b, 1, MSG_PEEK | MSG_DONTWAIT)
+        let r = recv(fd, &b, 1, MSG_PEEK | MSG_DONTWAIT)
         if r == 0 {
             // EOF received: remote end cleanly disconnected
             close()
@@ -928,9 +992,13 @@ final class ChannelSession {
 
     func close() {
         cancelKeepalive()
-        if isOpen {
-            isOpen = false
-            Darwin.close(clientFd)
+        stateLock.lock()
+        let shouldClose = isOpen
+        isOpen = false
+        let fd = clientFd
+        stateLock.unlock()
+        if shouldClose {
+            Darwin.close(fd)
         }
     }
 }
