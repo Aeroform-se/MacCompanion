@@ -21,14 +21,16 @@ public final class P2PTransferEngine: ObservableObject {
 
     public init() {}
 
-    /// Sets a temporary delivery notice (e.g. "Sent ...", "Received ...") and clears it automatically after 5 seconds.
+    /// Sets a temporary delivery notice (e.g. "Sent ...", "Received ...") and clears it automatically after 4 seconds.
     public func setDeliveredNotice(_ message: String) {
-        clearLastDeliveredTimer?.invalidate()
-        lastDeliveredFile = message
-        clearLastDeliveredTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.lastDeliveredFile = nil
-                InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+        DispatchQueue.main.async {
+            self.clearLastDeliveredTimer?.invalidate()
+            self.lastDeliveredFile = message
+            self.clearLastDeliveredTimer = Timer.scheduledTimer(withTimeInterval: 4.0, repeats: false) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.lastDeliveredFile = nil
+                    InvisibleNetPanelController.shared.updatePanelPosition(animated: true)
+                }
             }
         }
     }
@@ -410,20 +412,23 @@ public final class P2PTransferEngine: ObservableObject {
         // Send TCP FIN to signal end of stream
         connection.send(content: nil, contentContext: .finalMessage, isComplete: true, completion: .idempotent)
 
-        // Wait up to 3 seconds for Mac to close its socket after flushing to disk
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { [weak self] (_, _, isComplete, _) in
-            guard let self = self else { return }
+        var completedOnce = false
+        let safeComplete = { [weak self] in
+            guard let self = self, !completedOnce else { return }
+            completedOnce = true
             self.markCompleted(totalBytes: totalBytes, startTime: startTime)
             connection.cancel()
             self.activeConnection = nil
         }
 
+        // Wait up to 3 seconds for Mac to close its socket after flushing to disk
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1024) { (_, _, _, _) in
+            safeComplete()
+        }
+
         // Fallback safety timer if client closes silently
-        queue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-            guard let self = self, self.isTransferring else { return }
-            self.markCompleted(totalBytes: totalBytes, startTime: startTime)
-            connection.cancel()
-            self.activeConnection = nil
+        queue.asyncAfter(deadline: .now() + 2.5) {
+            safeComplete()
         }
     }
 
@@ -458,7 +463,7 @@ public final class P2PTransferEngine: ObservableObject {
 
             // Post system notification alert for sent file
             InboundChannelServer.postNotification(
-                title: "MacDrop",
+                title: "MacDrop X",
                 subtitle: "File delivered to \(targetName)",
                 body: "Sent \"\(fileName)\" successfully",
                 sound: .default

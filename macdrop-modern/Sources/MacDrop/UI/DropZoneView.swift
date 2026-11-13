@@ -35,7 +35,7 @@ public struct DropZoneView: View {
         VStack(spacing: 8) {
             // Header with comfortable top padding & current device name
             HStack {
-                Text("MacDrop")
+                Text("MacDrop X")
                     .font(.system(size: 13, weight: .bold))
 
                 Spacer()
@@ -56,8 +56,8 @@ public struct DropZoneView: View {
                 deviceDropSlots
             }
 
-            // Status message if a file was recently delivered
-            if let last = transfer.lastDeliveredFile {
+            // Status message if a file was recently delivered (only shown when not actively transferring)
+            if transfer.currentTransfer == nil, let last = transfer.lastDeliveredFile {
                 let text = last.hasPrefix("Received") || last.hasPrefix("Sent") ? "✓ \(last)" : "✓ Sent \"\(last)\""
                 HStack {
                     Text(text)

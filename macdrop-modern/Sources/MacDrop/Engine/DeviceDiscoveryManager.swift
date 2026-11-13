@@ -86,7 +86,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
             // 3. Probe known devices directly on TCP port 6803
             queryGroup.enter()
-            self.probeKnownDevices { queryGroup.leave() }
+            self.probeKnownDevices(isManual: isManual) { queryGroup.leave() }
 
             // 4. Sweep local /24 subnet for any newly connected vintage Macs on TCP 6803
             queryGroup.enter()
@@ -326,7 +326,7 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
     // MARK: - Direct TCP 6803 Probing
 
-    private func probeKnownDevices(completion: @escaping () -> Void) {
+    private func probeKnownDevices(isManual: Bool = false, completion: @escaping () -> Void) {
         let currentIps = devices.map { $0.ip }
         let targetIps = Set(currentIps)
 
@@ -340,9 +340,14 @@ public final class DeviceDiscoveryManager: ObservableObject {
                 }
                 continue
             }
-            if let dev = devices.first(where: { $0.ip == ip }),
-               InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
-                continue
+
+            // On manual refresh, ALWAYS actively probe every known IP to catch offline Macs instantly!
+            // During background auto-scan, we skip if an active reverse channel is already confirmed live.
+            if !isManual {
+                if let dev = devices.first(where: { $0.ip == ip }),
+                   InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
+                    continue
+                }
             }
 
             group.enter()
@@ -351,7 +356,11 @@ public final class DeviceDiscoveryManager: ObservableObject {
                 if let meta = meta {
                     self.updateOrAddDevice(meta)
                 } else if !online {
-                    self.markDeviceOffline(ip: ip)
+                    // Direct probe failed: close any stale reverse channel and force offline immediately
+                    if let dev = self.devices.first(where: { $0.ip == ip }) {
+                        InboundChannelServer.shared.closeChannel(for: dev.id)
+                    }
+                    self.markDeviceOffline(ip: ip, force: true)
                 }
                 group.leave()
             }
@@ -665,33 +674,42 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
     public func registerChannelDevice(id: String, name: String, machine: String, ver: String, ip: String) {
         DispatchQueue.main.async {
-            let dev = DiscoveredMac(
-                id: id,
-                name: name.isEmpty ? "Macintosh (\(ip))" : name,
-                machine: machine.isEmpty ? "Macintosh 68k" : machine,
-                ip: ip,
-                port: 6803,
-                version: ver,
-                isOnline: true,
-                lastSeen: Date(),
-                source: "reverse_channel"
-            )
+            let cleanName = name.isEmpty ? "Macintosh (\(ip))" : name
 
-            if let idx = self.devices.firstIndex(where: { $0.id == dev.id || $0.ip == ip }) {
-                self.devices[idx].id = dev.id
-                self.devices[idx].ip = dev.ip
+            if let idx = self.devices.firstIndex(where: { $0.id == id || $0.ip == ip }) {
+                let existing = self.devices[idx]
+                self.devices[idx].id = id
+                self.devices[idx].ip = ip
                 self.devices[idx].isOnline = true
-                self.devices[idx].name = dev.name
-                self.devices[idx].machine = dev.machine
-                self.devices[idx].version = dev.version
+                // Preserve custom manual name if incoming name is just a generic fallback
+                if !cleanName.isEmpty && cleanName != "Macintosh" && !cleanName.hasPrefix("Macintosh (") {
+                    self.devices[idx].name = cleanName
+                } else if existing.name.isEmpty || existing.name == "Macintosh" || existing.name.hasPrefix("Macintosh (") {
+                    self.devices[idx].name = cleanName
+                }
+                self.devices[idx].machine = machine.isEmpty ? existing.machine : machine
+                self.devices[idx].version = ver.isEmpty ? existing.version : ver
                 self.devices[idx].lastSeen = Date()
                 self.devices[idx].source = "reverse_channel"
             } else {
+                let dev = DiscoveredMac(
+                    id: id,
+                    name: cleanName,
+                    machine: machine.isEmpty ? "Macintosh 68k" : machine,
+                    ip: ip,
+                    port: 6803,
+                    version: ver,
+                    isOnline: true,
+                    lastSeen: Date(),
+                    source: "reverse_channel"
+                )
                 self.devices.append(dev)
             }
 
-            if self.selectedDevice == nil || self.selectedDevice?.id == dev.id {
-                self.selectedDevice = self.devices.first(where: { $0.id == dev.id })
+            self.deduplicateDevices()
+
+            if self.selectedDevice == nil || self.selectedDevice?.id == id || self.selectedDevice?.ip == ip {
+                self.selectedDevice = self.devices.first(where: { $0.id == id || $0.ip == ip })
             }
 
             self.persistDevices()
@@ -702,11 +720,17 @@ public final class DeviceDiscoveryManager: ObservableObject {
 
     private func updateOrAddDevice(_ dev: DiscoveredMac) {
         DispatchQueue.main.async {
-            if let idx = self.devices.firstIndex(where: { $0.ip == dev.ip }) {
-                if !dev.id.hasPrefix("device_") || self.devices[idx].id.hasPrefix("device_") {
+            if let idx = self.devices.firstIndex(where: { $0.id == dev.id || $0.ip == dev.ip }) {
+                let existing = self.devices[idx]
+                if !dev.id.hasPrefix("device_") || existing.id.hasPrefix("device_") {
                     self.devices[idx].id = dev.id
                 }
-                self.devices[idx].name = dev.name
+                self.devices[idx].ip = dev.ip
+                if !dev.name.isEmpty && dev.name != "Macintosh" && !dev.name.hasPrefix("Macintosh (") {
+                    self.devices[idx].name = dev.name
+                } else if existing.name.isEmpty || existing.name == "Macintosh" || existing.name.hasPrefix("Macintosh (") {
+                    self.devices[idx].name = dev.name
+                }
                 self.devices[idx].machine = dev.machine
                 self.devices[idx].version = dev.version
                 self.devices[idx].isOnline = dev.isOnline
@@ -718,18 +742,36 @@ public final class DeviceDiscoveryManager: ObservableObject {
             } else {
                 self.devices.append(dev)
             }
-            if self.selectedDevice?.ip == dev.ip {
-                self.selectedDevice = dev
+
+            self.deduplicateDevices()
+
+            if self.selectedDevice?.ip == dev.ip || self.selectedDevice?.id == dev.id {
+                self.selectedDevice = self.devices.first(where: { $0.id == dev.id || $0.ip == dev.ip })
             }
             self.persistDevices()
         }
     }
 
-    private func markDeviceOffline(ip: String) {
+    private func deduplicateDevices() {
+        var seenIds = Set<String>()
+        var seenIps = Set<String>()
+        var unique: [DiscoveredMac] = []
+        for d in self.devices {
+            if d.ip == "192.168.2.68" { continue } // Strip unreachable internal NAT IP
+            if !seenIds.contains(d.id) && !seenIps.contains(d.ip) {
+                seenIds.insert(d.id)
+                seenIps.insert(d.ip)
+                unique.append(d)
+            }
+        }
+        self.devices = unique
+    }
+
+    private func markDeviceOffline(ip: String, force: Bool = false) {
         DispatchQueue.main.async {
             if let idx = self.devices.firstIndex(where: { $0.ip == ip }) {
                 let dev = self.devices[idx]
-                if InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
+                if !force && InboundChannelServer.shared.hasActiveChannel(for: dev.id, ip: dev.ip) {
                     return
                 }
 
@@ -751,10 +793,13 @@ public final class DeviceDiscoveryManager: ObservableObject {
     private func loadPersistedDevices() {
         if let data = UserDefaults.standard.data(forKey: devicesKey),
            let saved = try? JSONDecoder().decode([DiscoveredMac].self, from: data) {
+            var seenIds = Set<String>()
             var seenIps = Set<String>()
             var unique: [DiscoveredMac] = []
             for d in saved {
-                if !seenIps.contains(d.ip) {
+                if d.ip == "192.168.2.68" { continue } // Strip unreachable internal NAT IP
+                if !seenIds.contains(d.id) && !seenIps.contains(d.ip) {
+                    seenIds.insert(d.id)
                     seenIps.insert(d.ip)
                     unique.append(d)
                 }

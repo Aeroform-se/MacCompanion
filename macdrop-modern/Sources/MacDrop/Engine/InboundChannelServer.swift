@@ -281,7 +281,7 @@ public final class InboundChannelServer {
         // 4. Status/Ping: GET /api/macdrop/status
         if path.hasPrefix("/api/macdrop/status") {
             let devName = DeviceSettingsManager.shared.effectiveDeviceName.replacingOccurrences(of: "\"", with: "\\\"")
-            let json = "{\"status\":\"ok\",\"service\":\"MacDrop Modern Companion\",\"name\":\"\(devName)\"}\n"
+            let json = "{\"status\":\"ok\",\"service\":\"MacDrop X Companion\",\"name\":\"\(devName)\"}\n"
             let resp = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(json.utf8.count)\r\nConnection: close\r\n\r\n\(json)"
             if let d = resp.data(using: .utf8) ?? resp.data(using: .ascii) {
                 _ = d.withUnsafeBytes { send(clientFd, $0.baseAddress, d.count, 0) }
@@ -314,9 +314,10 @@ public final class InboundChannelServer {
         let machine = DeviceSettingsManager.shared.machineName
 
         var lines: [String] = []
-        lines.append("SERVER|MacDrop (\(devName))|\(machine)")
+        lines.append("SERVER|MacDrop X (\(devName))|\(machine)")
 
         var peerTokens: [String] = []
+        var seenPeerIds = Set<String>()
         let onlineDevices = DeviceDiscoveryManager.shared.devices.filter { $0.isOnline }
         for dev in onlineDevices {
             // Exclude the requesting client itself
@@ -326,6 +327,10 @@ public final class InboundChannelServer {
             if dev.ip == remoteIP && dev.source == "reverse_channel" {
                 continue
             }
+            if seenPeerIds.contains(dev.id) {
+                continue
+            }
+            seenPeerIds.insert(dev.id)
             lines.append("PEER|\(dev.id)|\(dev.name)|\(dev.machine)")
             peerTokens.append("\(dev.id)|\(dev.name)|\(dev.machine)")
         }
@@ -375,13 +380,17 @@ public final class InboundChannelServer {
         print("[ChannelServer] Vintage Mac Connected: \(deviceName) (\(machineName)) at \(remoteIP)")
         DebugLogger.log("[ChannelServer] Vintage Mac Connected: \(deviceName) (\(machineName)) at \(remoteIP), id=\(deviceId)")
 
+        // Effective reachable IP from this modern host:
+        // Basilisk II SLIRP NAT maps to 10.0.2.15; for real network machines, remoteIP is always the actual reachable IP.
+        let effectiveIP = remoteIP.hasPrefix("10.0.2.") ? "10.0.2.15" : remoteIP
+
         // Register device in DeviceDiscoveryManager
         DeviceDiscoveryManager.shared.registerChannelDevice(
             id: deviceId,
             name: deviceName,
             machine: machineName,
             ver: rawVer,
-            ip: remoteIP.hasPrefix("10.0.2.") ? "10.0.2.15" : (reportedIP.isEmpty ? remoteIP : reportedIP)
+            ip: effectiveIP
         )
 
         // Install keepalive poll timer:
@@ -407,6 +416,18 @@ public final class InboundChannelServer {
     public func hasActiveChannel(for deviceId: String, ip: String? = nil) -> Bool {
         sessionsLock.lock()
         defer { sessionsLock.unlock() }
+
+        // Prune any dead or closed channel sockets immediately
+        var deadKeys: [String] = []
+        for (k, s) in activeSessions {
+            if !s.isOpen || !s.checkLiveness() {
+                deadKeys.append(k)
+            }
+        }
+        for k in deadKeys {
+            activeSessions.removeValue(forKey: k)
+        }
+
         if let s = activeSessions[deviceId], s.isOpen {
             return true
         }
@@ -414,6 +435,15 @@ public final class InboundChannelServer {
             return true
         }
         return false
+    }
+
+    /// Explicitly closes and removes an active channel session (e.g. when direct probe fails)
+    public func closeChannel(for deviceId: String) {
+        sessionsLock.lock()
+        defer { sessionsLock.unlock() }
+        if let s = activeSessions.removeValue(forKey: deviceId) {
+            s.close()
+        }
     }
 
     public func streamToDevice(
@@ -674,7 +704,7 @@ public final class InboundChannelServer {
         }
 
         Self.postNotification(
-            title: "MacDrop",
+            title: "MacDrop X",
             subtitle: "File received from \(clientName)",
             body: "Saved \"\(savedName)\" to Downloads",
             sound: .default
@@ -872,6 +902,28 @@ final class ChannelSession {
             self?.pollTimer?.invalidate()
             self?.pollTimer = nil
         }
+    }
+
+    /// Checks if the underlying TCP channel socket is still open and alive.
+    /// Uses non-blocking MSG_PEEK to detect EOF (peer closed) or socket errors.
+    func checkLiveness() -> Bool {
+        guard isOpen else { return false }
+        var b: UInt8 = 0
+        let r = recv(clientFd, &b, 1, MSG_PEEK | MSG_DONTWAIT)
+        if r == 0 {
+            // EOF received: remote end cleanly disconnected
+            close()
+            return false
+        }
+        if r < 0 {
+            let err = errno
+            if err != EAGAIN && err != EWOULDBLOCK {
+                // Socket error: connection broken / reset
+                close()
+                return false
+            }
+        }
+        return true
     }
 
     func close() {

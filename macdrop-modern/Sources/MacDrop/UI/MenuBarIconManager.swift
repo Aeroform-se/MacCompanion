@@ -75,7 +75,7 @@ public final class MenuBarIconManager: NSObject, NSDraggingDestination {
         guard let xfer = transfer, (xfer.status == .streaming || xfer.status == .finalizing) else {
             button.image = createBaseStatusIcon()
             button.title = ""
-            button.toolTip = "MacDrop"
+            button.toolTip = "MacDrop X"
             return
         }
 
@@ -83,7 +83,7 @@ public final class MenuBarIconManager: NSObject, NSDraggingDestination {
         let progress = CGFloat(xfer.progressFraction)
         button.image = createProgressIcon(fraction: progress)
         button.title = ""
-        button.toolTip = xfer.status == .finalizing ? "MacDrop: Finalizing..." : "MacDrop: \(xfer.percentInt)%"
+        button.toolTip = xfer.status == .finalizing ? "MacDrop X: Finalizing..." : "MacDrop X: \(xfer.percentInt)%"
     }
 
     /// Creates the standard monochrome menu bar icon (Retro Mac with a downward drop arrow)

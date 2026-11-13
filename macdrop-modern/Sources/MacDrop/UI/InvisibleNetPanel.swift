@@ -358,27 +358,30 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         guard !P2PTransferEngine.shared.isTransferring && !isPinnedOpen else { return }
 
         let mouseLoc = NSEvent.mouseLocation
-        let isInProximity = isMouseInProximity(mouseLoc)
+        let isInOpenZone = isMouseInProximity(mouseLoc)
+        let isOverWindow = (isExpanded && panel.isVisible && panel.frame.contains(mouseLoc))
         let isMovingTowardsMenuBar = (mouseLoc.y >= lastDragY - 2)
         lastDragY = mouseLoc.y
 
-        if isInProximity {
-            // Only expand if moving towards the menu bar (prevents desktop files from triggering on downward drags)
-            if !isExpanded {
-                if isMovingTowardsMenuBar {
-                    dismissTimer?.invalidate()
-                    dismissTimer = nil
-                    showDropZone(animated: true)
-                }
-            } else {
+        if !isExpanded {
+            // Static sense zone to open the window
+            if isInOpenZone && isMovingTowardsMenuBar {
                 dismissTimer?.invalidate()
                 dismissTimer = nil
+                showDropZone(animated: true)
             }
-        } else if isExpanded {
-            // Immediately retract when mouse pointer leaves the sense zone
-            dismissTimer?.invalidate()
-            dismissTimer = nil
-            hideDropZone(animated: true)
+        } else {
+            // Once opened, the window stays open if the pointer is anywhere over
+            // the window's actual current bounds (even with 4+ clients) OR the sense zone.
+            if isOverWindow || isInOpenZone {
+                dismissTimer?.invalidate()
+                dismissTimer = nil
+            } else {
+                // Immediately retract when mouse pointer leaves both the window frame and the sense zone
+                dismissTimer?.invalidate()
+                dismissTimer = nil
+                hideDropZone(animated: true)
+            }
         }
     }
 
@@ -386,7 +389,7 @@ public final class InvisibleNetPanelController: NSObject, ObservableObject, NSDr
         guard !isPinnedOpen && !P2PTransferEngine.shared.isTransferring else { return }
         if isExpanded {
             let mouseLoc = NSEvent.mouseLocation
-            if !panel.frame.contains(mouseLoc) {
+            if !panel.frame.contains(mouseLoc) && !isMouseInProximity(mouseLoc) {
                 hideDropZone(animated: true)
             }
         }
