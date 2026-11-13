@@ -42,6 +42,8 @@ MacDrop X is a MacDrop client for your modern mac (x86 / arm, Mac Os 11+) that l
 
 MacDrop X also gives you the option to use MacDrop on all your clients without running a MacCompanion server, supporting transfers in all directions including 68k client <-> 68k client.
 
+Available now in **[Releases](https://github.com/Aeroform-se/MacCompanion/releases)**.
+
 ---
 
 ### MacAI
@@ -98,6 +100,12 @@ docker compose up -d
 
 **Do you love MacCompanion?**
 Support this project by [Buying me a coffe](https://buymeacoffee.com/MacCompanion)
+
+---
+
+## Feature requests, issues and discussion
+
+Please join the project thread at the [68kmla forum](https://68kmla.org/bb/threads/airdrop-spotify-ai-and-more-for-your-68k-mac-meet-maccompanion.53581/)
 
 ---
 
