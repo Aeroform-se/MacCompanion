@@ -11,12 +11,16 @@ CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
-echo "==> Building $APP_NAME (Release configuration)..."
-swift build -c release
+echo "==> Building $APP_NAME (Universal Binary: arm64 + x86_64, macOS 11.0+)..."
+swift build -c release --triple arm64-apple-macosx11.0
+swift build -c release --triple x86_64-apple-macosx11.0
 
-RELEASE_BIN="$SCRIPT_DIR/.build/release/$APP_NAME"
-if [ ! -f "$RELEASE_BIN" ]; then
-    echo "Error: Binary not found at $RELEASE_BIN"
+ARM_BIN="$SCRIPT_DIR/.build/arm64-apple-macosx/release/$APP_NAME"
+X86_BIN="$SCRIPT_DIR/.build/x86_64-apple-macosx/release/$APP_NAME"
+if [ ! -f "$ARM_BIN" ] || [ ! -f "$X86_BIN" ]; then
+    echo "Error: Expected both arm64 and x86_64 binaries:"
+    echo "  $ARM_BIN"
+    echo "  $X86_BIN"
     exit 1
 fi
 
@@ -24,8 +28,9 @@ echo "==> Creating macOS App Bundle..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
-# Copy binary
-cp "$RELEASE_BIN" "$MACOS_DIR/$APP_NAME"
+# Combine arm64 + x86_64 slices into a single Universal Mach-O binary
+echo "==> Creating Universal Binary with lipo..."
+lipo -create "$ARM_BIN" "$X86_BIN" -output "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
 
 # Copy Info.plist
@@ -77,7 +82,7 @@ EOF
 
     # Compile Assets.car for macOS Notification Center banner app icon
     if command -v actool >/dev/null 2>&1 || xcrun -find actool >/dev/null 2>&1; then
-        xcrun actool "$ASSET_DIR" --compile "$RESOURCES_DIR" --platform macosx --minimum-deployment-target 13.0 --app-icon AppIcon --output-partial-info-plist /tmp/appicon_partial.plist >/dev/null 2>&1 || true
+        xcrun actool "$ASSET_DIR" --compile "$RESOURCES_DIR" --platform macosx --minimum-deployment-target 11.0 --app-icon AppIcon --output-partial-info-plist /tmp/appicon_partial.plist >/dev/null 2>&1 || true
         if [ -f "$RESOURCES_DIR/Assets.car" ]; then
             cp "$RESOURCES_DIR/Assets.car" "$SCRIPT_DIR/Resources/Assets.car" || true
         fi

@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "MacDrop",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v11)
     ],
     products: [
         .executable(name: "MacDrop", targets: ["MacDrop"])

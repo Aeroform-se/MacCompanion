@@ -17,7 +17,7 @@
 
   ],
   "swiftCommands" : {
-    "C.MacDrop-arm64-apple-macosx15.0-release.module" : {
+    "C.MacDrop-arm64-apple-macosx11.0-release.module" : {
       "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
       "fileList" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/sources",
       "importPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/Modules",
@@ -108,7 +108,7 @@
       ],
       "otherArguments" : [
         "-target",
-        "arm64-apple-macosx13.0",
+        "arm64-apple-macosx11.0",
         "-O",
         "-j14",
         "-DSWIFT_PACKAGE",
@@ -266,7 +266,7 @@
       "-I",
       "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/Modules",
       "-target",
-      "arm64-apple-macosx13.0",
+      "arm64-apple-macosx11.0",
       "-O",
       "-j14",
       "-DSWIFT_PACKAGE",

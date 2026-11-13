@@ -1,7 +1,7 @@
 version: "Apple Swift version 6.1.2 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)"
-options: "905ae9c2ebedd433f9475f04a5dca1875e1599197aaf4568b45f5c4beab838bb"
-build_start_time: [1794565231, 793862000]
-build_end_time: [1794565237, 390026000]
+options: "cc9c78eab137976682d9fe6eaaae5b69cf0b3e896bc024468c97faf61761846e"
+build_start_time: [1794575392, 639645000]
+build_end_time: [1794575400, 849819000]
 inputs:
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/AppDelegate.swift": [1794565010, 646463087]
   "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/AppMain.swift": [1794411273, 58731371]

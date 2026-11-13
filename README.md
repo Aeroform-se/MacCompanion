@@ -34,7 +34,13 @@ Like Airdrop, if it was invented in the 1990's. Biderectional file transfers wit
 - **OS:** System 7.0 – Mac OS 9.2.2 (System 7.1–7.5.5 recommended).
 - **CPU:** 68000 minimum (Macintosh Plus, SE, Classic, and up).
 - **RAM:** 512 KB minimum / 1024 KB preferred.
-- **Networking:** MacTCP 2.0.6+ or Open Transport (zero-configuration reverse-push channel & UDP auto-discovery).
+- **Networking:** MacTCP 2.0.6+ or Open Transport.
+
+### New! MacDrop X
+
+MacDrop X is a MacDrop client for your modern mac (x86 / arm, Mac Os 11+) that lives in your menu bar for easy access.
+
+MacDrop X also gives you the option to use MacDrop on all your clients without running a MacCompanion server, supporting transfers in all directions including 68k client <-> 68k client.
 
 ---
 

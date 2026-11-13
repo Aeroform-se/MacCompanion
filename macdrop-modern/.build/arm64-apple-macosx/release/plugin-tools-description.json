@@ -17,10 +17,10 @@
 
   ],
   "swiftCommands" : {
-    "C.MacDrop-arm64-apple-macosx15.0-release.module" : {
+    "C.MacDrop-x86_64-apple-macosx11.0-release.module" : {
       "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
-      "fileList" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/sources",
-      "importPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/Modules",
+      "fileList" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/sources",
+      "importPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/Modules",
       "inputs" : [
         {
           "kind" : "file",
@@ -80,40 +80,40 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/sources"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/sources"
         }
       ],
       "isLibrary" : false,
       "moduleName" : "MacDrop",
-      "moduleOutputPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/Modules/MacDrop.swiftmodule",
+      "moduleOutputPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/Modules/MacDrop.swiftmodule",
       "objects" : [
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppDelegate.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppMain.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DebugLogger.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/InboundChannelServer.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/MacBinaryEncoder.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/P2PTransferEngine.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DiscoveredMac.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/TransferState.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceManagerPopover.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DropZoneView.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/InvisibleNetPanel.swift.o",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/MenuBarIconManager.swift.o"
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/AppDelegate.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/AppMain.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DebugLogger.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/InboundChannelServer.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/MacBinaryEncoder.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/P2PTransferEngine.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DiscoveredMac.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/TransferState.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceManagerPopover.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DropZoneView.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/InvisibleNetPanel.swift.o",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/MenuBarIconManager.swift.o"
       ],
       "otherArguments" : [
         "-target",
-        "arm64-apple-macosx13.0",
+        "x86_64-apple-macosx11.0",
         "-O",
         "-j14",
         "-DSWIFT_PACKAGE",
         "-module-cache-path",
-        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/ModuleCache",
+        "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/ModuleCache",
         "-parseable-output",
         "-Xfrontend",
         "-entry-point-function-name",
@@ -151,67 +151,67 @@
         "-package-name",
         "macdrop_modern"
       ],
-      "outputFileMapPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/output-file-map.json",
+      "outputFileMapPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/output-file-map.json",
       "outputs" : [
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppDelegate.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/AppDelegate.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppMain.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/AppMain.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DebugLogger.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DebugLogger.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/InboundChannelServer.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/InboundChannelServer.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/MacBinaryEncoder.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/MacBinaryEncoder.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/P2PTransferEngine.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/P2PTransferEngine.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DiscoveredMac.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DiscoveredMac.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/TransferState.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/TransferState.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceManagerPopover.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceManagerPopover.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DropZoneView.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DropZoneView.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/InvisibleNetPanel.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/InvisibleNetPanel.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/MenuBarIconManager.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/MenuBarIconManager.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/Modules/MacDrop.swiftmodule"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/Modules/MacDrop.swiftmodule"
         }
       ],
       "prepareForIndexing" : false,
@@ -231,7 +231,7 @@
         "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/InvisibleNetPanel.swift",
         "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/MenuBarIconManager.swift"
       ],
-      "tempsPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build",
+      "tempsPath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build",
       "wholeModuleOptimization" : true
     }
   },
@@ -264,14 +264,14 @@
       "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/InvisibleNetPanel.swift",
       "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/MenuBarIconManager.swift",
       "-I",
-      "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/Modules",
+      "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/Modules",
       "-target",
-      "arm64-apple-macosx13.0",
+      "x86_64-apple-macosx11.0",
       "-O",
       "-j14",
       "-DSWIFT_PACKAGE",
       "-module-cache-path",
-      "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/ModuleCache",
+      "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/ModuleCache",
       "-parseable-output",
       "-Xfrontend",
       "-entry-point-function-name",
@@ -327,7 +327,7 @@
     "enableAllTraits" : false
   },
   "writeCommands" : {
-    "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/sources" : {
+    "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/sources" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -391,9 +391,9 @@
           "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/Sources/MacDrop/UI/MenuBarIconManager.swift"
         }
       ],
-      "outputFilePath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/sources"
+      "outputFilePath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/sources"
     },
-    "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.product/Objects.LinkFileList" : {
+    "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.product/Objects.LinkFileList" : {
       "alwaysOutOfDate" : false,
       "inputs" : [
         {
@@ -402,64 +402,64 @@
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppDelegate.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/AppDelegate.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/AppMain.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/AppMain.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DebugLogger.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DebugLogger.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceDiscoveryManager.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceManagerPopover.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceManagerPopover.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DeviceSettingsManager.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DiscoveredMac.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DiscoveredMac.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/DropZoneView.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/DropZoneView.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/InboundChannelServer.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/InboundChannelServer.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/InvisibleNetPanel.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/InvisibleNetPanel.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/MacBinaryEncoder.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/MacBinaryEncoder.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/MenuBarIconManager.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/MenuBarIconManager.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/P2PTransferEngine.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/P2PTransferEngine.swift.o"
         },
         {
           "kind" : "file",
-          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.build/TransferState.swift.o"
+          "name" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.build/TransferState.swift.o"
         }
       ],
-      "outputFilePath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/MacDrop.product/Objects.LinkFileList"
+      "outputFilePath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/MacDrop.product/Objects.LinkFileList"
     },
-    "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt" : {
+    "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt" : {
       "alwaysOutOfDate" : true,
       "inputs" : [
         {
@@ -471,7 +471,7 @@
           "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
         }
       ],
-      "outputFilePath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+      "outputFilePath" : "/Users/adrianberggren/Documents/vscode-projects/spotify68k/macdrop-modern/.build/x86_64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
     }
   }
 }
