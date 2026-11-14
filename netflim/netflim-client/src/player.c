@@ -1,6 +1,8 @@
 #include "player.h"
 #include "codec.h"
 
+#include <Devices.h>
+#include <Files.h>
 #include <Memory.h>
 #include <OSUtils.h>
 #include <Quickdraw.h>
@@ -8,6 +10,19 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef __m68k__
+static inline unsigned long FastTicks(void) {
+    unsigned long t;
+    __asm__ volatile ("move.l 0x016A:w,%0" : "=r"(t));
+    return t;
+}
+#define FAST_TICKS() FastTicks()
+#else
+#define FAST_TICKS() TickCount()
+#endif
+
+#define SND_DRIVER_REFNUM     (-4)  /* Classic Mac ".Sound" driver */
+#define SND_FF_HDR_BYTES      6     /* int16 mode=ffMode(0) + Fixed rate=1.0(0x00010000) */
 #define SND_NUM_BUFS          10
 #define SND_BUF_SIZE          4096
 #define SND_FLUSH_THRESHOLD   2960  /* ~8 ticks (133ms) low-overhead audio batching */
@@ -30,7 +45,10 @@ static unsigned char  *gOffscreenFB      = NULL;
 static BitMap          gOffscreenBM;
 static WindowPtr       gFsWindow         = NULL;
 
-/* Sound Manager state (22,254.5 Hz 8-bit unsigned mono PCM) */
+/* Direct .Sound driver (ffMode PBWrite) + Sound Manager fallback */
+static Boolean         gUseDirectSndDrv  = true;
+static ParamBlockRec   gSndPBs[SND_NUM_BUFS];
+static unsigned long   gSndSubmitTick[SND_NUM_BUFS];
 static SndChannelPtr   gSndChan          = NULL;
 static SndCallBackUPP  gSndCallBackUPP   = NULL;
 static unsigned char  *gSndBufs[SND_NUM_BUFS];
@@ -57,7 +75,7 @@ static short           gLastHudSecond    = -1;
 static short           gLastHudBuf       = -1;
 
 /* ============================================================================
- * Sound Manager Interrupt Callback & Single-Copy Audio Pipeline
+ * Direct .Sound Driver (ffMode) & Sound Manager Fallback Audio Pipeline
  * ============================================================================ */
 
 static pascal void SoundBufferCallback(SndChannelPtr chan, SndCommand *cmd) {
@@ -67,17 +85,29 @@ static pascal void SoundBufferCallback(SndChannelPtr chan, SndCommand *cmd) {
     }
 }
 
-static short CountBusySoundBuffers(void) {
-    short i, busy = 0;
-    for (i = 0; i < SND_NUM_BUFS; i++) {
-        if (gSndBufBusy[i]) busy++;
+static void EnsureSoundChannelOpen(void) {
+    OSErr err;
+    if (gSndChan != NULL) return;
+    if (!gSndCallBackUPP) {
+        gSndCallBackUPP = NewSndCallBackProc(SoundBufferCallback);
     }
-    return busy;
+    /* initNoInterp disables Sound Manager software linear interpolation on 68030 */
+    err = SndNewChannel(&gSndChan, sampledSynth, initMono | initNoInterp, gSndCallBackUPP);
+    if (err != noErr) {
+        gSndChan = NULL;
+    }
 }
 
 static void FlushAudioChannel(void) {
     SndCommand cmd;
     short i;
+
+    if (gUseDirectSndDrv) {
+        ParamBlockRec killPB;
+        memset(&killPB, 0, sizeof(killPB));
+        killPB.ioParam.ioRefNum = SND_DRIVER_REFNUM;
+        PBKillIO(&killPB, false);
+    }
 
     if (gSndChan) {
         cmd.cmd    = flushCmd;
@@ -90,22 +120,11 @@ static void FlushAudioChannel(void) {
 
     for (i = 0; i < SND_NUM_BUFS; i++) {
         gSndBufBusy[i] = 0;
+        gSndPBs[i].ioParam.ioResult = noErr;
     }
     gSndWriteSlot = -1;
     gSndWritePos  = 0;
     gSndNextSlot  = 0;
-}
-
-static void EnsureSoundChannelOpen(void) {
-    OSErr err;
-    if (gSndChan != NULL) return;
-    if (!gSndCallBackUPP) {
-        gSndCallBackUPP = NewSndCallBackProc(SoundBufferCallback);
-    }
-    err = SndNewChannel(&gSndChan, sampledSynth, initMono, gSndCallBackUPP);
-    if (err != noErr) {
-        gSndChan = NULL;
-    }
 }
 
 static void CloseSoundChannel(void) {
@@ -116,13 +135,47 @@ static void CloseSoundChannel(void) {
     }
 }
 
+static Boolean IsAudioSlotBusy(short slot) {
+    if (!gSndBufBusy[slot]) return false;
+    if (gUseDirectSndDrv) {
+        if (gSndPBs[slot].ioParam.ioResult <= 0) {
+            gSndBufBusy[slot] = 0;
+            return false;
+        }
+        /* Watchdog: if an emulator stubs .Sound (-4) without firing ASC interrupts */
+        if ((long)(FAST_TICKS() - gSndSubmitTick[slot]) > 36L) {
+            ParamBlockRec killPB;
+            short i;
+            memset(&killPB, 0, sizeof(killPB));
+            killPB.ioParam.ioRefNum = SND_DRIVER_REFNUM;
+            PBKillIO(&killPB, false);
+            gUseDirectSndDrv = false;
+            EnsureSoundChannelOpen();
+            for (i = 0; i < SND_NUM_BUFS; i++) {
+                gSndBufBusy[i] = 0;
+                gSndPBs[i].ioParam.ioResult = noErr;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+static short CountBusySoundBuffers(void) {
+    short i, busy = 0;
+    for (i = 0; i < SND_NUM_BUFS; i++) {
+        if (IsAudioSlotBusy(i)) busy++;
+    }
+    return busy;
+}
+
 static short AcquireAudioWriteSlot(void) {
     short tries;
     if (gSndWriteSlot >= 0) return gSndWriteSlot;
 
     for (tries = 0; tries < SND_NUM_BUFS; tries++) {
         short cand = (gSndNextSlot + tries) % SND_NUM_BUFS;
-        if (!gSndBufBusy[cand] && gSndBufs[cand] != NULL) {
+        if (!IsAudioSlotBusy(cand) && gSndBufs[cand] != NULL) {
             gSndWriteSlot = cand;
             gSndWritePos  = 0;
             gSndNextSlot  = (cand + 1) % SND_NUM_BUFS;
@@ -136,18 +189,55 @@ static void DispatchCurrentAudioSlot(void) {
     short slot = gSndWriteSlot;
     SndCommand cmd;
 
-    if (slot < 0 || gSndWritePos == 0 || !gSndChan || gMuted || gVodStreamSilent) {
+    if (slot < 0 || gSndWritePos == 0 || gMuted || gVodStreamSilent) {
         gSndWriteSlot = -1;
         gSndWritePos  = 0;
         return;
     }
 
-    gSndHdrs[slot].samplePtr = (Ptr)gSndBufs[slot];
-    gSndHdrs[slot].length    = gSndWritePos;
-    gSndBufBusy[slot]        = 1;
+    if (gUseDirectSndDrv) {
+        OSErr err;
+        ParamBlockRec *pb = &gSndPBs[slot];
 
-    gSndWriteSlot = -1;
-    gSndWritePos  = 0;
+        gSndWriteSlot = -1;
+        memset(pb, 0, sizeof(ParamBlockRec));
+        pb->ioParam.ioRefNum     = SND_DRIVER_REFNUM;
+        pb->ioParam.ioBuffer     = (Ptr)gSndBufs[slot];
+        pb->ioParam.ioReqCount   = (long)SND_FF_HDR_BYTES + (long)gSndWritePos;
+        pb->ioParam.ioCompletion = NULL;
+
+        gSndBufBusy[slot]    = 1;
+        gSndSubmitTick[slot] = FAST_TICKS();
+        gSndWritePos         = 0;
+
+        err = PBWrite(pb, true);
+        if (err == noErr && pb->ioParam.ioResult >= 0) {
+            return;
+        }
+
+        /* Fallback to Sound Manager if .Sound driver (-4) rejected PBWrite */
+        gSndBufBusy[slot] = 0;
+        gUseDirectSndDrv  = false;
+        EnsureSoundChannelOpen();
+        if (!gSndChan) return;
+        gSndHdrs[slot].samplePtr = (Ptr)(gSndBufs[slot] + SND_FF_HDR_BYTES);
+        gSndHdrs[slot].length    = (unsigned long)(pb->ioParam.ioReqCount - SND_FF_HDR_BYTES);
+        gSndBufBusy[slot]        = 1;
+    } else {
+        if (!gSndChan) {
+            EnsureSoundChannelOpen();
+            if (!gSndChan) {
+                gSndWriteSlot = -1;
+                gSndWritePos  = 0;
+                return;
+            }
+        }
+        gSndHdrs[slot].samplePtr = (Ptr)(gSndBufs[slot] + SND_FF_HDR_BYTES);
+        gSndHdrs[slot].length    = gSndWritePos;
+        gSndBufBusy[slot]        = 1;
+        gSndWriteSlot            = -1;
+        gSndWritePos             = 0;
+    }
 
     cmd.cmd    = bufferCmd;
     cmd.param1 = 0;
@@ -168,7 +258,8 @@ static void DispatchCurrentAudioSlot(void) {
 static void FeedFrameAudio(const unsigned char *pcm, unsigned short pcmBytes) {
     unsigned short offset = 0;
 
-    if (gMuted || gVodStreamSilent || !pcm || pcmBytes == 0 || !gSndChan) return;
+    if (gMuted || gVodStreamSilent || !pcm || pcmBytes == 0) return;
+    if (!gUseDirectSndDrv && !gSndChan) return;
 
     while (offset < pcmBytes) {
         short slot = AcquireAudioWriteSlot();
@@ -181,7 +272,7 @@ static void FeedFrameAudio(const unsigned char *pcm, unsigned short pcmBytes) {
         take  = (unsigned short)(pcmBytes - offset);
         if (take > avail) take = avail;
 
-        NetFlimFastCopy(gSndBufs[slot] + gSndWritePos, pcm + offset, take);
+        NetFlimFastCopy(gSndBufs[slot] + SND_FF_HDR_BYTES + gSndWritePos, pcm + offset, take);
         gSndWritePos = (unsigned short)(gSndWritePos + take);
         offset       = (unsigned short)(offset + take);
 
@@ -388,10 +479,21 @@ Boolean PlayerInit(void) {
     SetRect(&gOffscreenBM.bounds, 0, 0, NETFLIM_WIDTH, NETFLIM_HEIGHT);
 
     for (i = 0; i < SND_NUM_BUFS; i++) {
-        gSndBufs[i] = (unsigned char *)NewPtrClear(SND_BUF_SIZE);
-        gSndBufBusy[i] = 0;
+        gSndBufs[i] = (unsigned char *)NewPtrClear(SND_FF_HDR_BYTES + SND_BUF_SIZE);
+        if (gSndBufs[i]) {
+            /* Pre-populate 6-byte FFSynthRec header: mode = ffMode(0), count = 1.0 (0x00010000) */
+            gSndBufs[i][0] = 0x00;
+            gSndBufs[i][1] = 0x00;
+            gSndBufs[i][2] = 0x00;
+            gSndBufs[i][3] = 0x01;
+            gSndBufs[i][4] = 0x00;
+            gSndBufs[i][5] = 0x00;
+        }
+        gSndBufBusy[i]    = 0;
+        gSndSubmitTick[i] = 0;
+        memset(&gSndPBs[i], 0, sizeof(ParamBlockRec));
         memset(&gSndHdrs[i], 0, sizeof(SoundHeader));
-        gSndHdrs[i].samplePtr     = (Ptr)gSndBufs[i];
+        gSndHdrs[i].samplePtr     = gSndBufs[i] ? (Ptr)(gSndBufs[i] + SND_FF_HDR_BYTES) : NULL;
         gSndHdrs[i].sampleRate    = rate22khz;
         gSndHdrs[i].encode        = stdSH;
         gSndHdrs[i].baseFrequency = kMiddleC;
@@ -459,13 +561,13 @@ Boolean PlayerStart(const NetFlimVideoItem *item, WindowPtr mainWin, Boolean sta
     gActiveProfile[sizeof(gActiveProfile) - 1] = '\0';
 
     NetFlimResetFramebuffer(gOffscreenFB);
-    if (!gMuted) {
+    if (!gMuted && !gUseDirectSndDrv) {
         EnsureSoundChannelOpen();
     }
 
     if (!NetVodOpen(gVideoId, gActiveProfile, gMuted, 0)) {
         gState = kPlayerError;
-        strcpy(gStatusMsg, "Failed to open UDP stream (port 6804)");
+        strcpy(gStatusMsg, "Failed to open TCP stream (port 6800)");
         return false;
     }
 
@@ -476,8 +578,8 @@ Boolean PlayerStart(const NetFlimVideoItem *item, WindowPtr mainWin, Boolean sta
     gTotalTicks       = item->durationSec * 60UL;
     gByterate         = 0;
     gVodStreamSilent  = gMuted || item->silent;
-    gStartReqTick     = TickCount();
-    gNextFrameDueTick = TickCount();
+    gStartReqTick     = FAST_TICKS();
+    gNextFrameDueTick = FAST_TICKS();
     gLastHudSecond    = -1;
     gLastHudBuf       = -1;
     sprintf(gStatusMsg, "Buffering %s (%s)...", gVideoTitle, gActiveProfile);
@@ -519,11 +621,11 @@ void PlayerTogglePause(void) {
         NetVodSetPaused(true);
         strcpy(gStatusMsg, "Paused");
     } else if (gState == kPlayerPaused) {
-        if (!gMuted && !gVodStreamSilent) {
+        if (!gMuted && !gVodStreamSilent && !gUseDirectSndDrv) {
             EnsureSoundChannelOpen();
         }
         gState = kPlayerPlaying;
-        gNextFrameDueTick = TickCount();
+        gNextFrameDueTick = FAST_TICKS();
         NetVodSetPaused(false);
         sprintf(gStatusMsg, "Playing %s (%s)", gVideoTitle, gActiveProfile);
     }
@@ -537,7 +639,7 @@ void PlayerToggleMute(void) {
     gMuted = !gMuted;
     if (gMuted) {
         FlushAudioChannel();
-    } else if (gState == kPlayerPlaying || gState == kPlayerPaused) {
+    } else if ((gState == kPlayerPlaying || gState == kPlayerPaused) && !gUseDirectSndDrv) {
         EnsureSoundChannelOpen();
     }
 
@@ -547,7 +649,7 @@ void PlayerToggleMute(void) {
         unsigned long resumeFrame = gCurrentFrame;
         if (NetVodOpen(gVideoId, gActiveProfile, gMuted, resumeFrame)) {
             if (wasPaused) NetVodSetPaused(true);
-            gNextFrameDueTick = TickCount();
+            gNextFrameDueTick = FAST_TICKS();
         }
     }
 }
@@ -587,6 +689,11 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
         return false;
     }
 
+    now = FAST_TICKS();
+    if (gState == kPlayerPlaying && (long)(now - gNextFrameDueTick) < 0L && !NetVodNeedsFastPump()) {
+        return true;
+    }
+
     NetVodPump();
     NetVodGetInfo(&info);
 
@@ -594,7 +701,7 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
         return false;
     }
 
-    now = TickCount();
+    now = FAST_TICKS();
 
     if (info.openStatus != NF_OPEN_OK) {
         NetVodClose();
@@ -741,7 +848,9 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
 
         if (needBlit) {
             BlitCurrentFrame(mainWin, viewportRect);
-            NetVodPump();
+            if (info.bufferedReady < 24 || NetVodNeedsFastPump()) {
+                NetVodPump();
+            }
         }
     }
 
@@ -752,7 +861,7 @@ Boolean PlayerWantsZeroSleep(void) {
     if (gState == kPlayerBuffering) return true;
     if (gState != kPlayerPlaying) return false;
     if (NetVodNeedsFastPump()) return true;
-    if ((long)(gNextFrameDueTick - TickCount()) <= 1L) return true;
+    if ((long)(gNextFrameDueTick - FAST_TICKS()) <= 1L) return true;
     return false;
 }
 

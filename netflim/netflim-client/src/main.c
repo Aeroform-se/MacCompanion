@@ -358,9 +358,13 @@ static void RefreshCatalog(void) {
                 strcpy(gGalleryStatus, "No NetFlim server found - click Server...");
             }
             SyncMenuState();
+            if (gMainWindow && !PlayerIsFullscreen()) {
+                DrawMainWindow();
+            }
             InvalidateWindow();
             return;
         }
+        gServerConnected = true;
     }
 
     FormatIPAddress(NetGetServerIP(), ipBuf);
@@ -1176,6 +1180,52 @@ static void HandleKeyDown(const EventRecord *ev) {
  * Main Application Entry Point
  * ============================================================================ */
 
+#ifdef __m68k__
+static inline unsigned long FastTicks(void) {
+    unsigned long t;
+    __asm__ volatile ("move.l 0x016A:w,%0" : "=r"(t));
+    return t;
+}
+#define FAST_TICKS() FastTicks()
+#else
+#define FAST_TICKS() TickCount()
+#endif
+
+static Boolean AnyHardwareInputPending(void) {
+#ifdef __m68k__
+    /*
+     * Classic Mac OS Low-Memory Globals (Inside Macintosh Vol I / II):
+     * - 0x014C (EvQHdr.qHead): Non-NULL whenever an OS event (mouse click,
+     *   key press, disk insert) has been posted by interrupt handlers.
+     * - 0x0172 (MBState): Bit 7 is 0 when mouse button is down, 1 when up.
+     * - 0x0174 (KeyMap):  16-byte (4 longword) bitmask of depressed keys.
+     * Reading these via short-word absolute addressing takes < 0.8 us with
+     * ZERO Toolbox traps!
+     */
+    unsigned long pending;
+    __asm__ volatile (
+        "move.l 0x014C:w,%0\n\t"
+        "bne.s  1f\n\t"
+        "btst   #7,0x0172:w\n\t"
+        "beq.s  0f\n\t"
+        "move.l 0x0174:w,%0\n\t"
+        "or.l   0x0178:w,%0\n\t"
+        "or.l   0x017C:w,%0\n\t"
+        "or.l   0x0180:w,%0\n\t"
+        "bra.s  1f\n"
+        "0:\n\t"
+        "moveq  #1,%0\n"
+        "1:\n"
+        : "=&d"(pending)
+        :
+        : "cc"
+    );
+    return (pending != 0UL);
+#else
+    return true;
+#endif
+}
+
 int main(void) {
     Handle menuBar;
     Rect winBounds;
@@ -1254,12 +1304,7 @@ int main(void) {
             Boolean streamingActive;
             Boolean uiChanged = false;
             Boolean haveEvent = false;
-            unsigned long now = TickCount();
-
-            if (now != lastSysTick) {
-                SystemTask();
-                lastSysTick = now;
-            }
+            unsigned long now = FAST_TICKS();
 
             streamingActive = PlayerTick(gMainWindow, &gViewportRect, &uiChanged);
             if (uiChanged) {
@@ -1278,21 +1323,31 @@ int main(void) {
                 }
             }
 
-            now = TickCount();
+            now = FAST_TICKS();
             if (streamingActive) {
-                if (gHasWNE) {
-                    if (!PlayerWantsZeroSleep()) {
-                        haveEvent = WaitNextEvent(everyEvent, &ev, 1L, NULL);
-                        lastWneTick = now;
-                    } else if (EventAvail(everyEvent, &ev) || (now - lastWneTick) >= 4UL) {
-                        haveEvent = WaitNextEvent(everyEvent, &ev, 0L, NULL);
-                        lastWneTick = now;
+                /*
+                 * Zero-Trap Active Playback Path:
+                 * Do NOT call SystemTask(), EventAvail(), or WaitNextEvent() on
+                 * every tick while streaming video (which costs 2-4 ms per tick
+                 * under System 7 + Open Transport). Instead, inspect low-memory
+                 * hardware input globals in < 0.8 us and only call GetNextEvent
+                 * when an actual mouse click or keystroke is pending.
+                 */
+                if (AnyHardwareInputPending()) {
+                    haveEvent = GetNextEvent(mDownMask | mUpMask | keyDownMask | autoKeyMask | diskMask, &ev);
+                    lastWneTick = now;
+                } else if (!PlayerIsFullscreen() && (now - lastWneTick) >= 60UL) {
+                    if (EventAvail(updateMask | activMask, &ev)) {
+                        haveEvent = GetNextEvent(updateMask | activMask, &ev);
                     }
-                } else if (EventAvail(everyEvent, &ev)) {
-                    haveEvent = GetNextEvent(everyEvent, &ev);
+                    lastWneTick = now;
                 }
             } else {
                 long sleepTicks = (PlayerGetState() == kPlayerPaused) ? 2L : 4L;
+                if (now != lastSysTick) {
+                    SystemTask();
+                    lastSysTick = now;
+                }
                 haveEvent = gHasWNE
                     ? WaitNextEvent(everyEvent, &ev, sleepTicks, NULL)
                     : GetNextEvent(everyEvent, &ev);

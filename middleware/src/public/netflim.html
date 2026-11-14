@@ -1094,11 +1094,119 @@
                 <label for="clip-duration">Clip Length (sec, optional):</label>
                 <input type="number" id="clip-duration" min="1" step="0.5" placeholder="Full duration" />
               </div>
-              <div>
+              <div style="display:flex; align-items:flex-end; padding-bottom:6px; gap:14px; flex-wrap:wrap;">
                 <label class="checkbox-inline">
                   <input type="checkbox" id="opt-silent" />
                   <span>Silent (omit audio)</span>
                 </label>
+                <button type="button" class="subtle-btn" id="adv-toggle-btn" onclick="toggleAdvancedPanel()">
+                  &#9881; Show Advanced Codec &amp; 68030 CPU Tuning &darr;
+                </button>
+              </div>
+            </div>
+
+            <!-- Collapsible Advanced Codec & 68030 CPU Tuning Drawer -->
+            <div id="advanced-codec-panel" class="dotted-divider hidden" style="display:flex; flex-direction:column; gap:12px; background:#f3f3f3; padding:12px 14px; border:1px dashed #000;">
+              <div class="section-title-row" style="font-size:13px;">
+                <span>Advanced Codec &amp; 68030 CPU Tuning</span>
+                <span class="code-pill" id="adv-bw-preview">Profile Default Byterate</span>
+              </div>
+
+              <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                <span style="font-size:11px; font-weight:bold;">Quick Hardware Presets:</span>
+                <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('se30_smooth')">
+                  SE/30 Smooth (2800 B/t &bull; 30fps &bull; Ordered)
+                </button>
+                <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('se30_lowcpu')">
+                  SE/30 Ultra-Low CPU (2600 B/t &bull; 30fps &bull; Lines Only)
+                </button>
+                <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('se30_error_tuned')">
+                  SE/30 Error Tuned (3200 B/t &bull; 30fps &bull; Stab 0.50)
+                </button>
+                <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('se30_60fps')">
+                  SE/30 60fps (3500 B/t &bull; 60fps &bull; Ordered)
+                </button>
+                <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('68040_hq')">
+                  68040 @ 40MHz HQ (5200 B/t &bull; 60fps &bull; Error)
+                </button>
+                <button type="button" class="subtle-btn" onclick="applyCodecPreset('reset')" style="margin-left:4px;">
+                  Reset Defaults
+                </button>
+              </div>
+
+              <div class="form-grid">
+                <div class="field-group">
+                  <label for="adv-byterate">Byterate Override (B/t, 300&ndash;10000):</label>
+                  <input type="number" id="adv-byterate" min="300" max="10000" step="100" placeholder="Default (3800 se30 / 1500 se)" oninput="updateByteratePreview('adv')" />
+                </div>
+                <div class="field-group">
+                  <label for="adv-fps-ratio">Frame Rate Ratio (--fps-ratio):</label>
+                  <select id="adv-fps-ratio">
+                    <option value="">Profile Default (1 = 60fps on SE/30)</option>
+                    <option value="1">1 &mdash; Max / 60 fps (1 tick min)</option>
+                    <option value="2">2 &mdash; 30 fps (2 ticks &bull; Best for Stock SE/30)</option>
+                    <option value="3">3 &mdash; 20 fps (3 ticks &bull; Higher bytes/frame)</option>
+                    <option value="4">4 &mdash; 15 fps (4 ticks &bull; Lowest CPU)</option>
+                    <option value="6">6 &mdash; 10 fps (6 ticks)</option>
+                  </select>
+                </div>
+                <div class="field-group">
+                  <label for="adv-group">Group Identical Ticks (--group):</label>
+                  <select id="adv-group">
+                    <option value="">Profile Default</option>
+                    <option value="true">Enabled (Merge duplicate source frames)</option>
+                    <option value="false">Disabled (Unpack every tick)</option>
+                  </select>
+                </div>
+                <div class="field-group">
+                  <label for="adv-codec-mode">Delta Codec Strategy (--codec):</label>
+                  <select id="adv-codec-mode">
+                    <option value="auto">Hybrid Auto (z32 + lines + invert)</option>
+                    <option value="lines">Horizontal Scanlines Only (lines &mdash; 3.5x faster on 68030!)</option>
+                    <option value="z32">Vertical 32-bit Strips Only (z32 + invert)</option>
+                    <option value="z16">16-bit Strips + Lines (z16 + lines + invert)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-grid">
+                <div class="field-group">
+                  <label for="adv-filters">Pre-Filters (--filters):</label>
+                  <select id="adv-filters">
+                    <option value="auto">Profile Default (g1.6sc)</option>
+                    <option value="g1.6bsc">Denoise + Sharpen (g1.6bsc &bull; Less z32 speckle)</option>
+                    <option value="g1.6bbsc">Heavy Denoise (g1.6bbsc &bull; Tallest z32 runs)</option>
+                    <option value="g1.6sc">Sharp Gamma 1.6 (g1.6sc)</option>
+                    <option value="sc">Linear Contrast + Sharpen (sc)</option>
+                    <option value="none">No Pre-Filters (none)</option>
+                  </select>
+                </div>
+                <div class="field-group">
+                  <label for="adv-error-alg">Error Diffusion Kernel:</label>
+                  <select id="adv-error-alg">
+                    <option value="">Default (Floyd-Steinberg)</option>
+                    <option value="atkinson">Atkinson (Classic Mac HyperCard look &bull; Cleaner blacks/whites)</option>
+                    <option value="sierra-lite">Sierra Lite (Fast 2-row kernel)</option>
+                    <option value="false-floyd">False Floyd-Steinberg (3-neighbor kernel)</option>
+                    <option value="floyd">Floyd-Steinberg (Standard)</option>
+                    <option value="sierra2">Two-Row Sierra</option>
+                    <option value="sierra">Sierra (Full 3-row)</option>
+                    <option value="stucki">Stucki</option>
+                    <option value="burkes">Burkes</option>
+                    <option value="jarvis">Jarvis, Judice &amp; Ninke</option>
+                  </select>
+                </div>
+                <div class="field-group">
+                  <label for="adv-error-stability">Error Stability (0.0&ndash;1.0):</label>
+                  <input type="number" id="adv-error-stability" min="0" max="1" step="0.05" placeholder="0.45 (higher = less dither boiling)" />
+                </div>
+                <div class="field-group">
+                  <label for="adv-error-bleed">Error Bleed (0.0&ndash;1.0):</label>
+                  <input type="number" id="adv-error-bleed" min="0" max="1" step="0.02" placeholder="0.95 (lower = fewer 1px z32 runs)" />
+                </div>
+              </div>
+              <div style="font-size:11px; color:#333;">
+                <strong>68030 CPU Tip:</strong> Using <code>Ordered Bayer</code> (or <code>Error Diffusion</code> with Stability <code>0.50</code> + Pre-Filter <code>g1.6bsc</code>) and Frame Rate Ratio <code>2 (30 fps)</code> at <code>2800&ndash;3200 B/t</code> eliminates temporal dither boiling and cuts 68030 unpack interrupts in half while giving each frame 2&times; the byte budget.
               </div>
             </div>
 
@@ -1217,25 +1325,40 @@
 
   <!-- Re-Encode / Add Profile Modal -->
   <div id="encode-modal" class="modal-backdrop">
-    <div class="modal-wrap">
-      <div class="modal-card pixel-card-clip">
+    <div class="modal-wrap" style="max-width:620px;">
+      <div class="modal-card pixel-card-clip" style="max-height:90vh; overflow-y:auto;">
         <div class="section-title-row">
-          <span id="modal-title">Encode Additional Profile</span>
+          <span id="modal-title">Encode / Tune Profile</span>
           <div class="action-btn-wrap">
             <button type="button" class="action-btn-sm pixel-pill-clip" onclick="closeEncodeModal()">Close</button>
           </div>
         </div>
 
-        <div class="field-group">
-          <label for="modal-profile">Target Profile:</label>
-          <select id="modal-profile">
-            <option value="se30">SE/30 &amp; Mac II (3800 B/t • ~228 KB/s)</option>
-            <option value="se">Macintosh SE (1500 B/t • ~90 KB/s)</option>
-            <option value="plus">Mac Plus (900 B/t • ~54 KB/s)</option>
-          </select>
+        <div style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; background:#f3f3f3; padding:8px 10px; border:1px dashed #000;">
+          <span style="font-size:11px; font-weight:bold;">Quick Presets:</span>
+          <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('se30_smooth', 'modal')">
+            SE/30 Smooth (2800 B/t &bull; 30fps)
+          </button>
+          <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('se30_lowcpu', 'modal')">
+            SE/30 Lines Only (2600 B/t &bull; 30fps)
+          </button>
+          <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('se30_error_tuned', 'modal')">
+            SE/30 Error Tuned (3200 B/t &bull; Stab 0.50)
+          </button>
+          <button type="button" class="action-btn-sm pixel-pill-clip" style="border:1px solid #000;" onclick="applyCodecPreset('68040_hq', 'modal')">
+            68040 HQ (5200 B/t &bull; 60fps)
+          </button>
         </div>
 
         <div class="form-grid">
+          <div class="field-group">
+            <label for="modal-profile">Target Profile Slot:</label>
+            <select id="modal-profile">
+              <option value="se30">SE/30 &amp; Mac II (se30)</option>
+              <option value="se">Macintosh SE (se)</option>
+              <option value="plus">Mac Plus (plus)</option>
+            </select>
+          </div>
           <div class="field-group">
             <label for="modal-aspect">Aspect Framing:</label>
             <select id="modal-aspect">
@@ -1254,14 +1377,81 @@
           </div>
         </div>
 
-        <label class="checkbox-inline" style="padding-top:2px;">
-          <input type="checkbox" id="modal-silent" />
-          <span>Silent (omit audio)</span>
-        </label>
+        <div class="form-grid">
+          <div class="field-group">
+            <label for="modal-byterate">Byterate (B/t, 300&ndash;10000):</label>
+            <input type="number" id="modal-byterate" min="300" max="10000" step="100" placeholder="Default (3800 / 1500 / 900)" oninput="updateByteratePreview('modal')" />
+          </div>
+          <div class="field-group">
+            <label for="modal-fps-ratio">Frame Rate Ratio (--fps-ratio):</label>
+            <select id="modal-fps-ratio">
+              <option value="">Profile Default</option>
+              <option value="1">1 &mdash; Max / 60 fps</option>
+              <option value="2">2 &mdash; 30 fps (Stock SE/30 Sweet Spot)</option>
+              <option value="3">3 &mdash; 20 fps</option>
+              <option value="4">4 &mdash; 15 fps</option>
+              <option value="6">6 &mdash; 10 fps</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="modal-codec-mode">Delta Codec Strategy:</label>
+            <select id="modal-codec-mode">
+              <option value="auto">Hybrid Auto (z32 + lines + invert)</option>
+              <option value="lines">Horizontal Scanlines Only (lines &mdash; 3.5x faster)</option>
+              <option value="z32">Vertical 32-bit Strips Only (z32)</option>
+              <option value="z16">16-bit Strips + Lines (z16 + lines)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="field-group">
+            <label for="modal-filters">Pre-Filters (--filters):</label>
+            <select id="modal-filters">
+              <option value="auto">Profile Default (g1.6sc)</option>
+              <option value="g1.6bsc">Denoise + Sharpen (g1.6bsc)</option>
+              <option value="g1.6bbsc">Heavy Denoise (g1.6bbsc)</option>
+              <option value="g1.6sc">Sharp Gamma 1.6 (g1.6sc)</option>
+              <option value="sc">Linear Contrast + Sharpen (sc)</option>
+              <option value="none">No Pre-Filters (none)</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="modal-error-alg">Error Kernel:</label>
+            <select id="modal-error-alg">
+              <option value="">Default (Floyd-Steinberg)</option>
+              <option value="atkinson">Atkinson</option>
+              <option value="sierra-lite">Sierra Lite</option>
+              <option value="false-floyd">False Floyd-Steinberg</option>
+              <option value="floyd">Floyd-Steinberg</option>
+              <option value="sierra2">Two-Row Sierra</option>
+              <option value="sierra">Sierra</option>
+              <option value="stucki">Stucki</option>
+              <option value="burkes">Burkes</option>
+              <option value="jarvis">Jarvis</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="modal-error-stability">Error Stability (0&ndash;1):</label>
+            <input type="number" id="modal-error-stability" min="0" max="1" step="0.05" placeholder="0.45" />
+          </div>
+          <div class="field-group">
+            <label for="modal-error-bleed">Error Bleed (0&ndash;1):</label>
+            <input type="number" id="modal-error-bleed" min="0" max="1" step="0.02" placeholder="0.95" />
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <label class="checkbox-inline" style="padding-top:2px;">
+            <input type="checkbox" id="modal-silent" />
+            <span>Silent (omit audio)</span>
+          </label>
+          <span class="code-pill" id="modal-bw-preview">Default Byterate</span>
+        </div>
 
         <div style="display:flex; justify-content:center; gap:12px; margin-top:4px;">
           <div class="mac-btn-wrap">
-            <button type="button" class="mac-btn primary pixel-pill-clip" onclick="submitModalEncode()">Start Encode</button>
+            <button type="button" class="mac-btn primary pixel-pill-clip" onclick="submitModalEncode()">Start Re-Encode</button>
           </div>
           <div class="mac-btn-wrap">
             <button type="button" class="mac-btn pixel-pill-clip" onclick="closeEncodeModal()">Cancel</button>
@@ -1404,6 +1594,104 @@
       }
     });
 
+    function toggleAdvancedPanel() {
+      const panel = document.getElementById('advanced-codec-panel');
+      const btn = document.getElementById('adv-toggle-btn');
+      const isHidden = panel.classList.toggle('hidden');
+      btn.innerHTML = isHidden
+        ? '&#9881; Show Advanced Codec &amp; 68030 CPU Tuning &darr;'
+        : '&#9881; Hide Advanced Codec &amp; 68030 CPU Tuning &uarr;';
+    }
+
+    function updateByteratePreview(prefix = 'adv') {
+      const input = document.getElementById(`${prefix}-byterate`);
+      const pill = document.getElementById(`${prefix}-bw-preview`);
+      if (!input || !pill) return;
+      const val = Number(input.value);
+      if (Number.isFinite(val) && val >= 300) {
+        const kbs = ((val * 60) / 1024).toFixed(1);
+        pill.textContent = `${Math.round(val)} B/t (~${kbs} KB/s)`;
+      } else {
+        pill.textContent = 'Profile Default Byterate';
+      }
+    }
+
+    function applyCodecPreset(presetKey, scope = 'adv') {
+      const isModal = scope === 'modal';
+      const ditherEl = document.getElementById(isModal ? 'modal-dither' : 'dither-select');
+      const brEl = document.getElementById(`${scope}-byterate`);
+      const fpsEl = document.getElementById(`${scope}-fps-ratio`);
+      const groupEl = document.getElementById(`${scope}-group`);
+      const codecEl = document.getElementById(`${scope}-codec-mode`);
+      const filtEl = document.getElementById(`${scope}-filters`);
+      const algEl = document.getElementById(`${scope}-error-alg`);
+      const stabEl = document.getElementById(`${scope}-error-stability`);
+      const bleedEl = document.getElementById(`${scope}-error-bleed`);
+
+      if (presetKey === 'se30_smooth') {
+        if (ditherEl) ditherEl.value = 'ordered';
+        if (brEl) brEl.value = '2800';
+        if (fpsEl) fpsEl.value = '2';
+        if (groupEl) groupEl.value = 'true';
+        if (codecEl) codecEl.value = 'auto';
+        if (filtEl) filtEl.value = 'g1.6bsc';
+        if (algEl) algEl.value = '';
+        if (stabEl) stabEl.value = '';
+        if (bleedEl) bleedEl.value = '';
+      } else if (presetKey === 'se30_lowcpu') {
+        if (ditherEl) ditherEl.value = 'ordered';
+        if (brEl) brEl.value = '2600';
+        if (fpsEl) fpsEl.value = '2';
+        if (groupEl) groupEl.value = 'true';
+        if (codecEl) codecEl.value = 'lines';
+        if (filtEl) filtEl.value = 'g1.6bsc';
+        if (algEl) algEl.value = '';
+        if (stabEl) stabEl.value = '';
+        if (bleedEl) bleedEl.value = '';
+      } else if (presetKey === 'se30_error_tuned') {
+        if (ditherEl) ditherEl.value = 'error';
+        if (brEl) brEl.value = '3200';
+        if (fpsEl) fpsEl.value = '2';
+        if (groupEl) groupEl.value = 'true';
+        if (codecEl) codecEl.value = 'auto';
+        if (filtEl) filtEl.value = 'g1.6bsc';
+        if (algEl) algEl.value = 'atkinson';
+        if (stabEl) stabEl.value = '0.50';
+        if (bleedEl) bleedEl.value = '0.92';
+      } else if (presetKey === 'se30_60fps') {
+        if (ditherEl) ditherEl.value = 'ordered';
+        if (brEl) brEl.value = '3500';
+        if (fpsEl) fpsEl.value = '1';
+        if (groupEl) groupEl.value = 'true';
+        if (codecEl) codecEl.value = 'auto';
+        if (filtEl) filtEl.value = 'g1.6bsc';
+        if (algEl) algEl.value = '';
+        if (stabEl) stabEl.value = '';
+        if (bleedEl) bleedEl.value = '';
+      } else if (presetKey === '68040_hq') {
+        if (ditherEl) ditherEl.value = 'error';
+        if (brEl) brEl.value = '5200';
+        if (fpsEl) fpsEl.value = '1';
+        if (groupEl) groupEl.value = 'true';
+        if (codecEl) codecEl.value = 'auto';
+        if (filtEl) filtEl.value = 'g1.6sc';
+        if (algEl) algEl.value = 'floyd';
+        if (stabEl) stabEl.value = '0.35';
+        if (bleedEl) bleedEl.value = '0.98';
+      } else {
+        if (ditherEl) ditherEl.value = 'ordered';
+        if (brEl) brEl.value = '';
+        if (fpsEl) fpsEl.value = '';
+        if (groupEl) groupEl.value = '';
+        if (codecEl) codecEl.value = 'auto';
+        if (filtEl) filtEl.value = 'auto';
+        if (algEl) algEl.value = '';
+        if (stabEl) stabEl.value = '';
+        if (bleedEl) bleedEl.value = '';
+      }
+      updateByteratePreview(scope);
+    }
+
     function startUpload() {
       if (!selectedFile) return;
 
@@ -1425,8 +1713,25 @@
 
       const clipFrom = document.getElementById('clip-from').value.trim();
       const clipDur = document.getElementById('clip-duration').value.trim();
+      const advBr = document.getElementById('adv-byterate').value.trim();
+      const advFps = document.getElementById('adv-fps-ratio').value.trim();
+      const advGroup = document.getElementById('adv-group').value.trim();
+      const advCodec = document.getElementById('adv-codec-mode').value.trim();
+      const advFilters = document.getElementById('adv-filters').value.trim();
+      const advErrAlg = document.getElementById('adv-error-alg').value.trim();
+      const advStab = document.getElementById('adv-error-stability').value.trim();
+      const advBleed = document.getElementById('adv-error-bleed').value.trim();
+
       if (clipFrom !== '') params.set('from', clipFrom);
       if (clipDur !== '') params.set('duration', clipDur);
+      if (advBr !== '') params.set('byterate', advBr);
+      if (advFps !== '') params.set('fpsRatio', advFps);
+      if (advGroup !== '') params.set('group', advGroup);
+      if (advCodec && advCodec !== 'auto') params.set('codecMode', advCodec);
+      if (advFilters && advFilters !== 'auto') params.set('filters', advFilters);
+      if (advErrAlg !== '') params.set('errorAlgorithm', advErrAlg);
+      if (advStab !== '') params.set('errorStability', advStab);
+      if (advBleed !== '') params.set('errorBleed', advBleed);
 
       const uploadBtn = document.getElementById('upload-btn');
       const progWrap = document.getElementById('upload-progress-wrap');
@@ -1566,11 +1871,24 @@
           ? `<img src="${escapeHtml(item.posterUrl)}?t=${encodeURIComponent(item.updatedAt || '')}" alt="${escapeHtml(item.title)}" />`
           : `<div class="poster-placeholder">${item.profileKeys && item.profileKeys.length === 0 ? 'Encoding 1-bit preview...' : 'No 1-bit poster'}</div>`;
 
-        const profileRows = Object.values(item.profiles || {}).map((prof) => `
+        const profileRows = Object.values(item.profiles || {}).map((prof) => {
+          const brTag = prof.byterate ? `${Number(prof.byterate)} B/t` : '';
+          const fpsTag = prof.fpsRatio ? `${Math.round(60 / Number(prof.fpsRatio))}fps` : '';
+          const dithTag = prof.dither ? String(prof.dither) : '';
+          const codecTag = prof.codecMode && prof.codecMode !== 'auto' ? String(prof.codecMode) : '';
+          const metaParts = [
+            brTag,
+            fpsTag,
+            dithTag,
+            codecTag,
+            formatBytes(prof.size),
+            `${Number(prof.frameCount || 0)}f`,
+          ].filter(Boolean);
+          return `
           <div class="profile-row">
             <div>
               <strong>${escapeHtml(prof.profile.toUpperCase())}</strong>
-              <span>&bull; ${formatBytes(prof.size)} &bull; ${Number(prof.frameCount || 0)}f</span>
+              <span>&bull; ${escapeHtml(metaParts.join(' • '))}</span>
             </div>
             <div class="profile-row-actions">
               <div class="action-btn-wrap">
@@ -1583,7 +1901,8 @@
               </button>
             </div>
           </div>
-        `).join('');
+        `;
+        }).join('');
 
         return `
           <div class="video-card-wrap">
@@ -1609,7 +1928,7 @@
                     <button type="button" class="action-btn-sm pixel-pill-clip"
                       ${item.hasSource && currentLibrary.canEncode ? '' : 'disabled'}
                       onclick="openEncodeModal('${escapeHtml(item.id)}')">
-                      + Encode Profile
+                      &#9881; Tune / Re-Encode
                     </button>
                   </div>
                   <button type="button" class="subtle-btn danger" onclick="deleteVideo('${escapeHtml(item.id)}')">
@@ -1662,7 +1981,23 @@
     function openEncodeModal(id) {
       const item = getItemById(id);
       modalVideoId = id;
-      document.getElementById('modal-title').textContent = `Encode: ${item ? item.title : id}`;
+      document.getElementById('modal-title').textContent = `Tune / Re-Encode: ${item ? item.title : id}`;
+      /* Pre-fill modal from existing se30/primary profile or main form settings */
+      const existingProf = item && item.profiles && (item.profiles.se30 || item.profiles.se || item.profiles.plus);
+      if (existingProf) {
+        document.getElementById('modal-profile').value = existingProf.profile || 'se30';
+        document.getElementById('modal-aspect').value = existingProf.aspect || 'bars';
+        document.getElementById('modal-dither').value = existingProf.dither || 'ordered';
+        document.getElementById('modal-byterate').value = existingProf.byterate || '';
+        document.getElementById('modal-fps-ratio').value = existingProf.fpsRatio || '';
+        document.getElementById('modal-codec-mode').value = existingProf.codecMode || 'auto';
+        document.getElementById('modal-filters').value = existingProf.filters || 'auto';
+        document.getElementById('modal-error-alg').value = existingProf.errorAlgorithm || '';
+        document.getElementById('modal-error-stability').value = existingProf.errorStability !== undefined && existingProf.errorStability !== null ? existingProf.errorStability : '';
+        document.getElementById('modal-error-bleed').value = existingProf.errorBleed !== undefined && existingProf.errorBleed !== null ? existingProf.errorBleed : '';
+        document.getElementById('modal-silent').checked = Boolean(existingProf.silent);
+      }
+      updateByteratePreview('modal');
       document.getElementById('encode-modal').classList.add('open');
     }
 
@@ -1679,6 +2014,20 @@
         dither: document.getElementById('modal-dither').value,
         silent: document.getElementById('modal-silent').checked,
       };
+      const br = document.getElementById('modal-byterate').value.trim();
+      const fps = document.getElementById('modal-fps-ratio').value.trim();
+      const codec = document.getElementById('modal-codec-mode').value.trim();
+      const filters = document.getElementById('modal-filters').value.trim();
+      const errAlg = document.getElementById('modal-error-alg').value.trim();
+      const stab = document.getElementById('modal-error-stability').value.trim();
+      const bleed = document.getElementById('modal-error-bleed').value.trim();
+      if (br !== '') body.byterate = Number(br);
+      if (fps !== '') body.fpsRatio = Number(fps);
+      if (codec && codec !== 'auto') body.codecMode = codec;
+      if (filters && filters !== 'auto') body.filters = filters;
+      if (errAlg !== '') body.errorAlgorithm = errAlg;
+      if (stab !== '') body.errorStability = Number(stab);
+      if (bleed !== '') body.errorBleed = Number(bleed);
       const resp = await fetch(`/api/netflim/library/${encodeURIComponent(modalVideoId)}/encode`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

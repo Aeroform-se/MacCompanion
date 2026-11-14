@@ -314,9 +314,8 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
     int changed = 1;
 
 #ifdef __m68k__
-    if ((((unsigned long)p | (unsigned long)fb) & 1UL) == 0 && p + 4 <= end) {
+    if ((((unsigned long)p | (unsigned long)end | (unsigned long)fb) & 1UL) == 0 && p + 4 <= end) {
         const unsigned char *sp = p;
-        const unsigned char *lim = end - 4;
         unsigned char *baseMinus4 = fb - 4;
         uint32_t hdr;
         uint32_t off;
@@ -327,57 +326,67 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
             return 1;
         }
 
-        /*
-         * Pure 68k assembly outer + inner z32 unpacker (38 bytes total):
-         * Fits inside 2.5 cache lines of the 68030 256-byte I-cache with zero
-         * C loop overhead or stack spills.
-         */
-        __asm__ volatile (
-            "move.l (%[sp])+,%[hdr]\n\t"
-            "beq.s  2f\n"
-            "0:\n\t"
-            "moveq  #0,%[off]\n\t"
-            "move.w %[hdr],%[off]\n\t"
-            "beq.s  2f\n\t"
-            "ror.w  #2,%[off]\n\t"
-            "cmpi.w #5472,%[off]\n\t"
-            "bhi.s  3f\n\t"
-            "add.l  %[off],%[off]\n\t"
-            "add.l  %[off],%[off]\n\t"
-            "lea    (%[base],%[off].l),%[dp]\n\t"
-            "swap   %[hdr]\n"
-            "1:\n\t"
-            "move.l (%[sp])+,(%[dp])\n\t"
-            "adda.w %[stride],%[dp]\n\t"
-            "dbra   %[hdr],1b\n\t"
-            "cmpa.l %[lim],%[sp]\n\t"
-            "bhi.s  2f\n\t"
-            "move.l (%[sp])+,%[hdr]\n\t"
-            "bne.s  0b\n\t"
-            "bra.s  2f\n"
-            "3:\n\t"
-            "swap   %[hdr]\n\t"
-            "moveq  #0,%[off]\n\t"
-            "move.w %[hdr],%[off]\n\t"
-            "addq.l #1,%[off]\n\t"
-            "add.l  %[off],%[off]\n\t"
-            "add.l  %[off],%[off]\n\t"
-            "adda.l %[off],%[sp]\n\t"
-            "cmpa.l %[lim],%[sp]\n\t"
-            "bhi.s  2f\n\t"
-            "move.l (%[sp])+,%[hdr]\n\t"
-            "bne.s  0b\n"
-            "2:\n"
-            : [sp] "+a"(sp),
-              [hdr] "=&d"(hdr),
-              [off] "=&d"(off),
-              [dp] "=&a"(dp)
-            : [base] "a"(baseMinus4),
-              [lim] "a"(lim),
-              [stride] "d"(stride)
-            : "memory", "cc"
-        );
-        return 2;
+        if (*(const uint32_t *)(end - 4) == 0UL) {
+            /*
+             * Ultra-fast 68000/68030 z32 unpacker (62 bytes total, fits in <4
+             * 68030 I-cache lines):
+             * - Trailing 0x00000000 sentinel verified once above (zero per-run
+             *   end-of-buffer or offset bounds branches inside the outer loop).
+             * - Peels the 1st vertical longword unconditionally so single-row
+             *   dither runs (count == 1) skip both stride addition and loop
+             *   branches.
+             * - 4x unrolled vertical copy body for tall runs (count >= 5),
+             *   cutting inner-loop branch overhead by 75%.
+             */
+            __asm__ volatile (
+                "move.l (%[sp])+,%[hdr]\n\t"
+                "beq.s  5f\n"
+                "0:\n\t"
+                "moveq  #0,%[off]\n\t"
+                "move.w %[hdr],%[off]\n\t"
+                "ror.w  #2,%[off]\n\t"
+                "add.l  %[off],%[off]\n\t"
+                "add.l  %[off],%[off]\n\t"
+                "lea    (%[base],%[off].l),%[dp]\n\t"
+                "swap   %[hdr]\n\t"
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "subq.w #1,%[hdr]\n\t"
+                "bcs.s  4f\n\t"
+                "subq.w #3,%[hdr]\n\t"
+                "bcs.s  2f\n"
+                "1:\n\t"
+                "adda.w %[stride],%[dp]\n\t"
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "adda.w %[stride],%[dp]\n\t"
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "adda.w %[stride],%[dp]\n\t"
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "adda.w %[stride],%[dp]\n\t"
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "subq.w #4,%[hdr]\n\t"
+                "bcc.s  1b\n"
+                "2:\n\t"
+                "addq.w #4,%[hdr]\n\t"
+                "beq.s  4f\n"
+                "3:\n\t"
+                "adda.w %[stride],%[dp]\n\t"
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "subq.w #1,%[hdr]\n\t"
+                "bne.s  3b\n"
+                "4:\n\t"
+                "move.l (%[sp])+,%[hdr]\n\t"
+                "bne.s  0b\n"
+                "5:\n"
+                : [sp] "+a"(sp),
+                  [hdr] "=&d"(hdr),
+                  [off] "=&d"(off),
+                  [dp] "=&a"(dp)
+                : [base] "a"(baseMinus4),
+                  [stride] "d"(stride)
+                : "memory", "cc"
+            );
+            return 2;
+        }
     }
 #endif
 

@@ -34,6 +34,18 @@ const PROFILES = {
 
 const VALID_ASPECTS = ['bars', 'crop', 'stretch'];
 const VALID_DITHERS = ['ordered', 'error', 'blue'];
+const VALID_ERROR_ALGORITHMS = [
+  'floyd',
+  'false-floyd',
+  'jarvis',
+  'stucki',
+  'atkinson',
+  'burkes',
+  'sierra',
+  'sierra2',
+  'sierra-lite',
+];
+const VALID_CODEC_MODES = ['auto', 'lines', 'z32', 'z16'];
 
 /**
  * Resolves a binary path from env override, known locations, or PATH.
@@ -118,11 +130,55 @@ function normalizeEncodeOptions(raw = {}) {
       ? Number(raw.duration)
       : null;
 
-  const byterateRaw = Number(raw.byterate);
+  const byterateRaw = raw.byterate !== undefined && raw.byterate !== '' ? Number(raw.byterate) : NaN;
   const byterate =
     Number.isFinite(byterateRaw) && byterateRaw >= 300 && byterateRaw <= 32000
       ? Math.round(byterateRaw)
       : null;
+
+  const fpsRatioRaw = raw.fpsRatio !== undefined && raw.fpsRatio !== '' ? Number(raw.fpsRatio) : NaN;
+  const fpsRatio =
+    Number.isFinite(fpsRatioRaw) && fpsRatioRaw >= 1 && fpsRatioRaw <= 12
+      ? Math.round(fpsRatioRaw)
+      : null;
+
+  let group = null;
+  if (raw.group === true || raw.group === 'true' || raw.group === '1') {
+    group = true;
+  } else if (raw.group === false || raw.group === 'false' || raw.group === '0') {
+    group = false;
+  }
+
+  const errorAlgorithm = VALID_ERROR_ALGORITHMS.includes(raw.errorAlgorithm)
+    ? raw.errorAlgorithm
+    : null;
+
+  const stabRaw = raw.errorStability !== undefined && raw.errorStability !== '' ? Number(raw.errorStability) : NaN;
+  const errorStability =
+    Number.isFinite(stabRaw) && stabRaw >= 0 && stabRaw <= 1
+      ? Number(stabRaw.toFixed(2))
+      : null;
+
+  const bleedRaw = raw.errorBleed !== undefined && raw.errorBleed !== '' ? Number(raw.errorBleed) : NaN;
+  const errorBleed =
+    Number.isFinite(bleedRaw) && bleedRaw >= 0 && bleedRaw <= 1
+      ? Number(bleedRaw.toFixed(2))
+      : null;
+
+  let errorBidi = null;
+  if (raw.errorBidi === true || raw.errorBidi === 'true' || raw.errorBidi === '1') {
+    errorBidi = true;
+  } else if (raw.errorBidi === false || raw.errorBidi === 'false' || raw.errorBidi === '0') {
+    errorBidi = false;
+  }
+
+  const codecMode = VALID_CODEC_MODES.includes(raw.codecMode) ? raw.codecMode : 'auto';
+
+  let filters = null;
+  if (typeof raw.filters === 'string' && raw.filters.trim() !== '' && raw.filters.trim() !== 'auto') {
+    const cleanFilters = raw.filters.trim().replace(/[^a-zA-Z0-9._-]/g, '').slice(0, 32);
+    filters = cleanFilters === 'none' ? '' : cleanFilters;
+  }
 
   return {
     aspect,
@@ -131,6 +187,14 @@ function normalizeEncodeOptions(raw = {}) {
     from: fromSec,
     duration: durationSec,
     byterate,
+    fpsRatio,
+    group,
+    errorAlgorithm,
+    errorStability,
+    errorBleed,
+    errorBidi,
+    codecMode,
+    filters,
     comment: raw.comment ? String(raw.comment).slice(0, 180) : null,
   };
 }
@@ -312,6 +376,44 @@ function createEncoder({ library }) {
         options.silent ? 'true' : 'false',
       ];
 
+      if (options.fpsRatio !== null && options.fpsRatio !== undefined) {
+        args.push('--fps-ratio', String(options.fpsRatio));
+      }
+      if (options.group !== null && options.group !== undefined) {
+        args.push('--group', options.group ? 'true' : 'false');
+      }
+      if (options.dither === 'error') {
+        if (options.errorAlgorithm) {
+          args.push('--error-algorithm', options.errorAlgorithm);
+        }
+        /* Default SE/30 error stability to 0.45 and bleed to 0.95 to suppress 1px z32 dither boiling */
+        const stab = options.errorStability !== null && options.errorStability !== undefined
+          ? options.errorStability
+          : (profileId === 'se30' ? 0.45 : null);
+        const bleed = options.errorBleed !== null && options.errorBleed !== undefined
+          ? options.errorBleed
+          : (profileId === 'se30' ? 0.95 : null);
+        if (stab !== null) {
+          args.push('--error-stability', String(stab));
+        }
+        if (bleed !== null) {
+          args.push('--error-bleed', String(bleed));
+        }
+        if (options.errorBidi !== null && options.errorBidi !== undefined) {
+          args.push('--error-bidi', options.errorBidi ? 'true' : 'false');
+        }
+      }
+      if (options.filters !== null && options.filters !== undefined) {
+        args.push('--filters', options.filters);
+      }
+      if (options.codecMode === 'lines') {
+        args.push('--codec', 'lines', '--codec', 'invert');
+      } else if (options.codecMode === 'z32') {
+        args.push('--codec', 'z32', '--codec', 'invert');
+      } else if (options.codecMode === 'z16') {
+        args.push('--codec', 'z16', '--codec', 'lines', '--codec', 'invert');
+      }
+
       if (options.from !== null) {
         args.push('--from', String(options.from));
       }
@@ -451,6 +553,13 @@ function createEncoder({ library }) {
           silent: parsed.info.silent,
           aspect: job.options.aspect,
           dither: job.options.dither,
+          fpsRatio: job.options.fpsRatio,
+          group: job.options.group,
+          errorAlgorithm: job.options.errorAlgorithm,
+          errorStability: job.options.errorStability,
+          errorBleed: job.options.errorBleed,
+          codecMode: job.options.codecMode || 'auto',
+          filters: job.options.filters,
           createdAt: new Date().toISOString(),
         });
 

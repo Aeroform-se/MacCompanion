@@ -80,6 +80,7 @@ static char              gPrefsSource[32]    = "";
 static OSErr             gLastTcpErr      = noErr;
 static Boolean           gSawMacDropOnly  = false;
 static ip_addr           gMacDropHintIP   = 0;
+static unsigned long     gHttpConnectTimeoutTicks = 120UL;
 
 /* Zero-Copy Flat Circular Stream Arena & TCP VOD State */
 #define NF_ARENA_HIGH         524288UL  /* 512 KB on >= 900 KB free */
@@ -212,7 +213,24 @@ static Boolean IsValidServerIP(ip_addr ip) {
     return (ip != 0 && ip != 0xFFFFFFFFUL);
 }
 
-static Boolean ReadPrefsBlob(ConstStr255Param macName, const char *cName, void *outBuf, long maxLen, long *outReadLen) {
+static unsigned long GetPrefsFileModDate(short vRefNum, long dirID, ConstStr255Param macName) {
+    HParamBlockRec hpb;
+    Str255 nameCopy;
+    if (!macName || macName[0] == 0) return 0;
+    memcpy(nameCopy, macName, (size_t)macName[0] + 1);
+    memset(&hpb, 0, sizeof(hpb));
+    hpb.fileParam.ioNamePtr   = nameCopy;
+    hpb.fileParam.ioVRefNum   = vRefNum;
+    hpb.fileParam.ioDirID     = dirID;
+    hpb.fileParam.ioFDirIndex = 0;
+    if (PBHGetFInfoSync(&hpb) == noErr) {
+        return hpb.fileParam.ioFlMdDat;
+    }
+    return 0;
+}
+
+static Boolean ReadPrefsBlobEx(ConstStr255Param macName, const char *cName, void *outBuf, long maxLen,
+                               long *outReadLen, unsigned long *outModDate) {
     short vRef = 0;
     long dirID = 0;
     short refNum = 0;
@@ -220,6 +238,7 @@ static Boolean ReadPrefsBlob(ConstStr255Param macName, const char *cName, void *
     OSErr err;
 
     if (outReadLen) *outReadLen = 0;
+    if (outModDate) *outModDate = 0;
     if (!outBuf || maxLen <= 0) return false;
 
     /* 1. Try System Folder:Preferences (System 7+) or SysEnv System Folder */
@@ -229,6 +248,7 @@ static Boolean ReadPrefsBlob(ConstStr255Param macName, const char *cName, void *
         FSClose(refNum);
         if ((err == noErr || err == eofErr) && count > 0) {
             if (outReadLen) *outReadLen = count;
+            if (outModDate) *outModDate = GetPrefsFileModDate(vRef, dirID, macName);
             return true;
         }
     }
@@ -243,6 +263,7 @@ static Boolean ReadPrefsBlob(ConstStr255Param macName, const char *cName, void *
                 FSClose(refNum);
                 if ((err == noErr || err == eofErr) && count > 0) {
                     if (outReadLen) *outReadLen = count;
+                    if (outModDate) *outModDate = GetPrefsFileModDate(env.sysVRefNum, 0, macName);
                     return true;
                 }
             }
@@ -265,10 +286,12 @@ static Boolean ReadPrefsBlob(ConstStr255Param macName, const char *cName, void *
     return false;
 }
 
-static Boolean ReadMagicSiblingServer(ConstStr255Param macName, const char *cName, unsigned long expectedMagic, ip_addr *outIp) {
+static Boolean ReadMagicSiblingServerEx(ConstStr255Param macName, const char *cName,
+                                        unsigned long expectedMagic, ip_addr *outIp,
+                                        unsigned long *outModDate) {
     SiblingMagicPrefsHeader hdr;
     long gotLen = 0;
-    if (!ReadPrefsBlob(macName, cName, &hdr, (long)sizeof(hdr), &gotLen)) return false;
+    if (!ReadPrefsBlobEx(macName, cName, &hdr, (long)sizeof(hdr), &gotLen, outModDate)) return false;
     if (gotLen >= (long)sizeof(hdr) && hdr.magic == expectedMagic && IsValidServerIP(hdr.serverIp)) {
         if (outIp) *outIp = hdr.serverIp;
         return true;
@@ -276,10 +299,10 @@ static Boolean ReadMagicSiblingServer(ConstStr255Param macName, const char *cNam
     return false;
 }
 
-static Boolean ReadMacDropSiblingServer(ip_addr *outIp, unsigned short *outPort) {
+static Boolean ReadMacDropSiblingServerEx(ip_addr *outIp, unsigned short *outPort, unsigned long *outModDate) {
     SiblingMacDropPrefsRecord rec;
     long gotLen = 0;
-    if (!ReadPrefsBlob("\pMacDrop Prefs", "MacDrop Prefs", &rec, (long)sizeof(rec), &gotLen)) return false;
+    if (!ReadPrefsBlobEx("\pMacDrop Prefs", "MacDrop Prefs", &rec, (long)sizeof(rec), &gotLen, outModDate)) return false;
     /* macdrop/src/file_io.c checks bytesRead >= 68 with serverIP appended inside record */
     if (gotLen >= (long)sizeof(rec) && IsValidServerIP((ip_addr)rec.serverIP)) {
         if (outIp) *outIp = (ip_addr)rec.serverIP;
@@ -291,11 +314,12 @@ static Boolean ReadMacDropSiblingServer(ip_addr *outIp, unsigned short *outPort)
     return false;
 }
 
-static Boolean LoadOwnPrefsFile(ip_addr *outIp, unsigned short *outPort, NetFlimProfileMode *outProf) {
+static Boolean LoadOwnPrefsFileEx(ip_addr *outIp, unsigned short *outPort,
+                                  NetFlimProfileMode *outProf, unsigned long *outModDate) {
     unsigned char buf[128];
     long gotLen = 0;
 
-    if (!ReadPrefsBlob(PREFS_FILENAME, "NetFlim Prefs", buf, (long)(sizeof(buf) - 1), &gotLen)) {
+    if (!ReadPrefsBlobEx(PREFS_FILENAME, "NetFlim Prefs", buf, (long)(sizeof(buf) - 1), &gotLen, outModDate)) {
         return false;
     }
 
@@ -336,26 +360,58 @@ static Boolean LoadOwnPrefsFile(ip_addr *outIp, unsigned short *outPort, NetFlim
     return false;
 }
 
-Boolean NetReadSiblingServerIP(ip_addr *outIp, unsigned short *outPort, char *outSource, int srcMax) {
-    ip_addr ip = 0;
-    unsigned short port = DEFAULT_HTTP_PORT;
-    const char *src = NULL;
+static Boolean PickBestSiblingServerIP(ip_addr *outIp, unsigned short *outPort,
+                                       char *outSource, int srcMax, unsigned long *outModDate) {
+    ip_addr bestIp = 0;
+    unsigned short bestPort = DEFAULT_HTTP_PORT;
+    const char *bestSrc = NULL;
+    unsigned long bestMod = 0;
+    ip_addr ip;
+    unsigned short port;
+    unsigned long mod;
 
-    if (ReadMagicSiblingServer("\pSpotiMac Prefs", "SpotiMac Prefs", SPOTIMAC_PREFS_MAGIC, &ip)) {
-        src = "SpotiMac Prefs";
-    } else if (ReadMagicSiblingServer("\pMacAI Prefs", "MacAI Prefs", MACAI_PREFS_MAGIC, &ip)) {
-        src = "MacAI Prefs";
-    } else if (ReadMagicSiblingServer("\pMaciSpot Prefs", "MaciSpot Prefs", SPOTIMAC_PREFS_MAGIC, &ip)) {
-        src = "MaciSpot Prefs";
-    } else if (ReadMacDropSiblingServer(&ip, &port)) {
-        src = "MacDrop Prefs";
+    /* Check MacDrop Prefs first so ties in modification timestamp favor MacDrop's live daemon */
+    ip = 0; port = DEFAULT_HTTP_PORT; mod = 0;
+    if (ReadMacDropSiblingServerEx(&ip, &port, &mod) && IsValidServerIP(ip)) {
+        bestIp = ip;
+        bestPort = port;
+        bestSrc = "MacDrop Prefs";
+        bestMod = mod;
     }
 
-    if (src && IsValidServerIP(ip)) {
-        if (outIp) *outIp = ip;
-        if (outPort) *outPort = port;
+    ip = 0; mod = 0;
+    if (ReadMagicSiblingServerEx("\pSpotiMac Prefs", "SpotiMac Prefs", SPOTIMAC_PREFS_MAGIC, &ip, &mod) &&
+        IsValidServerIP(ip) && (!bestSrc || mod > bestMod)) {
+        bestIp = ip;
+        bestPort = DEFAULT_HTTP_PORT;
+        bestSrc = "SpotiMac Prefs";
+        bestMod = mod;
+    }
+
+    ip = 0; mod = 0;
+    if (ReadMagicSiblingServerEx("\pMacAI Prefs", "MacAI Prefs", MACAI_PREFS_MAGIC, &ip, &mod) &&
+        IsValidServerIP(ip) && (!bestSrc || mod > bestMod)) {
+        bestIp = ip;
+        bestPort = DEFAULT_HTTP_PORT;
+        bestSrc = "MacAI Prefs";
+        bestMod = mod;
+    }
+
+    ip = 0; mod = 0;
+    if (ReadMagicSiblingServerEx("\pMaciSpot Prefs", "MaciSpot Prefs", SPOTIMAC_PREFS_MAGIC, &ip, &mod) &&
+        IsValidServerIP(ip) && (!bestSrc || mod > bestMod)) {
+        bestIp = ip;
+        bestPort = DEFAULT_HTTP_PORT;
+        bestSrc = "MaciSpot Prefs";
+        bestMod = mod;
+    }
+
+    if (bestSrc && IsValidServerIP(bestIp)) {
+        if (outIp) *outIp = bestIp;
+        if (outPort) *outPort = bestPort;
+        if (outModDate) *outModDate = bestMod;
         if (outSource && srcMax > 0) {
-            strncpy(outSource, src, srcMax - 1);
+            strncpy(outSource, bestSrc, srcMax - 1);
             outSource[srcMax - 1] = '\0';
         }
         return true;
@@ -363,25 +419,47 @@ Boolean NetReadSiblingServerIP(ip_addr *outIp, unsigned short *outPort, char *ou
     return false;
 }
 
-static void LoadPrefs(void) {
-    ip_addr savedIp = 0;
-    unsigned short savedPort = DEFAULT_HTTP_PORT;
-    NetFlimProfileMode savedProf = gProfileMode;
+Boolean NetReadSiblingServerIP(ip_addr *outIp, unsigned short *outPort, char *outSource, int srcMax) {
+    return PickBestSiblingServerIP(outIp, outPort, outSource, srcMax, NULL);
+}
 
-    if (LoadOwnPrefsFile(&savedIp, &savedPort, &savedProf)) {
-        gServerIP = savedIp;
-        gServerHttpPort = savedPort;
-        gProfileMode = savedProf;
+static void LoadPrefs(void) {
+    ip_addr ownIp = 0;
+    unsigned short ownPort = DEFAULT_HTTP_PORT;
+    NetFlimProfileMode savedProf = gProfileMode;
+    unsigned long ownMod = 0;
+    Boolean hasOwn = LoadOwnPrefsFileEx(&ownIp, &ownPort, &savedProf, &ownMod);
+
+    ip_addr sibIp = 0;
+    unsigned short sibPort = DEFAULT_HTTP_PORT;
+    char sibSource[32] = "";
+    unsigned long sibMod = 0;
+    Boolean hasSib = PickBestSiblingServerIP(&sibIp, &sibPort, sibSource, sizeof(sibSource), &sibMod);
+
+    gProfileMode = savedProf;
+
+    /* If a sibling app (such as MacDrop) has updated its prefs more recently than NetFlim Prefs,
+     * adopt that newer server IP immediately at startup so we don't display or dial a stale IP! */
+    if (hasSib && (!hasOwn || (sibMod > 0 && sibMod >= ownMod && sibIp != ownIp))) {
+        gServerIP = sibIp;
+        gServerHttpPort = sibPort;
+        strncpy(gPrefsSource, sibSource, sizeof(gPrefsSource) - 1);
+        gPrefsSource[sizeof(gPrefsSource) - 1] = '\0';
+        return;
+    }
+
+    if (hasOwn) {
+        gServerIP = ownIp;
+        gServerHttpPort = ownPort;
         strcpy(gPrefsSource, "NetFlim Prefs");
         return;
     }
 
-    gProfileMode = savedProf;
-    gServerHttpPort = savedPort;
-
-    if (NetReadSiblingServerIP(&savedIp, &savedPort, gPrefsSource, sizeof(gPrefsSource))) {
-        gServerIP = savedIp;
-        gServerHttpPort = savedPort;
+    if (hasSib) {
+        gServerIP = sibIp;
+        gServerHttpPort = sibPort;
+        strncpy(gPrefsSource, sibSource, sizeof(gPrefsSource) - 1);
+        gPrefsSource[sizeof(gPrefsSource) - 1] = '\0';
     }
 }
 
@@ -654,12 +732,12 @@ Boolean NetDiscoverServer(char *outModules, int maxLen) {
     }
 
     /* Listen synchronously like MacDrop/MacAI (preferring responder remoteHost over payload IP) */
-    for (readTry = 0; readTry < 3 && !found; readTry++) {
+    for (readTry = 0; readTry < 2 && !found; readTry++) {
         memset(&pb, 0, sizeof(pb));
         pb.ioCRefNum = gMacTCPRef;
         pb.csCode = UDPRead;
         pb.udpStream = udpStream;
-        pb.csParam.receive.timeOut = (readTry == 0) ? 2 : 1;
+        pb.csParam.receive.timeOut = 1;
         pb.csParam.receive.secondTimeStamp = 0;
         err = PBControlSync((ParmBlkPtr)&pb);
 
@@ -798,6 +876,7 @@ static long ParseContentLength(const char *hdr, long hdrLen) {
 
 Boolean NetHttpGet(const char *path, char *outBuf, long outMax, long *outLen, short *outHttpStatus) {
     Ptr tcpBuf = NULL;
+    TCPiopb openPB;
     TCPiopb pb;
     StreamPtr stream = 0;
     char reqHdr[384];
@@ -811,6 +890,7 @@ Boolean NetHttpGet(const char *path, char *outBuf, long outMax, long *outLen, sh
     Boolean ok = false;
     OSErr err;
     unsigned long startTicks;
+    unsigned long waitLimit = (gHttpConnectTimeoutTicks > 0) ? gHttpConnectTimeoutTicks : 120UL;
 
     gLastTcpErr = noErr;
     if (outLen) *outLen = 0;
@@ -822,6 +902,7 @@ Boolean NetHttpGet(const char *path, char *outBuf, long outMax, long *outLen, sh
     tcpBuf = NewPtrClear(TCP_RECV_BUF_SIZE);
     if (!tcpBuf) return false;
 
+    memset(&openPB, 0, sizeof(openPB));
     memset(&pb, 0, sizeof(pb));
     pb.ioCRefNum = gMacTCPRef;
     pb.csCode = TCPCreate;
@@ -836,24 +917,25 @@ Boolean NetHttpGet(const char *path, char *outBuf, long outMax, long *outLen, sh
     }
     stream = pb.tcpStream;
 
-    memset(&pb, 0, sizeof(pb));
-    pb.ioCRefNum = gMacTCPRef;
-    pb.csCode = TCPActiveOpen;
-    pb.tcpStream = stream;
-    pb.csParam.open.ulpTimeoutValue = 3;
-    pb.csParam.open.ulpTimeoutAction = 1;
-    pb.csParam.open.validityFlags = timeoutValue | timeoutAction;
-    pb.csParam.open.remoteHost = gServerIP;
-    pb.csParam.open.remotePort = gServerHttpPort;
-    pb.csParam.open.localPort = 0;
-    pb.csParam.open.commandTimeoutValue = 3;
-    err = PBControlAsync((ParmBlkPtr)&pb);
+    /* Use a dedicated openPB for async TCPActiveOpen so cleanup never zeroes an in-flight PB */
+    openPB.ioCompletion = NULL;
+    openPB.ioCRefNum = gMacTCPRef;
+    openPB.csCode = TCPActiveOpen;
+    openPB.tcpStream = stream;
+    openPB.csParam.open.ulpTimeoutValue = 2;
+    openPB.csParam.open.ulpTimeoutAction = 1;
+    openPB.csParam.open.validityFlags = timeoutValue | timeoutAction;
+    openPB.csParam.open.remoteHost = gServerIP;
+    openPB.csParam.open.remotePort = gServerHttpPort;
+    openPB.csParam.open.localPort = 0;
+    openPB.csParam.open.commandTimeoutValue = 2;
+    err = PBControlAsync((ParmBlkPtr)&openPB);
     if (err == noErr) {
         startTicks = TickCount();
-        while (pb.ioResult > 0 && (TickCount() - startTicks) < 180) {
+        while (openPB.ioResult > 0 && (TickCount() - startTicks) < waitLimit) {
             SystemTask();
         }
-        err = (pb.ioResult > 0) ? -23016 : pb.ioResult;
+        err = (openPB.ioResult > 0) ? -23016 : openPB.ioResult;
     }
     if (err != noErr) {
         gLastTcpErr = err;
@@ -933,26 +1015,27 @@ Boolean NetHttpGet(const char *path, char *outBuf, long outMax, long *outLen, sh
     }
 
 cleanup:
-    memset(&pb, 0, sizeof(pb));
-    pb.ioCRefNum = gMacTCPRef;
-    pb.csCode = TCPClose;
-    pb.tcpStream = stream;
-    pb.csParam.close.ulpTimeoutValue = 2;
-    pb.csParam.close.ulpTimeoutAction = 1;
-    pb.csParam.close.validityFlags = timeoutValue | timeoutAction;
-    PBControlSync((ParmBlkPtr)&pb);
+    if (stream != 0) {
+        unsigned long waitStart;
+        /* Abort immediately using separate pb (never call TCPClose on a timed-out SYN_SENT stream!) */
+        memset(&pb, 0, sizeof(pb));
+        pb.ioCRefNum = gMacTCPRef;
+        pb.csCode = TCPAbort;
+        pb.tcpStream = stream;
+        PBControlSync((ParmBlkPtr)&pb);
 
-    memset(&pb, 0, sizeof(pb));
-    pb.ioCRefNum = gMacTCPRef;
-    pb.csCode = TCPAbort;
-    pb.tcpStream = stream;
-    PBControlSync((ParmBlkPtr)&pb);
+        /* Ensure Open Transport .IPP / MacTCP has finished with openPB before it leaves stack scope */
+        waitStart = TickCount();
+        while (openPB.ioResult == 1 && (TickCount() - waitStart) < 60UL) {
+            SystemTask();
+        }
 
-    memset(&pb, 0, sizeof(pb));
-    pb.ioCRefNum = gMacTCPRef;
-    pb.csCode = TCPRelease;
-    pb.tcpStream = stream;
-    PBControlSync((ParmBlkPtr)&pb);
+        memset(&pb, 0, sizeof(pb));
+        pb.ioCRefNum = gMacTCPRef;
+        pb.csCode = TCPRelease;
+        pb.tcpStream = stream;
+        PBControlSync((ParmBlkPtr)&pb);
+    }
 
     DisposePtr(tcpBuf);
     return ok;
@@ -965,6 +1048,7 @@ Boolean NetProbeServer(ip_addr ip, unsigned short port, char *outStatus, int max
     ip_addr savedIP = gServerIP;
     unsigned short savedPort = gServerHttpPort;
     unsigned short probePort = port ? port : DEFAULT_HTTP_PORT;
+    unsigned long prevTimeout = gHttpConnectTimeoutTicks;
     char ipStr[32];
     Boolean ok;
 
@@ -973,7 +1057,10 @@ Boolean NetProbeServer(ip_addr ip, unsigned short port, char *outStatus, int max
 
     gServerIP = ip;
     gServerHttpPort = probePort;
+    /* Fast 55-tick (~0.9s) connect timeout when probing candidate IPs on LAN */
+    gHttpConnectTimeoutTicks = 55UL;
     ok = NetHttpGet("/api/netflim/ping", resp, sizeof(resp) - 1, &rLen, &httpCode);
+    gHttpConnectTimeoutTicks = prevTimeout;
     if (ok && rLen > 0) {
         resp[rLen] = '\0';
         if (strncmp(resp, "OK|netflim|", 11) == 0) {
@@ -990,6 +1077,7 @@ Boolean NetProbeServer(ip_addr ip, unsigned short port, char *outStatus, int max
         char pingBuf[160];
         long pLen = 0;
         short pCode = 0;
+        gHttpConnectTimeoutTicks = 55UL;
         if (NetHttpGet("/api/ping", pingBuf, sizeof(pingBuf) - 1, &pLen, &pCode) &&
             pCode == 200 && pLen > 0) {
             pingBuf[pLen] = '\0';
@@ -1015,6 +1103,7 @@ Boolean NetProbeServer(ip_addr ip, unsigned short port, char *outStatus, int max
                 }
             }
         }
+        gHttpConnectTimeoutTicks = prevTimeout;
         if (gLastErrorNote[0] == '\0') {
             sprintf(gLastErrorNote, "HTTP %d from %s:%u", (int)httpCode, ipStr, (unsigned int)probePort);
         }
@@ -1035,20 +1124,42 @@ typedef struct {
     ip_addr        ip;
     unsigned short port;
     const char    *source;
+    unsigned long  modDate;
 } CandidateServer;
 
 static void AddCandidateUnique(CandidateServer *list, int *count, int maxCount,
-                               ip_addr ip, unsigned short port, const char *source) {
+                               ip_addr ip, unsigned short port, const char *source,
+                               unsigned long modDate) {
     int i;
     if (!IsValidServerIP(ip) || *count >= maxCount) return;
     if (port == 0) port = DEFAULT_HTTP_PORT;
     for (i = 0; i < *count; i++) {
-        if (list[i].ip == ip && list[i].port == port) return;
+        if (list[i].ip == ip && list[i].port == port) {
+            if (modDate > list[i].modDate) {
+                list[i].modDate = modDate;
+                list[i].source  = source;
+            }
+            return;
+        }
     }
     list[*count].ip = ip;
     list[*count].port = port;
     list[*count].source = source;
+    list[*count].modDate = modDate;
     (*count)++;
+}
+
+static void SortCandidatesByNewest(CandidateServer *list, int count) {
+    int i, j;
+    for (i = 0; i + 1 < count; i++) {
+        for (j = i + 1; j < count; j++) {
+            if (list[j].modDate > list[i].modDate) {
+                CandidateServer tmp = list[i];
+                list[i] = list[j];
+                list[j] = tmp;
+            }
+        }
+    }
 }
 
 Boolean NetAutoConnect(char *outStatus, int statusMax) {
@@ -1057,6 +1168,7 @@ Boolean NetAutoConnect(char *outStatus, int statusMax) {
     int i;
     ip_addr ip = 0;
     unsigned short port = DEFAULT_HTTP_PORT;
+    unsigned long mod = 0;
     NetFlimProfileMode prof = gProfileMode;
     char ipStr[32];
 
@@ -1066,25 +1178,33 @@ Boolean NetAutoConnect(char *outStatus, int statusMax) {
     gSawMacDropOnly = false;
     gMacDropHintIP = 0;
 
+    /* Check MacDrop Prefs first so equal-timestamp ties favor MacDrop's live background daemon */
+    ip = 0; port = DEFAULT_HTTP_PORT; mod = 0;
+    if (ReadMacDropSiblingServerEx(&ip, &port, &mod)) {
+        AddCandidateUnique(cands, &cCount, 6, ip, port, "MacDrop Prefs", mod);
+    }
+    ip = 0; port = DEFAULT_HTTP_PORT; mod = 0;
+    if (LoadOwnPrefsFileEx(&ip, &port, &prof, &mod)) {
+        AddCandidateUnique(cands, &cCount, 6, ip, port, "NetFlim Prefs", mod);
+    }
+    ip = 0; mod = 0;
+    if (ReadMagicSiblingServerEx("\pSpotiMac Prefs", "SpotiMac Prefs", SPOTIMAC_PREFS_MAGIC, &ip, &mod)) {
+        AddCandidateUnique(cands, &cCount, 6, ip, DEFAULT_HTTP_PORT, "SpotiMac Prefs", mod);
+    }
+    ip = 0; mod = 0;
+    if (ReadMagicSiblingServerEx("\pMacAI Prefs", "MacAI Prefs", MACAI_PREFS_MAGIC, &ip, &mod)) {
+        AddCandidateUnique(cands, &cCount, 6, ip, DEFAULT_HTTP_PORT, "MacAI Prefs", mod);
+    }
+    ip = 0; mod = 0;
+    if (ReadMagicSiblingServerEx("\pMaciSpot Prefs", "MaciSpot Prefs", SPOTIMAC_PREFS_MAGIC, &ip, &mod)) {
+        AddCandidateUnique(cands, &cCount, 6, ip, DEFAULT_HTTP_PORT, "MaciSpot Prefs", mod);
+    }
     if (IsValidServerIP(gServerIP)) {
         AddCandidateUnique(cands, &cCount, 6, gServerIP, gServerHttpPort,
-                           gPrefsSource[0] ? gPrefsSource : "Saved Prefs");
+                           gPrefsSource[0] ? gPrefsSource : "Saved Prefs", 0);
     }
-    if (LoadOwnPrefsFile(&ip, &port, &prof)) {
-        AddCandidateUnique(cands, &cCount, 6, ip, port, "NetFlim Prefs");
-    }
-    if (ReadMagicSiblingServer("\pSpotiMac Prefs", "SpotiMac Prefs", SPOTIMAC_PREFS_MAGIC, &ip)) {
-        AddCandidateUnique(cands, &cCount, 6, ip, DEFAULT_HTTP_PORT, "SpotiMac Prefs");
-    }
-    if (ReadMagicSiblingServer("\pMacAI Prefs", "MacAI Prefs", MACAI_PREFS_MAGIC, &ip)) {
-        AddCandidateUnique(cands, &cCount, 6, ip, DEFAULT_HTTP_PORT, "MacAI Prefs");
-    }
-    if (ReadMagicSiblingServer("\pMaciSpot Prefs", "MaciSpot Prefs", SPOTIMAC_PREFS_MAGIC, &ip)) {
-        AddCandidateUnique(cands, &cCount, 6, ip, DEFAULT_HTTP_PORT, "MaciSpot Prefs");
-    }
-    if (ReadMacDropSiblingServer(&ip, &port)) {
-        AddCandidateUnique(cands, &cCount, 6, ip, port, "MacDrop Prefs");
-    }
+
+    SortCandidatesByNewest(cands, cCount);
 
     for (i = 0; i < cCount; i++) {
         if (NetProbeServer(cands[i].ip, cands[i].port, NULL, 0)) {
@@ -1761,7 +1881,7 @@ void NetVodConsumeNextFrame(void) {
     }
     gNextNeededFrame++;
 
-    if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
+    if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < 8) {
         ScanArenaFrames();
     }
     if (!gTcpRxArmed && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {

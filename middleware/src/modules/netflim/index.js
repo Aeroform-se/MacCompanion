@@ -213,6 +213,15 @@ function createNetflimModule(opts = {}) {
     const silent = req.headers['x-silent'] || req.query.silent || 'false';
     const from = req.headers['x-from'] || req.query.from;
     const duration = req.headers['x-duration'] || req.query.duration;
+    const byterate = req.headers['x-byterate'] || req.query.byterate;
+    const fpsRatio = req.headers['x-fps-ratio'] || req.query.fpsRatio;
+    const group = req.headers['x-group'] || req.query.group;
+    const errorAlgorithm = decodeHeaderFilename(req.headers['x-error-algorithm']) || req.query.errorAlgorithm;
+    const errorStability = req.headers['x-error-stability'] || req.query.errorStability;
+    const errorBleed = req.headers['x-error-bleed'] || req.query.errorBleed;
+    const errorBidi = req.headers['x-error-bidi'] || req.query.errorBidi;
+    const codecMode = decodeHeaderFilename(req.headers['x-codec-mode']) || req.query.codecMode;
+    const filters = decodeHeaderFilename(req.headers['x-filters']) || req.query.filters;
     const comment = decodeHeaderFilename(req.headers['x-comment']) || req.query.comment || '';
 
     const tmpPath = path.join(
@@ -268,7 +277,23 @@ function createNetflimModule(opts = {}) {
           mimeType: contentType || 'application/octet-stream',
           title,
           profiles: profilesRaw,
-          options: { aspect, dither, silent, from, duration, comment },
+          options: {
+            aspect,
+            dither,
+            silent,
+            from,
+            duration,
+            byterate,
+            fpsRatio,
+            group,
+            errorAlgorithm,
+            errorStability,
+            errorBleed,
+            errorBidi,
+            codecMode,
+            filters,
+            comment,
+          },
         });
 
         cleanedUp = true; // ingestUpload moved or deleted tmpPath
