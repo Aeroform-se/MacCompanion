@@ -136,11 +136,31 @@ function normalizeEncodeOptions(raw = {}) {
       ? Math.round(byterateRaw)
       : null;
 
-  const fpsRatioRaw = raw.fpsRatio !== undefined && raw.fpsRatio !== '' ? Number(raw.fpsRatio) : NaN;
-  const fpsRatio =
-    Number.isFinite(fpsRatioRaw) && fpsRatioRaw >= 1 && fpsRatioRaw <= 12
-      ? Math.round(fpsRatioRaw)
-      : null;
+  let targetFps = null;
+  let fpsRatio = null;
+
+  if (raw.targetFps !== undefined && raw.targetFps !== '') {
+    const tf = Number(raw.targetFps);
+    if (Number.isFinite(tf) && tf >= 5 && tf <= 60) {
+      targetFps = Math.round(tf);
+    }
+  }
+
+  if (typeof raw.fpsRatio === 'string' && raw.fpsRatio.trim().toLowerCase().startsWith('fps:')) {
+    const tf = Number(raw.fpsRatio.trim().slice(4));
+    if (Number.isFinite(tf) && tf >= 5 && tf <= 60) {
+      targetFps = Math.round(tf);
+    }
+  } else if (raw.fpsRatio !== undefined && raw.fpsRatio !== '') {
+    const fpsRatioRaw = Number(raw.fpsRatio);
+    if (Number.isFinite(fpsRatioRaw)) {
+      if (fpsRatioRaw >= 10 && fpsRatioRaw <= 60 && targetFps === null) {
+        targetFps = Math.round(fpsRatioRaw);
+      } else if (fpsRatioRaw >= 1 && fpsRatioRaw <= 12) {
+        fpsRatio = Math.round(fpsRatioRaw);
+      }
+    }
+  }
 
   let group = null;
   if (raw.group === true || raw.group === 'true' || raw.group === '1') {
@@ -187,6 +207,7 @@ function normalizeEncodeOptions(raw = {}) {
     from: fromSec,
     duration: durationSec,
     byterate,
+    targetFps,
     fpsRatio,
     group,
     errorAlgorithm,
@@ -245,10 +266,22 @@ function probeMedia(filePath, ffprobeBin) {
               ? streamDuration
               : 0;
 
+          let fps = 0;
+          const rateStr = videoStream && (videoStream.avg_frame_rate || videoStream.r_frame_rate);
+          if (typeof rateStr === 'string' && rateStr.includes('/')) {
+            const [num, den] = rateStr.split('/').map(Number);
+            if (Number.isFinite(num) && Number.isFinite(den) && den > 0) {
+              fps = Number((num / den).toFixed(3));
+            }
+          } else if (rateStr && Number.isFinite(Number(rateStr))) {
+            fps = Number(Number(rateStr).toFixed(3));
+          }
+
           resolve({
             durationSec: Number(durationSec.toFixed(2)),
             width: videoStream ? Number(videoStream.width) || 0 : 0,
             height: videoStream ? Number(videoStream.height) || 0 : 0,
+            fps,
             hasAudio: Boolean(audioStream),
             codec: videoStream ? videoStream.codec_name : null,
           });
@@ -325,22 +358,32 @@ function createEncoder({ library }) {
     return jobs.find((j) => j.id === jobId) || null;
   }
 
-  function preScaleStretch(srcPath, destPath, ffmpegBin, job) {
+  function preProcessMedia(srcPath, destPath, ffmpegBin, job, { stretch = false, targetFps = null } = {}) {
     return new Promise((resolve, reject) => {
+      const vfParts = [];
+      if (targetFps && Number.isFinite(targetFps) && targetFps >= 5 && targetFps <= 60) {
+        vfParts.push(`fps=${Math.round(targetFps)}`);
+      }
+      if (stretch) {
+        vfParts.push('scale=512:342,setsar=1');
+      }
       const args = [
         '-y',
         '-i',
         srcPath,
-        '-vf',
-        'scale=512:342,setsar=1',
+      ];
+      if (vfParts.length > 0) {
+        args.push('-vf', vfParts.join(','));
+      }
+      args.push(
         '-c:v',
         'mpeg4',
         '-q:v',
         '2',
         '-c:a',
         'pcm_s16le',
-        destPath,
-      ];
+        destPath
+      );
       const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
       proc.stderr.on('data', (chunk) => {
         const lines = chunk.toString('utf8').split(/\r?\n|\r/);
@@ -351,7 +394,7 @@ function createEncoder({ library }) {
         if (code === 0 && fs.existsSync(destPath)) {
           resolve(destPath);
         } else {
-          reject(new Error(`ffmpeg stretch pre-scale failed (exit ${code})`));
+          reject(new Error(`ffmpeg pre-process failed (exit ${code})`));
         }
       });
     });
@@ -481,28 +524,56 @@ function createEncoder({ library }) {
     job.message = 'Inspecting source media...';
     job.progressPct = 2;
 
-    if ((!item.durationSec || !item.width) && tools.ffprobe) {
-      const meta = await probeMedia(srcAbsPath, tools.ffprobe);
-      if (meta) {
+    let probedMeta = null;
+    if (tools.ffprobe) {
+      probedMeta = await probeMedia(srcAbsPath, tools.ffprobe);
+      if (probedMeta && (!item.durationSec || !item.width)) {
         library.updateItem(item.id, {
-          durationSec: item.durationSec || meta.durationSec,
-          width: item.width || meta.width,
-          height: item.height || meta.height,
+          durationSec: item.durationSec || probedMeta.durationSec,
+          width: item.width || probedMeta.width,
+          height: item.height || probedMeta.height,
         });
       }
     }
 
     let encodeInputPath = srcAbsPath;
     let tmpScaledPath = null;
+    const effectiveOptions = { ...job.options };
 
     try {
-      if (job.options.aspect === 'stretch') {
-        if (!tools.ffmpeg) {
-          throw new Error('ffmpeg is required for stretch aspect scaling');
+      const wantStretch = effectiveOptions.aspect === 'stretch';
+      let needFfmpegFps = false;
+
+      if (effectiveOptions.targetFps) {
+        const srcFps = probedMeta && probedMeta.fps > 0 ? probedMeta.fps : 0;
+        const targetFps = effectiveOptions.targetFps;
+        const nearestRatio = srcFps > 0 ? Math.max(1, Math.round(srcFps / targetFps)) : 0;
+        if (srcFps > 0 && nearestRatio >= 1 && Math.abs(srcFps / nearestRatio - targetFps) <= 0.6) {
+          effectiveOptions.fpsRatio = nearestRatio;
+        } else if (tools.ffmpeg) {
+          needFfmpegFps = true;
+          effectiveOptions.fpsRatio = 1;
+        } else if (srcFps > 0) {
+          effectiveOptions.fpsRatio = Math.max(1, Math.round(srcFps / targetFps));
+        } else {
+          effectiveOptions.fpsRatio = Math.max(1, Math.round(60 / targetFps));
         }
-        tmpScaledPath = path.join(library.dirs.tmp, `${job.id}_stretch.mov`);
-        job.message = 'Pre-scaling video to 512x342 (stretch)...';
-        await preScaleStretch(srcAbsPath, tmpScaledPath, tools.ffmpeg, job);
+      }
+
+      if (wantStretch || needFfmpegFps) {
+        if (!tools.ffmpeg) {
+          throw new Error('ffmpeg is required for stretch aspect scaling or frame rate conversion');
+        }
+        tmpScaledPath = path.join(library.dirs.tmp, `${job.id}_prep.mov`);
+        job.message = wantStretch && needFfmpegFps
+          ? `Pre-scaling 512x342 & converting to ${effectiveOptions.targetFps} fps...`
+          : needFfmpegFps
+            ? `Converting frame rate to ${effectiveOptions.targetFps} fps...`
+            : 'Pre-scaling video to 512x342 (stretch)...';
+        await preProcessMedia(srcAbsPath, tmpScaledPath, tools.ffmpeg, job, {
+          stretch: wantStretch,
+          targetFps: needFfmpegFps ? effectiveOptions.targetFps : null,
+        });
         encodeInputPath = tmpScaledPath;
       }
 
@@ -522,7 +593,7 @@ function createEncoder({ library }) {
           inputPath: encodeInputPath,
           outPath: outTmpPath,
           profileId,
-          options: job.options,
+          options: effectiveOptions,
           job,
           profileIndex: i,
         });
@@ -540,6 +611,11 @@ function createEncoder({ library }) {
           }
         }
 
+        const encodedFps =
+          parsed.info.totalTicks > 0 && parsed.info.frameCount > 0
+            ? Number(((parsed.info.frameCount * 60) / parsed.info.totalTicks).toFixed(1))
+            : null;
+
         library.addProfileToItem(item.id, profileId, {
           profile: profileId,
           file: library.toRelativePath(outAbsPath),
@@ -550,10 +626,12 @@ function createEncoder({ library }) {
           totalTicks: parsed.info.totalTicks,
           durationSec: parsed.durationSec,
           byterate: parsed.info.byterate,
+          fps: encodedFps,
+          targetFps: job.options.targetFps || null,
           silent: parsed.info.silent,
           aspect: job.options.aspect,
           dither: job.options.dither,
-          fpsRatio: job.options.fpsRatio,
+          fpsRatio: effectiveOptions.fpsRatio,
           group: job.options.group,
           errorAlgorithm: job.options.errorAlgorithm,
           errorStability: job.options.errorStability,

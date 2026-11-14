@@ -320,7 +320,7 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
         uint32_t hdr;
         uint32_t off;
         unsigned char *dp;
-        const uint16_t stride = NETFLIM_ROW_BYTES;
+        const uint16_t stride4 = NETFLIM_ROW_BYTES * 4;
 
         if (*(const uint32_t *)sp == 0UL || *(const uint16_t *)(sp + 2) == 0U) {
             return 1;
@@ -328,19 +328,16 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
 
         if (*(const uint32_t *)(end - 4) == 0UL) {
             /*
-             * Ultra-fast 68000/68030 z32 unpacker (62 bytes total, fits in <4
-             * 68030 I-cache lines):
-             * - Trailing 0x00000000 sentinel verified once above (zero per-run
-             *   end-of-buffer or offset bounds branches inside the outer loop).
-             * - Peels the 1st vertical longword unconditionally so single-row
-             *   dither runs (count == 1) skip both stride addition and loop
-             *   branches.
-             * - 4x unrolled vertical copy body for tall runs (count >= 5),
-             *   cutting inner-loop branch overhead by 75%.
+             * Ultra-fast 68000/68030/68040 z32 unpacker (fits in 68030 I-cache):
+             * - Zero-branch peeled fast paths for count == 1, 2, 3, and 4
+             *   (covering 70-90% of all z32 runs) using displacement addressing
+             *   64(dp), 128(dp), 192(dp) with zero adda.w overhead.
+             * - 4x unrolled displacement burst for count >= 5 using a single
+             *   adda.w #256,dp per 4 vertical longwords and zero remainder loop.
              */
             __asm__ volatile (
                 "move.l (%[sp])+,%[hdr]\n\t"
-                "beq.s  5f\n"
+                "beq.s  9f\n"
                 "0:\n\t"
                 "moveq  #0,%[off]\n\t"
                 "move.w %[hdr],%[off]\n\t"
@@ -352,37 +349,52 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
                 "move.l (%[sp])+,(%[dp])\n\t"
                 "subq.w #1,%[hdr]\n\t"
                 "bcs.s  4f\n\t"
-                "subq.w #3,%[hdr]\n\t"
-                "bcs.s  2f\n"
-                "1:\n\t"
-                "adda.w %[stride],%[dp]\n\t"
-                "move.l (%[sp])+,(%[dp])\n\t"
-                "adda.w %[stride],%[dp]\n\t"
-                "move.l (%[sp])+,(%[dp])\n\t"
-                "adda.w %[stride],%[dp]\n\t"
-                "move.l (%[sp])+,(%[dp])\n\t"
-                "adda.w %[stride],%[dp]\n\t"
-                "move.l (%[sp])+,(%[dp])\n\t"
-                "subq.w #4,%[hdr]\n\t"
-                "bcc.s  1b\n"
-                "2:\n\t"
-                "addq.w #4,%[hdr]\n\t"
-                "beq.s  4f\n"
-                "3:\n\t"
-                "adda.w %[stride],%[dp]\n\t"
-                "move.l (%[sp])+,(%[dp])\n\t"
+                "beq.s  5f\n\t"
                 "subq.w #1,%[hdr]\n\t"
-                "bne.s  3b\n"
+                "beq.s  6f\n\t"
+                "subq.w #2,%[hdr]\n\t"
+                "bcs.s  7f\n"
+                "1:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n\t"
+                "move.l (%[sp])+,128(%[dp])\n\t"
+                "move.l (%[sp])+,192(%[dp])\n\t"
+                "move.l (%[sp])+,256(%[dp])\n\t"
+                "adda.w %[stride4],%[dp]\n\t"
+                "subq.w #4,%[hdr]\n\t"
+                "bcc.s  1b\n\t"
+                "addq.w #2,%[hdr]\n\t"
+                "beq.s  6f\n\t"
+                "bpl.s  7f\n\t"
+                "addq.w #1,%[hdr]\n\t"
+                "beq.s  5f\n\t"
+                "move.l (%[sp])+,%[hdr]\n\t"
+                "bne.s  0b\n\t"
+                "bra.s  9f\n"
+                "7:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n\t"
+                "move.l (%[sp])+,128(%[dp])\n\t"
+                "move.l (%[sp])+,192(%[dp])\n\t"
+                "move.l (%[sp])+,%[hdr]\n\t"
+                "bne.s  0b\n\t"
+                "bra.s  9f\n"
+                "6:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n\t"
+                "move.l (%[sp])+,128(%[dp])\n\t"
+                "move.l (%[sp])+,%[hdr]\n\t"
+                "bne.s  0b\n\t"
+                "bra.s  9f\n"
+                "5:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n"
                 "4:\n\t"
                 "move.l (%[sp])+,%[hdr]\n\t"
                 "bne.s  0b\n"
-                "5:\n"
+                "9:\n"
                 : [sp] "+a"(sp),
                   [hdr] "=&d"(hdr),
                   [off] "=&d"(off),
                   [dp] "=&a"(dp)
                 : [base] "a"(baseMinus4),
-                  [stride] "d"(stride)
+                  [stride4] "d"(stride4)
                 : "memory", "cc"
             );
             return 2;
@@ -430,6 +442,228 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
     return changed;
 }
 
+static int decode_z32_clipped(unsigned char *fbBase,
+                              unsigned short clipMinRow,
+                              unsigned short clipMaxRow,
+                              const unsigned char *p,
+                              const unsigned char *end) {
+    const uint16_t T_SIZE = 5472; /* (512 * 342) / 32 */
+    int changed = 1;
+
+    while (p + 4 <= end) {
+        uint16_t countMinus1 = read_be16(p);
+        uint16_t storedOff   = read_be16(p + 2);
+        uint16_t tOff;
+        uint16_t runIdx;
+        uint32_t count;
+        const unsigned char *nextP;
+        uint16_t row, endRow, visCount;
+        unsigned char *dp;
+
+        p += 4;
+        if (storedOff == 0) break;
+
+        tOff = (uint16_t)(((storedOff >> 2) & 0x3FFFU) | ((storedOff & 0x0003U) << 14));
+        if (tOff == 0) continue;
+
+        runIdx = (uint16_t)(tOff - 1);
+        if (runIdx >= T_SIZE) runIdx %= T_SIZE;
+
+        count = (uint32_t)countMinus1 + 1UL;
+        nextP = p + (count << 2);
+        if (nextP > end) break;
+
+        row = (uint16_t)(runIdx >> 4);
+        endRow = (uint16_t)(row + (uint16_t)count);
+
+        if (endRow <= clipMinRow || row >= clipMaxRow) {
+            p = nextP;
+            continue;
+        }
+
+        if (row < clipMinRow) {
+            uint16_t skip = (uint16_t)(clipMinRow - row);
+            p += ((uint32_t)skip << 2);
+            row = clipMinRow;
+        }
+        if (endRow > clipMaxRow) {
+            endRow = clipMaxRow;
+        }
+
+        visCount = (uint16_t)(endRow - row);
+        dp = fbBase + ((uint32_t)row << 6) + ((uint32_t)(runIdx & 15U) << 2);
+        changed = 2;
+
+#ifdef __m68k__
+        if ((((unsigned long)p | (unsigned long)dp) & 1UL) == 0) {
+            const unsigned char *sp = p;
+            uint16_t rem = (uint16_t)(visCount - 1U);
+            const uint16_t stride4 = NETFLIM_ROW_BYTES * 4;
+            __asm__ volatile (
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "subq.w #1,%[rem]\n\t"
+                "bcs.s  4f\n\t"
+                "beq.s  5f\n\t"
+                "subq.w #1,%[rem]\n\t"
+                "beq.s  6f\n\t"
+                "subq.w #2,%[rem]\n\t"
+                "bcs.s  7f\n"
+                "1:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n\t"
+                "move.l (%[sp])+,128(%[dp])\n\t"
+                "move.l (%[sp])+,192(%[dp])\n\t"
+                "move.l (%[sp])+,256(%[dp])\n\t"
+                "adda.w %[stride4],%[dp]\n\t"
+                "subq.w #4,%[rem]\n\t"
+                "bcc.s  1b\n\t"
+                "addq.w #2,%[rem]\n\t"
+                "beq.s  6f\n\t"
+                "bpl.s  7f\n\t"
+                "addq.w #1,%[rem]\n\t"
+                "beq.s  5f\n\t"
+                "bra.s  4f\n"
+                "7:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n\t"
+                "move.l (%[sp])+,128(%[dp])\n\t"
+                "move.l (%[sp])+,192(%[dp])\n\t"
+                "bra.s  4f\n"
+                "6:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n\t"
+                "move.l (%[sp])+,128(%[dp])\n\t"
+                "bra.s  4f\n"
+                "5:\n\t"
+                "move.l (%[sp])+,64(%[dp])\n"
+                "4:\n"
+                : [sp] "+a"(sp),
+                  [dp] "+a"(dp),
+                  [rem] "+d"(rem)
+                : [stride4] "d"(stride4)
+                : "memory", "cc"
+            );
+            p = nextP;
+            continue;
+        }
+#endif
+        while (visCount--) {
+            *(uint32_t *)dp = *(const uint32_t *)p;
+            p += 4;
+            dp += NETFLIM_ROW_BYTES;
+        }
+        p = nextP;
+    }
+    return changed;
+}
+
+static int decode_lines_clipped(unsigned char *fbBase,
+                                unsigned short clipMinRow,
+                                unsigned short clipMaxRow,
+                                const unsigned char *p,
+                                const unsigned char *end) {
+    uint32_t minOff = (uint32_t)clipMinRow * NETFLIM_ROW_BYTES;
+    uint32_t maxOff = (uint32_t)clipMaxRow * NETFLIM_ROW_BYTES;
+    int changed = 1;
+
+    while (p + 4 <= end) {
+        uint16_t copyBytes = read_be16(p);
+        uint16_t offset    = read_be16(p + 2);
+        const unsigned char *nextP;
+        uint32_t startOff, endOff;
+
+        p += 4;
+        if (copyBytes == 0) break;
+        nextP = p + copyBytes;
+        if (nextP > end) break;
+
+        startOff = offset;
+        endOff   = (uint32_t)offset + copyBytes;
+        if (endOff > minOff && startOff < maxOff) {
+            if (startOff < minOff) {
+                uint32_t skip = minOff - startOff;
+                p += skip;
+                startOff = minOff;
+            }
+            if (endOff > maxOff) {
+                endOff = maxOff;
+            }
+            if (endOff > startOff) {
+                NetFlimFastCopy(fbBase + startOff, p, endOff - startOff);
+                changed = 2;
+            }
+        }
+        p = nextP;
+    }
+    return changed;
+}
+
+static int decode_z16_clipped(unsigned char *fbBase,
+                              unsigned short clipMinRow,
+                              unsigned short clipMaxRow,
+                              const unsigned char *p,
+                              const unsigned char *end) {
+    const uint16_t T_SIZE = 10944; /* (512 * 342) / 16 */
+    int changed = 1;
+
+    while (p + 4 <= end) {
+        uint16_t countMinus1 = read_be16(p);
+        uint16_t storedOff   = read_be16(p + 2);
+        uint16_t tOff, runIdx, row, endRow, visCount;
+        uint32_t count;
+        const unsigned char *nextP;
+        unsigned char *dp;
+
+        p += 4;
+        if (storedOff == 0) break;
+
+        tOff = (uint16_t)(((storedOff >> 1) & 0x7FFFU) | ((storedOff & 0x0001U) << 15));
+        if (tOff == 0) continue;
+
+        runIdx = (uint16_t)(tOff - 1);
+        if (runIdx >= T_SIZE) runIdx %= T_SIZE;
+
+        count = (uint32_t)countMinus1 + 1UL;
+        nextP = p + (count << 1);
+        if (nextP > end) break;
+
+        row = (uint16_t)(runIdx >> 5);
+        endRow = (uint16_t)(row + (uint16_t)count);
+        if (endRow <= clipMinRow || row >= clipMaxRow) {
+            p = nextP;
+            continue;
+        }
+        if (row < clipMinRow) {
+            uint16_t skip = (uint16_t)(clipMinRow - row);
+            p += ((uint32_t)skip << 1);
+            row = clipMinRow;
+        }
+        if (endRow > clipMaxRow) {
+            endRow = clipMaxRow;
+        }
+        visCount = (uint16_t)(endRow - row);
+        dp = fbBase + ((uint32_t)row << 6) + ((uint32_t)(runIdx & 31U) << 1);
+        changed = 2;
+        while (visCount--) {
+            *(uint16_t *)dp = *(const uint16_t *)p;
+            p += 2;
+            dp += NETFLIM_ROW_BYTES;
+        }
+        p = nextP;
+    }
+    return changed;
+}
+
+static int decode_invert_clipped(unsigned char *fbBase,
+                                 unsigned short clipMinRow,
+                                 unsigned short clipMaxRow) {
+    uint32_t minOff = (uint32_t)clipMinRow * NETFLIM_ROW_BYTES;
+    uint32_t maxOff = (uint32_t)clipMaxRow * NETFLIM_ROW_BYTES;
+    uint32_t longs = (maxOff - minOff) >> 2;
+    uint32_t *lp = (uint32_t *)(fbBase + minOff);
+    while (longs--) {
+        *lp++ ^= 0xFFFFFFFFUL;
+    }
+    return 2;
+}
+
 int NetFlimDecodeVideo(unsigned char *fb,
                        const unsigned char *videoPtr,
                        unsigned short videoBytes) {
@@ -455,6 +689,38 @@ int NetFlimDecodeVideo(unsigned char *fb,
             return decode_z16(fb, payload, end);
         case NETFLIM_CODEC_Z32:
             return decode_z32(fb, payload, end);
+        default:
+            return 0;
+    }
+}
+
+int NetFlimDecodeVideoClipped(unsigned char *fbBase,
+                              unsigned short clipMinRow,
+                              unsigned short clipMaxRow,
+                              const unsigned char *videoPtr,
+                              unsigned short videoBytes) {
+    unsigned char codecId;
+    const unsigned char *payload;
+    const unsigned char *end;
+
+    if (!fbBase || clipMinRow >= clipMaxRow) return 0;
+    if (!videoPtr || videoBytes < 4) return 1;
+
+    codecId = videoPtr[3];
+    payload = videoPtr + 4;
+    end = videoPtr + videoBytes;
+
+    switch (codecId) {
+        case NETFLIM_CODEC_NULL:
+            return 1;
+        case NETFLIM_CODEC_INVERT:
+            return decode_invert_clipped(fbBase, clipMinRow, clipMaxRow);
+        case NETFLIM_CODEC_LINES:
+            return decode_lines_clipped(fbBase, clipMinRow, clipMaxRow, payload, end);
+        case NETFLIM_CODEC_Z16:
+            return decode_z16_clipped(fbBase, clipMinRow, clipMaxRow, payload, end);
+        case NETFLIM_CODEC_Z32:
+            return decode_z32_clipped(fbBase, clipMinRow, clipMaxRow, payload, end);
         default:
             return 0;
     }

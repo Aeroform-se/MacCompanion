@@ -24,9 +24,10 @@ static inline unsigned long FastTicks(void) {
 #define SND_DRIVER_REFNUM     (-4)  /* Classic Mac ".Sound" driver */
 #define SND_FF_HDR_BYTES      6     /* int16 mode=ffMode(0) + Fixed rate=1.0(0x00010000) */
 #define SND_NUM_BUFS          10
-#define SND_BUF_SIZE          4096
-#define SND_FLUSH_THRESHOLD   2960  /* ~8 ticks (133ms) low-overhead audio batching */
-#define PREBUFFER_FRAMES      8
+#define SND_BUF_SIZE          8192
+#define SND_FLUSH_THRESHOLD   3700  /* 10 ticks (166ms) native ASC batching */
+#define SND_PRIME_SILENCE     1480  /* 4 ticks (66ms) lead cushion so slot N+1 queues before slot N ends */
+#define PREBUFFER_FRAMES      12
 #define OPEN_TIMEOUT_TICKS    240   /* 4 seconds */
 
 /* ============================================================================
@@ -40,13 +41,14 @@ static Boolean         gMuted            = false;
 static Boolean         gLooping          = false;
 static Boolean         gCanDirectVRAM    = false;
 static Boolean         gUsingDirectVRAM  = false;
+static Boolean         gUsingWindowVRAM  = false;
 
 static unsigned char  *gOffscreenFB      = NULL;
 static BitMap          gOffscreenBM;
 static WindowPtr       gFsWindow         = NULL;
 
-/* Direct .Sound driver (ffMode PBWrite) + Sound Manager fallback */
-static Boolean         gUseDirectSndDrv  = true;
+/* Native ASC Sound Manager channel (initNoInterp, rate22khz) */
+static Boolean         gUseDirectSndDrv  = false;
 static ParamBlockRec   gSndPBs[SND_NUM_BUFS];
 static unsigned long   gSndSubmitTick[SND_NUM_BUFS];
 static SndChannelPtr   gSndChan          = NULL;
@@ -232,6 +234,44 @@ static void DispatchCurrentAudioSlot(void) {
                 return;
             }
         }
+
+        /*
+         * If the Sound Manager channel is currently completely dry (cold start
+         * or recovery), queue a 4-tick (66ms) silent lead buffer immediately
+         * ahead of this audio buffer. Because video frames are decoded at 1.0x
+         * real-time, this 4-tick cushion guarantees that buffer N+1 is always
+         * queued into gSndChan 4 ticks BEFORE buffer N finishes playing,
+         * preventing ASC FIFO underruns on 25fps (2/3-tick) streams!
+         */
+        if (CountBusySoundBuffers() == 0) {
+            short tries;
+            for (tries = 0; tries < SND_NUM_BUFS; tries++) {
+                short pSlot = (slot + 1 + tries) % SND_NUM_BUFS;
+                if (pSlot != slot && !IsAudioSlotBusy(pSlot) && gSndBufs[pSlot] != NULL) {
+                    SndCommand pCmd;
+                    memset(gSndBufs[pSlot] + SND_FF_HDR_BYTES, 0x80, SND_PRIME_SILENCE);
+                    gSndHdrs[pSlot].samplePtr = (Ptr)(gSndBufs[pSlot] + SND_FF_HDR_BYTES);
+                    gSndHdrs[pSlot].length    = SND_PRIME_SILENCE;
+                    gSndBufBusy[pSlot]        = 1;
+
+                    pCmd.cmd    = bufferCmd;
+                    pCmd.param1 = 0;
+                    pCmd.param2 = (long)&gSndHdrs[pSlot];
+                    if (SndDoCommand(gSndChan, &pCmd, true) == noErr) {
+                        pCmd.cmd    = callBackCmd;
+                        pCmd.param1 = 0;
+                        pCmd.param2 = (long)&gSndBufBusy[pSlot];
+                        if (SndDoCommand(gSndChan, &pCmd, true) != noErr) {
+                            gSndBufBusy[pSlot] = 0;
+                        }
+                    } else {
+                        gSndBufBusy[pSlot] = 0;
+                    }
+                    break;
+                }
+            }
+        }
+
         gSndHdrs[slot].samplePtr = (Ptr)(gSndBufs[slot] + SND_FF_HDR_BYTES);
         gSndHdrs[slot].length    = gSndWritePos;
         gSndBufBusy[slot]        = 1;
@@ -276,7 +316,7 @@ static void FeedFrameAudio(const unsigned char *pcm, unsigned short pcmBytes) {
         gSndWritePos = (unsigned short)(gSndWritePos + take);
         offset       = (unsigned short)(offset + take);
 
-        if ((CountBusySoundBuffers() == 0 && gSndWritePos >= 1110) ||
+        if ((CountBusySoundBuffers() == 0 && gSndWritePos >= 1850) ||
             gSndWritePos >= SND_FLUSH_THRESHOLD ||
             gSndWritePos >= SND_BUF_SIZE) {
             DispatchCurrentAudioSlot();
@@ -323,11 +363,22 @@ static void ClearRectBlack(const Rect *r) {
     PaintRect(r);
 }
 
+static void SyncWindowVRAMToOffscreen(void) {
+    if (gUsingWindowVRAM && gOffscreenFB) {
+        /* Copy the 256 visible windowed scanlines (screen y=64..319 -> flim y=43..298) */
+        NetFlimFastCopy(gOffscreenFB + (43UL * NETFLIM_ROW_BYTES),
+                        (const unsigned char *)qd.screenBits.baseAddr + (64UL * NETFLIM_ROW_BYTES),
+                        256UL * NETFLIM_ROW_BYTES);
+    }
+}
+
 static void EnterFullscreenVisual(void) {
     Rect scr = qd.screenBits.bounds;
 
     if (gCanDirectVRAM) {
         /* 1:1 Compact Mac (SE / SE/30 512x342 monochrome CRT, rowBytes=64): zero CopyBits overhead! */
+        SyncWindowVRAMToOffscreen();
+        gUsingWindowVRAM = false;
         HideCursor();
         NetFlimFastCopy((void *)qd.screenBits.baseAddr, gOffscreenFB, NETFLIM_FB_BYTES);
         gUsingDirectVRAM = true;
@@ -351,6 +402,7 @@ static void EnterFullscreenVisual(void) {
             SetPort(savedPort);
         }
         gUsingDirectVRAM = false;
+        gUsingWindowVRAM = false;
     }
 }
 
@@ -359,6 +411,7 @@ static void ExitFullscreenVisual(WindowPtr mainWin) {
         /* Save current CRT frame back into offscreen buffer before restoring desktop */
         NetFlimFastCopy(gOffscreenFB, (const void *)qd.screenBits.baseAddr, NETFLIM_FB_BYTES);
         gUsingDirectVRAM = false;
+        gUsingWindowVRAM = false;
         ShowCursor();
         DrawMenuBar();
         if (mainWin) {
@@ -429,6 +482,11 @@ static void BlitCurrentFrame(WindowPtr mainWin, const Rect *viewportRect) {
             CopyBits(&gOffscreenBM, &gFsWindow->portBits, &srcR, &dstR, srcCopy, NULL);
             SetPort(savedPort);
         }
+        return;
+    }
+
+    if (gUsingWindowVRAM) {
+        /* Windowed Direct-VRAM mode decoded visible deltas straight into screenBits.baseAddr! */
         return;
     }
 
@@ -589,6 +647,7 @@ Boolean PlayerStart(const NetFlimVideoItem *item, WindowPtr mainWin, Boolean sta
         EnterFullscreenVisual();
     } else {
         gFullscreen = false;
+        gUsingWindowVRAM = false;
     }
 
     return true;
@@ -601,6 +660,7 @@ void PlayerStop(WindowPtr mainWin) {
     NetVodClose();
     gState = kPlayerStopped;
     gFullscreen = false;
+    gUsingWindowVRAM = false;
 
     if (wasFs) {
         ExitFullscreenVisual(mainWin);
@@ -616,6 +676,7 @@ void PlayerStop(WindowPtr mainWin) {
 
 void PlayerTogglePause(void) {
     if (gState == kPlayerPlaying) {
+        SyncWindowVRAMToOffscreen();
         gState = kPlayerPaused;
         FlushAudioChannel();
         NetVodSetPaused(true);
@@ -689,19 +750,22 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
         return false;
     }
 
+    /*
+     * Always service completed TCPRcv chunks first (<1 us check when idle)
+     * so Open Transport / MacTCP stays continuously armed at 250-350+ KB/s.
+     */
+    NetVodPump();
+
     now = FAST_TICKS();
-    if (gState == kPlayerPlaying && (long)(now - gNextFrameDueTick) < 0L && !NetVodNeedsFastPump()) {
+    if (gState == kPlayerPlaying && (long)(now - gNextFrameDueTick) < 0L) {
         return true;
     }
 
-    NetVodPump();
     NetVodGetInfo(&info);
 
     if (gState == kPlayerPaused) {
         return false;
     }
-
-    now = FAST_TICKS();
 
     if (info.openStatus != NF_OPEN_OK) {
         NetVodClose();
@@ -710,6 +774,7 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
             gFullscreen = false;
             ExitFullscreenVisual(mainWin);
         }
+        gUsingWindowVRAM = false;
         gState = kPlayerError;
         if (info.openStatus == NF_OPEN_NO_PROFILE) {
             strcpy(gStatusMsg, "No encoded profile found on server");
@@ -721,7 +786,7 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
     }
 
     if (gState == kPlayerBuffering) {
-        short minPrebuf = (info.numSlots > 32) ? 10 : 6;
+        short minPrebuf = (info.numSlots > 64) ? 20 : ((info.numSlots > 32) ? 14 : 6);
         short halfRing = (info.numSlots > 2) ? (short)(info.numSlots / 2) : info.numSlots;
         if (!info.ackReceived) {
             if ((now - gStartReqTick) > OPEN_TIMEOUT_TICKS) {
@@ -730,6 +795,7 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
                     gFullscreen = false;
                     ExitFullscreenVisual(mainWin);
                 }
+                gUsingWindowVRAM = false;
                 gState = kPlayerError;
                 strcpy(gStatusMsg, "TCP stream timeout (check server / port 6800)");
                 if (outUiChanged) *outUiChanged = true;
@@ -768,6 +834,10 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
             NetFlimResetFramebuffer(gOffscreenFB);
             if (gUsingDirectVRAM) {
                 NetFlimFastCopy((void *)qd.screenBits.baseAddr, gOffscreenFB, NETFLIM_FB_BYTES);
+            } else if (gUsingWindowVRAM) {
+                NetFlimFastCopy((unsigned char *)qd.screenBits.baseAddr + (64UL * NETFLIM_ROW_BYTES),
+                                gOffscreenFB + (43UL * NETFLIM_ROW_BYTES),
+                                256UL * NETFLIM_ROW_BYTES);
             }
             FlushAudioChannel();
             gCurrentFrame = 0;
@@ -783,75 +853,89 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
         }
     }
 
-    /* Decode all VBL-due frames (up to 4) and blit the latest frame once */
-    {
+    /*
+     * Single-frame VBL pacer: decode at most 1 video frame per PlayerTick pass
+     * so NetVodPump() is serviced before AND after every single frame decode
+     * and the display never executes multi-frame catch-up bursts.
+     */
+    if (now >= gNextFrameDueTick) {
         Boolean needBlit = false;
-        short steps = 0;
 
-        while (now >= gNextFrameDueTick && steps < 4) {
-            frameData = NetVodPeekNextFrame(&frameBytes, &frameIdx);
-            if (frameData != NULL) {
-                NetFlimParsedFrame parsed;
-                if (NetFlimParseFrameSlice(frameData, frameBytes, &parsed)) {
-                    unsigned char *targetFB = gUsingDirectVRAM
-                        ? (unsigned char *)qd.screenBits.baseAddr
-                        : gOffscreenFB;
+        frameData = NetVodPeekNextFrame(&frameBytes, &frameIdx);
+        if (frameData != NULL) {
+            NetFlimParsedFrame parsed;
+            if (NetFlimParseFrameSlice(frameData, frameBytes, &parsed)) {
+                Boolean canWinVRAM = false;
+                if (!gFullscreen && gCanDirectVRAM && mainWin && viewportRect &&
+                    (viewportRect->right - viewportRect->left) == NETFLIM_WIDTH &&
+                    (viewportRect->bottom - viewportRect->top) == 256 &&
+                    mainWin->portBits.bounds.left == 0 &&
+                    (viewportRect->top - mainWin->portBits.bounds.top) == 64) {
+                    canWinVRAM = true;
+                }
+                gUsingWindowVRAM = canWinVRAM;
 
-                    if (parsed.videoBytes >= 4 && parsed.codecId != NETFLIM_CODEC_NULL) {
-                        int decRes = NetFlimDecodeVideo(targetFB, parsed.videoPtr, parsed.videoBytes);
-                        if (decRes == 2 || (decRes > 0 && gUsingDirectVRAM)) {
-                            needBlit = true;
-                        }
+                if (parsed.videoBytes >= 4 && parsed.codecId != NETFLIM_CODEC_NULL) {
+                    int decRes;
+                    if (gUsingDirectVRAM) {
+                        decRes = NetFlimDecodeVideo((unsigned char *)qd.screenBits.baseAddr,
+                                                    parsed.videoPtr,
+                                                    parsed.videoBytes);
+                    } else if (canWinVRAM) {
+                        /* Direct-VRAM windowed decode: write rows [43, 299) straight into screenBits.baseAddr + 1344 */
+                        decRes = NetFlimDecodeVideoClipped((unsigned char *)qd.screenBits.baseAddr + (21UL * NETFLIM_ROW_BYTES),
+                                                           43,
+                                                           299,
+                                                           parsed.videoPtr,
+                                                           parsed.videoBytes);
+                    } else {
+                        decRes = NetFlimDecodeVideo(gOffscreenFB,
+                                                    parsed.videoPtr,
+                                                    parsed.videoBytes);
                     }
-
-                    if (parsed.pcmBytes > 0 && !gMuted && !gVodStreamSilent) {
-                        FeedFrameAudio(parsed.pcmPtr, parsed.pcmBytes);
-                    }
-
-                    gCurrentFrame = frameIdx + 1;
-                    gElapsedTicks += parsed.ticks;
-                    gNextFrameDueTick += (unsigned long)parsed.ticks;
-
-                    if (!gFullscreen) {
-                        short sec = (short)(gElapsedTicks / 60UL);
-                        if (sec != gLastHudSecond) {
-                            gLastHudSecond = sec;
-                            gLastHudBuf    = info.bufferedReady;
-                            if (outUiChanged) *outUiChanged = true;
-                        }
+                    if (decRes == 2 || (decRes > 0 && (gUsingDirectVRAM || canWinVRAM))) {
+                        needBlit = true;
                     }
                 }
-                NetVodConsumeNextFrame();
-                steps++;
-                if (gTotalFrames > 0 && gCurrentFrame >= gTotalFrames) {
-                    break;
+
+                if (parsed.pcmBytes > 0 && !gMuted && !gVodStreamSilent) {
+                    FeedFrameAudio(parsed.pcmPtr, parsed.pcmBytes);
                 }
-            } else {
-                if (gSndWriteSlot >= 0 && gSndWritePos > 0 && CountBusySoundBuffers() == 0) {
-                    DispatchCurrentAudioSlot();
+
+                gCurrentFrame = frameIdx + 1;
+                gElapsedTicks += parsed.ticks;
+                gNextFrameDueTick += (unsigned long)parsed.ticks;
+
+                if (!gFullscreen) {
+                    /* Throttle QuickDraw bottom status bar redraws to once every 5 seconds during active playback */
+                    short secBucket = (short)(gElapsedTicks / 300UL);
+                    if (secBucket != gLastHudSecond) {
+                        gLastHudSecond = secBucket;
+                        gLastHudBuf    = info.bufferedReady;
+                        if (outUiChanged) *outUiChanged = true;
+                    }
                 }
-                if (!gFullscreen && gLastHudBuf != info.bufferedReady) {
-                    gLastHudBuf = info.bufferedReady;
-                    if (outUiChanged) *outUiChanged = true;
-                }
-                /* Minor underrun: wait briefly before shifting schedule clock */
-                if ((long)(now - gNextFrameDueTick) > 6L) {
-                    gNextFrameDueTick = now;
-                }
-                break;
             }
+            NetVodConsumeNextFrame();
+        } else {
+            if (gSndWriteSlot >= 0 && gSndWritePos > 0 && CountBusySoundBuffers() == 0) {
+                DispatchCurrentAudioSlot();
+            }
+            /* Prevent schedule clock from accumulating catch-up debt during an underrun */
+            gNextFrameDueTick = now;
         }
 
-        if ((long)(now - gNextFrameDueTick) > 12L) {
-            gNextFrameDueTick = now;
+        now = FAST_TICKS();
+        if ((long)(now - gNextFrameDueTick) > 3L) {
+            /* Clamp maximum schedule lag to 2 ticks (1 frame) so we never burst-decode */
+            gNextFrameDueTick = now - 2UL;
         }
 
         if (needBlit) {
             BlitCurrentFrame(mainWin, viewportRect);
-            if (info.bufferedReady < 24 || NetVodNeedsFastPump()) {
-                NetVodPump();
-            }
         }
+
+        NetVodPump();
     }
 
     return true;

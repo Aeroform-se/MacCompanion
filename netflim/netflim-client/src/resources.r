@@ -331,3 +331,25 @@ resource 'DITL' (129, "Message Items") {
         {14, 16, 88, 304},    StaticText { disabled, "^0\n^1\n^2" }
     }
 };
+
+/* MultiFinder / System 7 Memory Partition: 2.5 MB preferred (for 1 MB VOD arena), 1.0 MB min */
+resource 'SIZE' (-1) {
+    reserved,
+    acceptSuspendResumeEvents,
+    reserved,
+    canBackground,
+    doesActivateOnFGSwitch,
+    backgroundAndForeground,
+    dontGetFrontClicks,
+    ignoreAppDiedEvents,
+    is32BitCompatible,
+    notHighLevelEventAware,
+    onlyLocalHLEvents,
+    notStationeryAware,
+    dontUseTextEditServices,
+    reserved,
+    reserved,
+    reserved,
+    2560 * 1024,
+    1024 * 1024
+};

@@ -55,6 +55,19 @@ int NetFlimDecodeVideo(unsigned char *fb,
                        const unsigned char *videoPtr,
                        unsigned short videoBytes);
 
+/**
+ * Decodes a single MacFlim video payload directly into a shifted framebuffer
+ * (such as screenBits.baseAddr + 1344 for a 512x256 windowed viewport on a
+ * 512x342 Compact Mac), clipping all writes strictly to scanlines
+ * [clipMinRow, clipMaxRow). Eliminates both offscreen RAM writes and the
+ * 16,384-byte per-frame viewport blit in windowed mode.
+ */
+int NetFlimDecodeVideoClipped(unsigned char *fbBase,
+                              unsigned short clipMinRow,
+                              unsigned short clipMaxRow,
+                              const unsigned char *videoPtr,
+                              unsigned short videoBytes);
+
 #ifdef __cplusplus
 }
 #endif

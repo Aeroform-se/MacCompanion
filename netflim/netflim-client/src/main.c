@@ -1326,13 +1326,14 @@ int main(void) {
             now = FAST_TICKS();
             if (streamingActive) {
                 /*
-                 * Zero-Trap Active Playback Path:
-                 * Do NOT call SystemTask(), EventAvail(), or WaitNextEvent() on
-                 * every tick while streaming video (which costs 2-4 ms per tick
-                 * under System 7 + Open Transport). Instead, inspect low-memory
-                 * hardware input globals in < 0.8 us and only call GetNextEvent
-                 * when an actual mouse click or keystroke is pending.
+                 * Cooperative 10 Hz SystemTask() for Open Transport (.IPP) STREAMS
+                 * packet scheduling & TCP window updates (matching MacDrop's
+                 * high-throughput TCP loop), while avoiding 60 Hz WaitNextEvent traps.
                  */
+                if ((now - lastSysTick) >= 6UL) {
+                    SystemTask();
+                    lastSysTick = now;
+                }
                 if (AnyHardwareInputPending()) {
                     haveEvent = GetNextEvent(mDownMask | mUpMask | keyDownMask | autoKeyMask | diskMask, &ev);
                     lastWneTick = now;

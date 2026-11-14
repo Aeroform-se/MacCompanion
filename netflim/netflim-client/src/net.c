@@ -83,13 +83,14 @@ static ip_addr           gMacDropHintIP   = 0;
 static unsigned long     gHttpConnectTimeoutTicks = 120UL;
 
 /* Zero-Copy Flat Circular Stream Arena & TCP VOD State */
-#define NF_ARENA_HIGH         524288UL  /* 512 KB on >= 900 KB free */
-#define NF_ARENA_MID          262144UL  /* 256 KB on >= 500 KB free */
+#define NF_ARENA_ULTRA        1048576UL /* 1024 KB on >= 1.35 MB free */
+#define NF_ARENA_HIGH         524288UL  /* 512 KB on >= 620 KB free */
+#define NF_ARENA_MID          262144UL  /* 256 KB on >= 360 KB free */
 #define NF_ARENA_LOW          131072UL  /* 128 KB on compact Macs */
 #define NF_ARENA_TAIL         (NF_MAX_FRAME_BYTES + 16UL)
-#define NF_INDEX_SLOTS        64
+#define NF_INDEX_SLOTS        128
 #define TCP_VOD_CREATE_MAX    65535L
-#define TCP_VOD_CHUNK_MAX     24576UL
+#define TCP_VOD_CHUNK_MAX     32768UL
 
 typedef struct {
     Boolean        ready;
@@ -572,9 +573,11 @@ static void AllocVodMemoryOnce(void) {
     if (gArenaMem != NULL) return;
 
     freeBytes = FreeMem();
-    if (freeBytes >= 750000L) {
+    if (freeBytes >= 1350000L) {
+        targetCap = NF_ARENA_ULTRA;
+    } else if (freeBytes >= 620000L) {
         targetCap = NF_ARENA_HIGH;
-    } else if (freeBytes >= 400000L) {
+    } else if (freeBytes >= 360000L) {
         targetCap = NF_ARENA_MID;
     } else {
         targetCap = NF_ARENA_LOW;
@@ -585,7 +588,13 @@ static void AllocVodMemoryOnce(void) {
             gArenaMem = (unsigned char *)NewPtrClear((Size)(targetCap + NF_ARENA_TAIL));
             if (gArenaMem != NULL) {
                 gArenaCap = targetCap;
-                gRingNumSlots = (targetCap >= NF_ARENA_MID) ? (NF_INDEX_SLOTS - 1) : 32;
+                if (targetCap >= NF_ARENA_ULTRA) {
+                    gRingNumSlots = NF_INDEX_SLOTS - 1;
+                } else if (targetCap >= NF_ARENA_HIGH) {
+                    gRingNumSlots = 63;
+                } else {
+                    gRingNumSlots = 32;
+                }
                 break;
             }
         }
@@ -1362,7 +1371,7 @@ static Boolean RingCanQueueMore(void) {
     if (gArenaCap == 0 || gRingNumSlots <= 0) return false;
     if (gVodEosReached || gTcpRemoteEof) return false;
     if (gParsePhase != kParseFrames) return true;
-    return (gBufferedCount < gRingNumSlots) && ((gArenaCap - gArenaUsed) >= 2048UL);
+    return (gBufferedCount < gRingNumSlots) && ((gArenaCap - gArenaUsed) >= 4096UL);
 }
 
 static void CloseTcpStreamOnly(void) {
@@ -1881,7 +1890,7 @@ void NetVodConsumeNextFrame(void) {
     }
     gNextNeededFrame++;
 
-    if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < 8) {
+    if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
         ScanArenaFrames();
     }
     if (!gTcpRxArmed && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
