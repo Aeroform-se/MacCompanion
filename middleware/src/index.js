@@ -9,6 +9,7 @@ const { SERVER_NAME, SERVER_VERSION_SLUG, SERVER_CODENAME } = require('./version
 const spotifyModule = require('./modules/spotify');
 const macaiModule = require('./modules/macai');
 const macdropModule = require('./modules/macdrop');
+const netflimModule = require('./modules/netflim');
 
 const HTTP_PORT = parseInt(process.env.PORT || '6800', 10);
 const UDP_PORT = DEFAULT_UDP_PORT;
@@ -39,6 +40,7 @@ function createApp() {
   registry.register(spotifyModule);
   registry.register(macaiModule);
   registry.register(macdropModule);
+  registry.register(netflimModule);
 
   // Mount all registered module routers (/api/spotify, /api/macai, etc.)
   registry.mountAll(app);
@@ -191,9 +193,13 @@ if (require.main === module) {
   spotifyModule.audioEngine.startTcpServer();
   spotifyModule.audioEngine.ensureStarted().catch(() => {});
 
+  // Start NetFlim VOD UDP streaming server (port 6804)
+  netflimModule.vodStreamer.start().catch(() => {});
+
   const shutdown = () => {
     console.log('[MacCompanion] Shutting down...');
     spotifyModule.audioEngine.close();
+    netflimModule.vodStreamer.stop().catch(() => {});
     udpSocket.close();
     server.close(() => process.exit(0));
   };

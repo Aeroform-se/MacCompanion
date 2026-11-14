@@ -233,6 +233,7 @@
     body.drop-only-mode .platform-footer,
     body.drop-only-mode #spotify-card-wrap,
     body.drop-only-mode #macai-card-wrap,
+    body.drop-only-mode #netflim-card-wrap,
     body.drop-only-mode #macdrop-popup-btn {
       display: none !important;
     }
@@ -1260,6 +1261,58 @@
         <div class="configure-btn-wrap">
           <a href="#macai" class="configure-btn pixel-btn-clip">
             <span>Configure MacAI</span>
+            <span>&gt;</span>
+          </a>
+        </div>
+      </section>
+    </div>
+
+    <!-- Card 4: NetFlim -->
+    <div class="service-card-wrap" id="netflim-card-wrap">
+      <section class="service-card pixel-card-clip" id="netflim-card">
+        <div class="card-icon-wrap">
+          <img
+            src="/img/NetFlim-serviceIcon.png"
+            class="card-icon"
+            width="86"
+            height="88"
+            alt="NetFlim"
+          />
+        </div>
+
+        <div class="card-rows">
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-off.png" id="dash-netflim-enc-icon" class="status-icon" width="8" height="8" alt="Encoder Status" />
+              <span id="dash-netflim-enc-status">Checking flimmaker...</span>
+            </div>
+          </div>
+
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-netflim-lib-icon" class="status-icon" width="8" height="8" alt="Library Status" />
+              <span id="dash-netflim-lib-status">Library: 0 videos (0 .flim)</span>
+            </div>
+          </div>
+
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-netflim-job-icon" class="status-icon" width="8" height="8" alt="Queue Status" />
+              <span id="dash-netflim-job-status">Encode queue: Idle</span>
+            </div>
+          </div>
+
+          <div class="card-row">
+            <div class="row-left">
+              <img src="/img/status-ok.png" id="dash-netflim-udp-icon" class="status-icon" width="8" height="8" alt="Streaming Ports" />
+              <span id="dash-netflim-udp-status">Ports: 6804 VOD / 5050 Sync</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="configure-btn-wrap">
+          <a href="/netflim.html" class="configure-btn pixel-btn-clip">
+            <span>Open NetFlim Studio</span>
             <span>&gt;</span>
           </a>
         </div>
@@ -3158,6 +3211,36 @@
       return `${idStr.slice(0, 8)}...${idStr.slice(-4)}`;
     }
 
+    function renderNetFlim(netflim) {
+      if (!netflim) return;
+      const encIcon = document.getElementById('dash-netflim-enc-icon');
+      const encText = document.getElementById('dash-netflim-enc-status');
+      const libText = document.getElementById('dash-netflim-lib-status');
+      const jobIcon = document.getElementById('dash-netflim-job-icon');
+      const jobText = document.getElementById('dash-netflim-job-status');
+
+      if (encIcon && encText) {
+        encIcon.src = netflim.canEncode ? '/img/status-ok.png' : '/img/status-off.png';
+        encText.textContent = netflim.canEncode
+          ? 'Encoder: flimmaker ready'
+          : 'flimmaker missing (.flim upload OK)';
+      }
+
+      if (libText && netflim.summary) {
+        const vCount = Number(netflim.summary.videoCount || 0);
+        const fCount = Number(netflim.summary.flimCount || 0);
+        libText.textContent = `Library: ${vCount} video${vCount === 1 ? '' : 's'} (${fCount} .flim)`;
+      }
+
+      if (jobIcon && jobText) {
+        const active = Number(netflim.activeJobs || 0);
+        jobIcon.src = '/img/status-ok.png';
+        jobText.textContent = active > 0
+          ? `Encode queue: ${active} active`
+          : 'Encode queue: Idle';
+      }
+    }
+
     function renderUI(data) {
       const spotify = data.modules && data.modules.spotify;
       lastSpotifyData = spotify;
@@ -3215,6 +3298,10 @@
 
       if (data.modules && data.modules.macdrop) {
         renderMacDrop(data.modules.macdrop);
+      }
+
+      if (data.modules && data.modules.netflim) {
+        renderNetFlim(data.modules.netflim);
       }
 
       if (!spotify) return;

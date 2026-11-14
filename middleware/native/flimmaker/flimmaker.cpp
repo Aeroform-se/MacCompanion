@@ -1,0 +1,292 @@
+/**
+ * The flimmaker tool takes a set of pgm images and generate a flim file suitable for playback by MacFlim on a vintage
+ * Mac
+ */
+
+/**
+ * TODO:
+ *      Pixel aging
+ *      Cycle budget
+ *      => Multiple codecs
+ *      => Codec testing tools (flim generation)
+ *      New codecs:
+ *          Invert rect?
+ *          Fill black/white, vertical/horizontal, 8, 16, 32
+ *          Fill constant, vertical/horizontal, 8, 16, 32
+ *      Works from arbitrary images size (incl : letterbox)
+ *      Manages ffmpeg worker / mediainfo / sox
+ *      Automatic grid.mp4 generation
+ *      flimutil
+ */
+
+#include "cmdline.hpp"
+#include "common.hpp"
+#include "errors.hpp"
+#include "ffmpeg_reader.hpp"
+#include "file_handle.hpp"
+#include "filesystem_reader.hpp"
+#include "flimencoder.hpp"
+#include "flimutil.hpp"
+#include "grayscale.hpp"
+#include "imgcompress.hpp"
+#include "reader.hpp"
+#include "subtitles.hpp"
+#include "writer.hpp"
+
+#include <array>
+#include <cassert>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <vector>
+
+#if defined(__GLIBC__) || defined(__APPLE__)
+#include <execinfo.h>
+#endif
+#ifndef _WIN32
+#include <signal.h>
+#include <unistd.h>
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+// If defined, we add a "stamp" to each stream, to know where it is coming from
+#define noSTAMP
+
+#ifdef STAMP
+static int sStream = 0;
+#endif
+
+#ifndef VERSION
+#define VERSION "dev-unknown"
+#endif
+
+namespace macflim
+{
+
+// True if the global '-g' option was set
+bool sDebug = false;
+
+const char *version = VERSION;
+
+// Write a bunch of bytes in a file
+void write_data(const char *file, uint8_t *data, size_t len)
+{
+    file_handle f(file, "wb");
+    while (len--)
+        fputc(*data++, f.get());
+}
+
+#if defined(__GLIBC__) || defined(__APPLE__)
+void segfault_handler(int signal)
+{
+    void *array[10];
+    size_t size;
+
+    // get void*'s for all entries on the stack
+    size = backtrace(array, 10);
+
+    // print out all the frames to stderr
+    std::cerr << std::format("Error: signal {}:\n", signal);
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+    exit(1);
+}
+#endif
+
+const std::string temp_file()
+{
+    std::string cache_file;
+#ifdef _WIN32
+    char temp_path[MAX_PATH];
+    if (GetTempPath(MAX_PATH, temp_path) == 0)
+        throw io_error("Failed to get temporary path", "<temp>");
+    char temp_file[MAX_PATH];
+    // Use unique=1 to generate a name without creating the file
+    if (GetTempFileName(temp_path, "flim", 1, temp_file) == 0)
+        throw io_error("Failed to create temporary file", temp_path);
+    cache_file = temp_file;
+#else
+    cache_file = std::format("/tmp/flimmaker_cache_{}", getpid());
+#endif
+    return cache_file;
+}
+
+std::vector<subtitle> load_subtitles(program_options &opts)
+{
+    if (opts.srt_file.empty())
+        return {};
+
+    std::ifstream ifs;
+    ifs.open(opts.srt_file, std::ifstream::in);
+    if (!ifs.good())
+    {
+        std::cerr << std::format("ERROR: Cannot open subtitle file [{}]\n", opts.srt_file);
+        exit(EXIT_FAILURE);
+    }
+
+    auto subs = read_subtitles(ifs);
+    ifs.close();
+    return subtitles_extract(subs, opts.from_index, opts.duration);
+}
+
+void resolve_input_file(program_options &opts)
+{
+    if (opts.input_file.rfind("https://", 0) != 0)
+        return;
+
+    std::clog << std::format("Downloading '{}' to '{}'\n", opts.input_file, opts.cache_file);
+
+    if (std::filesystem::exists(opts.cache_file))
+    {
+        opts.input_file = opts.cache_file;
+        std::clog << std::format("Using cached file: '{}'\n", opts.cache_file);
+        return;
+    }
+
+    std::string buffer = std::format("yt-dlp '{}' -f mp4 --output '{}'", opts.input_file, opts.cache_file);
+    std::clog << std::format("execution command: {}\n", buffer);
+    int res = system(buffer.c_str());
+    if (res != 0)
+    {
+        std::clog << std::format("yt-dlp not installed or failing, falling back to youtube-dl (code {})\n", res);
+        buffer = std::format("youtube-dl '{}' -f mp4 --output '{}'", opts.input_file, opts.cache_file);
+        res = system(buffer.c_str());
+        if (res != 0)
+        {
+            std::clog << std::format("youtube-dl failed with error {}\n", res);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    opts.input_file = opts.cache_file;
+    opts.downloaded_file = true;
+}
+
+std::unique_ptr<input_reader> create_input_reader(program_options &opts)
+{
+    if (ends_with(opts.input_file, ".pgm"))
+    {
+        std::clog << std::format("Reading pgm from '{}' pattern, at {} frames per second, using '{}' audio file\n",
+                                 opts.input_file, opts.fps, opts.audio_file);
+        std::clog << "( use --fps and --audio to change fps and audio )\n";
+        return make_filesystem_reader(opts.input_file, opts.fps, opts.audio_file, opts.from_index, opts.to_index);
+    }
+
+    auto r = make_ffmpeg_reader(opts.input_file, opts.from_index, opts.duration);
+    opts.fps = r->frame_rate();
+    return r;
+}
+
+std::vector<std::unique_ptr<output_writer>> create_output_writers(const program_options &opts)
+{
+    std::vector<std::unique_ptr<output_writer>> w;
+    if (!opts.mp4_file.empty())
+        w.push_back(make_ffmpeg_writer(opts.mp4_file, opts.custom_profile.width(), opts.custom_profile.height()));
+    if (!opts.gif_file.empty())
+        w.push_back(make_gif_writer(opts.gif_file, opts.custom_profile.width(), opts.custom_profile.height()));
+    if (!opts.pgm_pattern.empty())
+        w.push_back(make_pgm_writer(opts.pgm_pattern));
+    return w;
+}
+
+// The main function, does all the work
+// flimmaker [-g] --in <%d.pgm> --from <index> --to <index> --cover <index> --audio <audio.wav> --flim <file>
+int run_main(int argc, char **argv)
+{
+#if defined(__GLIBC__) || defined(__APPLE__)
+    signal(SIGSEGV, segfault_handler);
+#endif
+    try
+    {
+        auto opts = parse_arguments(argc, argv);
+        auto subs = load_subtitles(opts);
+        resolve_input_file(opts);
+
+        if (opts.poster_ts == -1 && ends_with(opts.input_file, ".pgm"))
+            opts.poster_ts = opts.duration / 3;
+
+        if (opts.auto_watermark)
+        {
+            if (opts.watermark.size() > 0)
+                opts.watermark += " ";
+            opts.watermark += opts.custom_profile.description();
+        }
+
+        std::clog << std::format("Encoding arguments :\n{}\n", opts.custom_profile.description());
+
+        auto r = create_input_reader(opts);
+
+        // Decode audio separately (before video pass)
+        std::vector<sound_frame_t> audio_samples;
+        if (!opts.custom_profile.silent() && !ends_with(opts.input_file, ".pgm"))
+            audio_samples = decode_audio(opts.input_file, opts.from_index, opts.duration);
+
+        // Compute poster timestamp now that we know actual content duration
+        if (opts.poster_ts == -1)
+        {
+            if (!audio_samples.empty())
+                opts.poster_ts = (audio_samples.size() / 60.0) / 3;
+            else
+                opts.poster_ts = opts.duration / 3;
+        }
+
+        auto w = create_output_writers(opts);
+
+        auto encoder = flimencoder(opts.custom_profile);
+        encoder.set_fps(opts.fps);
+        encoder.set_comment(opts.comment);
+        encoder.set_cover(opts.cover_from, opts.cover_to + 1);
+        encoder.set_watermark(opts.watermark);
+        encoder.set_pgm_poster_pattern(opts.pgm_poster_pattern);
+        encoder.set_pgm_diff_pattern(opts.diff_pattern);
+        encoder.set_pgm_change_pattern(opts.change_pattern);
+        encoder.set_pgm_target_pattern(opts.target_pattern);
+        encoder.set_poster_ts(opts.poster_ts);
+        encoder.set_subtitles(subs);
+
+        encoder.make_flim(opts.flim_file, r.get(), std::move(audio_samples), w);
+
+        if (opts.downloaded_file && opts.generated_cache)
+        {
+            std::clog << std::format("Removing '{}'\n", opts.cache_file);
+            unlink(opts.cache_file.c_str());
+        }
+    }
+    catch (const early_exit &exit)
+    {
+        // Display message to stdout if present (--help, --version)
+        if (exit.has_message())
+            std::cout << exit.what();
+        return exit.exit_code();
+    }
+    catch (const config_error &error)
+    {
+        std::cerr << std::format("**** ERROR: {}\n", error.what());
+        return EXIT_FAILURE;
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << std::format("**** ERROR: [{}]\n", error.what());
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+} // namespace macflim
+
+int main(int argc, char **argv)
+{
+    return macflim::run_main(argc, argv);
+}

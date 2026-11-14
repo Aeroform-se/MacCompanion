@@ -11,6 +11,8 @@ services:
       - "6801:6801/udp"
       - "6802:6802/tcp"
       - "6803:6803/tcp"
+      - "6804:6804/udp"
+      - "5050:5050/udp"
     environment:
       - PORT=6800
       - UDP_DISCOVERY_PORT=6801

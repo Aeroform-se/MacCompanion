@@ -1,0 +1,182 @@
+#pragma once
+
+//  Flim file format types, reading, and writing
+
+#include "file_handle.hpp"
+#include "frame.hpp"
+#include "imgcompress.hpp"
+
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+namespace macflim
+{
+
+//  --- Component types in a flim file ---
+
+enum class component_type : uint16_t
+{
+    info = 0,
+    movie = 1,
+    toc = 2,
+    poster = 3,
+    initial = 4
+};
+
+//  --- Component directory entry (on-disk layout) ---
+
+struct component_entry
+{
+    uint16_t type;
+    uint32_t offset;
+    uint32_t size;
+
+    [[nodiscard]] const char *type_name() const
+    {
+        static constexpr const char *names[] = {"info", "movie", "toc", "poster", "initial"};
+        return type < std::size(names) ? names[type] : "unknown";
+    }
+};
+
+//  --- The info component of a flim, as stored on disk ---
+
+/// Metadata about a Flim file including dimensions, frame count, and playback timing.
+/// Stored in the info component and serialized to/from disk.
+struct flim_info
+{
+    size_t width;       //  2 bytes
+    size_t height;      //  2 bytes
+    bool silent;        //  2 bytes
+    size_t frame_count; //  4 bytes
+    size_t total_ticks; //  4 bytes
+    size_t byterate;    //  2 bytes
+
+    flim_info() : width(0), height(0), silent(false), frame_count(0), total_ticks(0), byterate(0) {}
+
+    flim_info(size_t width, size_t height, bool silent, size_t frame_count, size_t total_ticks, size_t byterate)
+        : width(width), height(height), silent(silent), frame_count(frame_count), total_ticks(total_ticks),
+          byterate(byterate)
+    {
+    }
+
+    void serialize(std::vector<uint8_t> &out) const
+    {
+        auto o = std::back_inserter(out);
+        write2(o, width);
+        write2(o, height);
+        write2(o, silent ? 1 : 0);
+        write4(o, frame_count);
+        write4(o, total_ticks);
+        write2(o, byterate);
+    }
+
+    void deserialize(const uint8_t *data, size_t size)
+    {
+        if (size < 16)
+            return;
+        const uint8_t *p = data;
+        width = read2(p);
+        height = read2(p);
+        silent = read2(p) != 0;
+        frame_count = read4(p);
+        total_ticks = read4(p);
+        byterate = read2(p);
+    }
+};
+
+//  --- Fletcher checksum ---
+
+void fletcher(long &checksum, const std::vector<uint8_t> &data);
+void fletcher(long &checksum, uint16_t data);
+
+//  --- A flim: a directory of typed components with binary data ---
+//
+//  Populate by reading from disk (read) or building in memory
+//  (add_component, add, etc.), then write to disk (write).
+
+/// Represents a Flim file with typed components containing video, audio, and metadata.
+/// Used for reading existing Flim files or building new ones in memory before writing to disk.
+class flim
+{
+    static constexpr size_t COMMENT_SIZE = 1022;
+    static constexpr size_t CHECKSUM_SIZE = 2;
+
+    std::string comment_;
+    uint16_t version_ = 1;
+    std::vector<component_entry> components_;
+    std::vector<std::vector<uint8_t>> blobs_;
+
+    //  Serialize the header directory (version + component table)
+    [[nodiscard]] std::vector<uint8_t> serialize_header() const;
+
+    //  Compute the Fletcher-16 checksum over header + all blobs
+    [[nodiscard]] uint16_t compute_checksum() const;
+
+    //  Write helpers
+    static void write_u16(const file_handle &fh, uint16_t v);
+    static void write_bytes(const file_handle &fh, const std::vector<uint8_t> &v);
+
+  public:
+    //  Construct an empty flim for building in memory
+    flim() = default;
+
+    //  Construct a flim with a comment (for encoding)
+    explicit flim(const std::string &comment);
+
+    //  --- Disk I/O ---
+
+    void read(const file_handle &fh);
+    void write(const file_handle &fh) const;
+
+    //  --- Accessors ---
+
+    [[nodiscard]] const std::string &comment() const
+    {
+        return comment_;
+    }
+    [[nodiscard]] uint16_t version() const
+    {
+        return version_;
+    }
+    [[nodiscard]] size_t component_count() const
+    {
+        return components_.size();
+    }
+    [[nodiscard]] const component_entry &component(size_t i) const
+    {
+        return components_[i];
+    }
+    [[nodiscard]] const std::vector<uint8_t> &component_data(size_t i) const
+    {
+        return blobs_[i];
+    }
+
+    //  Find first component of a given type, returns nullptr if not found
+    [[nodiscard]] const std::vector<uint8_t> *find_component_data(component_type type) const
+    {
+        for (size_t i = 0; i < components_.size(); i++)
+            if (components_[i].type == static_cast<uint16_t>(type))
+                return &blobs_[i];
+        return nullptr;
+    }
+
+    //  --- Building ---
+
+    void add_component(component_type type, const std::vector<uint8_t> &data);
+
+    //  Adds the flim info component
+    void add(const flim_info &fi);
+
+    //  Adds all the frames and generates the movie and toc components
+    void add(const std::vector<frame> &frames);
+
+    void add_framebuffer(component_type type, const bitmap &fb);
+    void add_poster(const bitmap &fb);
+    void add_initial(const bitmap &fb);
+};
+
+} // namespace macflim

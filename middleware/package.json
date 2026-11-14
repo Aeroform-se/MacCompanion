@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "DATA_DIR=/tmp/maccompanion-test node tests/test-milestone1.js && DATA_DIR=/tmp/maccompanion-test node tests/test-milestone2.js && DATA_DIR=/tmp/maccompanion-test-macai node tests/test-macai.js"
+    "test": "DATA_DIR=/tmp/maccompanion-test node tests/test-milestone1.js && DATA_DIR=/tmp/maccompanion-test node tests/test-milestone2.js && DATA_DIR=/tmp/maccompanion-test-macai node tests/test-macai.js && DATA_DIR=/tmp/maccompanion-test-netflim node tests/test-netflim.js"
   },
   "dependencies": {
     "express": "^4.21.2",

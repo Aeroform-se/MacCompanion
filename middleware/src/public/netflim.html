@@ -1,0 +1,1740 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NetFlim Studio &mdash; MacCompanion</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="36x38" href="/img/MacCompanion-Logo.png" />
+  <link rel="shortcut icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" href="/img/MacCompanion-Logo.png" />
+  <style>
+    @font-face {
+      font-family: 'GeistPixel';
+      src: url('/fonts/GeistPixel-Regular.woff2') format('woff2'),
+           url('/fonts/GeistPixel-Regular.woff') format('woff');
+      font-weight: normal;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    * {
+      box-sizing: border-box;
+      image-rendering: pixelated;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      background-color: #ffffff;
+      background-image: url('/img/bg-pattern-sm.png');
+      background-repeat: repeat;
+      font-family: 'GeistPixel', "Chicago", "Geneva", "Monaco", monospace;
+      font-size: 15px;
+      line-height: 1.4;
+      color: #000000;
+      padding: 36px 16px 56px 16px;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+    }
+
+    a {
+      color: #000000;
+    }
+
+    /* Pixelated Stepped Corner Clips (shared with index.html) */
+    .pixel-card-clip {
+      clip-path: polygon(
+        0 16px, 3px 16px, 3px 10px, 6px 10px, 6px 6px, 10px 6px, 10px 3px, 16px 3px, 16px 0,
+        calc(100% - 16px) 0, calc(100% - 16px) 3px, calc(100% - 10px) 3px, calc(100% - 10px) 6px, calc(100% - 6px) 6px, calc(100% - 6px) 10px, calc(100% - 3px) 10px, calc(100% - 3px) 16px, 100% 16px,
+        100% calc(100% - 16px), calc(100% - 3px) calc(100% - 16px), calc(100% - 3px) calc(100% - 10px), calc(100% - 6px) calc(100% - 10px), calc(100% - 6px) calc(100% - 6px), calc(100% - 10px) calc(100% - 6px), calc(100% - 10px) calc(100% - 3px), calc(100% - 16px) calc(100% - 3px), calc(100% - 16px) 100%,
+        16px 100%, 16px calc(100% - 3px), 10px calc(100% - 3px), 10px calc(100% - 6px), 6px calc(100% - 6px), 6px calc(100% - 10px), 3px calc(100% - 10px), 3px calc(100% - 16px), 0 calc(100% - 16px)
+      );
+    }
+
+    .pixel-pill-clip {
+      clip-path: polygon(
+        0 6px, 2px 6px, 2px 3px, 3px 3px, 3px 2px, 6px 2px, 6px 0,
+        calc(100% - 6px) 0, calc(100% - 6px) 2px, calc(100% - 3px) 2px, calc(100% - 3px) 3px, calc(100% - 2px) 3px, calc(100% - 2px) 6px, 100% 6px,
+        100% calc(100% - 6px), calc(100% - 2px) calc(100% - 6px), calc(100% - 2px) calc(100% - 3px), calc(100% - 3px) calc(100% - 3px), calc(100% - 3px) calc(100% - 2px), calc(100% - 6px) calc(100% - 2px), calc(100% - 6px) 100%,
+        6px 100%, 6px calc(100% - 2px), 3px calc(100% - 2px), 3px calc(100% - 3px), 2px calc(100% - 3px), 2px calc(100% - 6px), 0 calc(100% - 6px)
+      );
+    }
+
+    /* Top Platform Header */
+    .platform-header {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      margin-bottom: 24px;
+      gap: 14px;
+    }
+
+    .logo-link {
+      display: inline-block;
+      text-decoration: none;
+    }
+
+    .logo-img {
+      width: 149px;
+      height: 88px;
+      display: block;
+      image-rendering: pixelated;
+      object-fit: contain;
+    }
+
+    .server-pill-wrap {
+      filter: drop-shadow(0px 2px 0 #000);
+      display: inline-flex;
+    }
+
+    .server-pill {
+      background: #ffffff;
+      border: none;
+      padding: 6px 22px;
+      font-size: 14px;
+      font-weight: bold;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .status-icon {
+      width: 8px;
+      height: 8px;
+      display: inline-block;
+      image-rendering: pixelated;
+      vertical-align: middle;
+      flex-shrink: 0;
+    }
+
+    /* Subpage Layout */
+    .subpage-view {
+      width: 100%;
+      max-width: 960px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .subpage-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 4px;
+    }
+
+    .back-btn-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(2px 2px 0 #000);
+      display: inline-flex;
+    }
+
+    .back-btn-wrap:hover .back-btn {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .back-btn-wrap:active {
+      transform: translate(1px, 1px);
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
+    }
+
+    .back-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: none;
+      background: #ffffff;
+      color: #000000;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: bold;
+      padding: 6px 16px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .subpage-title-group {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+
+    .subpage-title {
+      font-size: 20px;
+      font-weight: bold;
+      margin: 0;
+    }
+
+    /* Main Card Shell */
+    .settings-card-wrap {
+      filter: drop-shadow(0px 2px 0 #000);
+      display: flex;
+    }
+
+    .settings-card {
+      background: #ffffff;
+      border: none;
+      padding: 28px 30px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      width: 100%;
+    }
+
+    @media (max-width: 640px) {
+      .settings-card {
+        padding: 20px 16px;
+      }
+    }
+
+    /* Status Banner */
+    .status-banner {
+      font-size: 14px;
+      line-height: 1.4;
+      padding: 4px 0;
+      border: none;
+      background: transparent;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-weight: bold;
+    }
+
+    .status-banner-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .status-meta-pills {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      font-weight: normal;
+      color: #333333;
+    }
+
+    /* Section Boxes */
+    .section-box {
+      border: 1px solid #000000;
+      padding: 16px 18px;
+      background: #fafafa;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .section-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    .dotted-divider {
+      border-top: 1px dotted #000000;
+      padding-top: 12px;
+    }
+
+    /* Toggle Pills */
+    .toggle-pill-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
+      display: inline-flex;
+    }
+
+    .toggle-pill {
+      display: inline-flex;
+      border: none;
+      overflow: hidden;
+      background: #ffffff;
+    }
+
+    .toggle-pill-btn {
+      border: none;
+      background: #ffffff;
+      color: #000000;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: bold;
+      padding: 4px 11px;
+      cursor: pointer;
+      line-height: 1.25;
+      white-space: nowrap;
+    }
+
+    .toggle-pill-btn + .toggle-pill-btn {
+      border-left: 1px solid #000000;
+    }
+
+    .toggle-pill-btn.active {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    /* Action & Mac Buttons */
+    .action-btn-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(2px 2px 0 #000);
+      display: inline-flex;
+    }
+
+    .action-btn-wrap:hover .action-btn-sm {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .action-btn-wrap:hover .macdrop-reload-icon,
+    .action-btn-wrap:hover .download-btn-icon {
+      filter: invert(1);
+    }
+
+    .action-btn-wrap:active {
+      transform: translate(1px, 1px);
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
+    }
+
+    .action-btn-sm {
+      border: none;
+      background: #ffffff;
+      color: #000000;
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: bold;
+      padding: 4px 12px;
+      cursor: pointer;
+      text-decoration: none;
+      line-height: 1.3;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      white-space: nowrap;
+    }
+
+    .action-btn-sm:disabled {
+      opacity: 0.42;
+      cursor: not-allowed;
+    }
+
+    .action-btn-wrap.danger:hover .action-btn-sm {
+      background: #b00020;
+      color: #ffffff;
+    }
+
+    .mac-btn-wrap {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(2px 2px 0 #000);
+      display: inline-flex;
+    }
+    .mac-btn-wrap:hover .mac-btn:not(:disabled) {
+      background: #000000;
+      color: #ffffff;
+    }
+    .mac-btn-wrap:active {
+      transform: translate(1px, 1px);
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(1px 1px 0 #000);
+    }
+
+    .mac-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: bold;
+      color: #000000;
+      background: #ffffff;
+      border: none;
+      padding: 7px 18px;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .mac-btn.primary {
+      background: #000000;
+      color: #ffffff;
+    }
+    .mac-btn-wrap:hover .mac-btn.primary:not(:disabled) {
+      background: #ffffff;
+      color: #000000;
+    }
+    .mac-btn:disabled {
+      opacity: 0.42;
+      cursor: not-allowed;
+    }
+
+    .subtle-btn {
+      font-family: inherit;
+      font-size: 12px;
+      background: none;
+      border: none;
+      text-decoration: underline;
+      cursor: pointer;
+      padding: 0;
+      color: #000000;
+    }
+
+    .subtle-btn.danger {
+      color: #b00000;
+    }
+    .subtle-btn.danger:hover {
+      background: #b00000;
+      color: #ffffff;
+      text-decoration: none;
+    }
+
+    .macdrop-reload-icon,
+    .download-btn-icon {
+      height: 12px;
+      width: auto;
+      display: inline-block;
+      vertical-align: middle;
+      object-fit: contain;
+      flex-shrink: 0;
+    }
+
+    .code-pill {
+      display: inline-block;
+      font-family: "Monaco", monospace;
+      font-size: 11px;
+      background: #eeeeee;
+      border: 1px solid #000000;
+      padding: 1px 6px;
+      user-select: all;
+      word-break: break-all;
+    }
+
+    /* Form Controls matching index.html */
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }
+
+    .field-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .field-group label {
+      font-size: 12px;
+      font-weight: bold;
+    }
+
+    .field-group input[type="text"],
+    .field-group input[type="number"],
+    .field-group select {
+      font-family: inherit;
+      font-size: 13px;
+      padding: 6px 8px;
+      border: 2px solid #000000;
+      background: #ffffff;
+      color: #000000;
+      outline: none;
+      width: 100%;
+    }
+
+    /* Upload Dropzone (matching MacDrop dotted box) */
+    .netflim-dropzone {
+      min-height: 112px;
+      border: 1.5px dotted #000000;
+      border-radius: 4px;
+      background: #ffffff;
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.12s, border-color 0.12s;
+    }
+
+    .netflim-dropzone:hover {
+      background: #f5f5f5;
+    }
+
+    .netflim-dropzone.drag-active {
+      border-style: dashed !important;
+      background: #eeeeee !important;
+    }
+
+    .dropzone-main {
+      font-size: 14px;
+      font-weight: bold;
+    }
+
+    .dropzone-sub {
+      font-size: 12px;
+      color: #444444;
+    }
+
+    /* Profile Selection Cards (matching SpotiMac Sound Profiles) */
+    .profiles-select-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
+    .profile-card-wrap {
+      filter: drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000) drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000) drop-shadow(2px 2px 0 rgba(0, 0, 0, 0.35));
+      display: flex;
+      cursor: pointer;
+    }
+
+    .profile-card-wrap.selected {
+      filter: drop-shadow(1.5px 0 0 #000) drop-shadow(-1.5px 0 0 #000) drop-shadow(0 1.5px 0 #000) drop-shadow(0 -1.5px 0 #000) drop-shadow(3px 3px 0 #000);
+    }
+
+    .profile-card-inner {
+      border: none;
+      background: #ffffff;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      width: 100%;
+    }
+
+    .profile-card-wrap:hover .profile-card-inner {
+      background: #f4f4f4;
+    }
+
+    .profile-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: bold;
+    }
+
+    .profile-badge-wrap {
+      filter: drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000) drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000);
+      display: inline-flex;
+    }
+
+    .profile-badge {
+      font-size: 10px;
+      font-weight: bold;
+      padding: 2px 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      background: #ffffff;
+      color: #000000;
+    }
+
+    .profile-badge.active {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .profile-card-desc {
+      font-size: 11px;
+      color: #333333;
+      line-height: 1.35;
+    }
+
+    .checkbox-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: bold;
+      cursor: pointer;
+      padding-top: 24px;
+    }
+
+    .checkbox-inline input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: #000000;
+      cursor: pointer;
+    }
+
+    /* Progress Bar & Notices */
+    .inline-notice {
+      padding: 9px 12px;
+      border: 1px solid #000000;
+      background: #ffffff;
+      font-size: 12px;
+      font-weight: bold;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .inline-notice.error {
+      background: #fff0f0;
+      color: #900018;
+      border-color: #900018;
+    }
+
+    .progress-wrap {
+      display: none;
+      margin-top: 6px;
+    }
+    .progress-wrap.visible {
+      display: block;
+    }
+
+    .progress-bar-outer {
+      height: 14px;
+      border: 1.5px solid #000000;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: repeating-linear-gradient(
+        -45deg,
+        #000000,
+        #000000 5px,
+        #555555 5px,
+        #555555 10px
+      );
+      transition: width 0.2s;
+    }
+
+    .progress-label {
+      margin-top: 4px;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      color: #333333;
+    }
+
+    /* Jobs Queue List */
+    .jobs-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+
+    .job-row {
+      border: 1px solid #000000;
+      background: #ffffff;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .job-row-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: bold;
+    }
+
+    .job-status-pill {
+      font-size: 10px;
+      padding: 2px 7px;
+      border: 1px solid #000000;
+      text-transform: uppercase;
+      background: #ffffff;
+      color: #000000;
+    }
+
+    .job-status-pill.running {
+      background: #000000;
+      color: #ffffff;
+    }
+
+    .job-status-pill.error {
+      border-color: #b00020;
+      color: #b00020;
+    }
+
+    .job-msg {
+      font-size: 12px;
+      color: #333333;
+      word-break: break-word;
+    }
+
+    .job-logs {
+      margin-top: 4px;
+      padding: 6px 8px;
+      background: #111111;
+      color: #f0f0f0;
+      font-family: "Monaco", monospace;
+      font-size: 10px;
+      max-height: 82px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    /* Library Toolbar & Video Gallery Cards */
+    .gallery-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .search-input {
+      font-family: inherit;
+      font-size: 12px;
+      padding: 5px 8px;
+      border: 2px solid #000000;
+      background: #ffffff;
+      color: #000000;
+      min-width: 200px;
+      outline: none;
+    }
+
+    .library-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+      gap: 16px;
+    }
+
+    .video-card-wrap {
+      filter: drop-shadow(1px 0 0 #000) drop-shadow(-1px 0 0 #000) drop-shadow(0 1px 0 #000) drop-shadow(0 -1px 0 #000) drop-shadow(2px 2px 0 rgba(0, 0, 0, 0.35));
+      display: flex;
+    }
+
+    .video-card {
+      background: #ffffff;
+      border: none;
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      overflow: hidden;
+    }
+
+    .poster-frame {
+      background: #000000;
+      border-bottom: 1.5px solid #000000;
+      aspect-ratio: 128 / 86;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .poster-frame img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      image-rendering: pixelated;
+    }
+
+    .poster-placeholder {
+      color: #ffffff;
+      font-size: 12px;
+      text-align: center;
+      padding: 14px;
+    }
+
+    .duration-badge {
+      position: absolute;
+      right: 6px;
+      bottom: 6px;
+      background: #000000;
+      color: #ffffff;
+      border: 1px solid #ffffff;
+      padding: 1px 6px;
+      font-size: 11px;
+    }
+
+    .video-body {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1;
+    }
+
+    .video-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .video-title {
+      margin: 0;
+      font-size: 14px;
+      font-weight: bold;
+      word-break: break-word;
+    }
+
+    .video-meta {
+      font-size: 11px;
+      color: #444444;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .profile-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 2px;
+    }
+
+    .profile-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid #000000;
+      padding: 5px 8px;
+      font-size: 11px;
+      background: #fafafa;
+    }
+
+    .profile-row-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    .video-actions {
+      margin-top: auto;
+      padding-top: 8px;
+      border-top: 1px dotted #000000;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .empty-state {
+      border: 1.5px dotted #000000;
+      padding: 28px 16px;
+      text-align: center;
+      background: #ffffff;
+      font-size: 13px;
+      color: #444444;
+    }
+
+    /* Sprint 5 Sync Preview Grid */
+    .sync-preview-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(140px, 190px));
+      gap: 10px;
+      margin: 8px 0;
+    }
+
+    .sync-cell {
+      border: 1.5px solid #000000;
+      padding: 16px 10px;
+      text-align: center;
+      background: #ffffff;
+      font-size: 12px;
+    }
+
+    .sync-cell.flipped {
+      border-style: dashed;
+      background: #f4f4f4;
+    }
+
+    /* Modal matching settings-card style */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.48);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      padding: 20px;
+    }
+    .modal-backdrop.open {
+      display: flex;
+    }
+    .modal-wrap {
+      width: 100%;
+      max-width: 460px;
+      filter: drop-shadow(0px 3px 0 #000);
+    }
+    .modal-card {
+      background: #ffffff;
+      padding: 24px 26px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    /* Platform Footer Pill (shared with index.html) */
+    .platform-footer {
+      margin-top: 36px;
+      display: flex;
+      justify-content: center;
+      width: 100%;
+    }
+
+    .footer-pill-wrap {
+      filter: drop-shadow(0px 2px 0 #000);
+      display: inline-flex;
+    }
+
+    .footer-pill {
+      background: #ffffff;
+      border: none;
+      padding: 8px 22px;
+      font-size: 14px;
+      font-weight: bold;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      text-align: center;
+    }
+
+    .footer-pill a {
+      color: #000000;
+      text-decoration: underline;
+    }
+
+    .footer-pill a:hover {
+      background: #000000;
+      color: #ffffff;
+      text-decoration: none;
+    }
+
+    .coffee-icon {
+      width: 22px;
+      height: 17px;
+      display: inline-block;
+      image-rendering: pixelated;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <!-- Platform Header (matches index.html) -->
+  <header class="platform-header">
+    <a href="/" class="logo-link">
+      <img
+        id="mac-icon"
+        class="logo-img"
+        src="/img/maccompanionLogo-New.png"
+        width="149"
+        height="88"
+        alt="MacCompanion"
+      />
+    </a>
+    <div class="server-pill-wrap">
+      <div class="server-pill pixel-pill-clip" id="server-status-pill">
+        <img src="/img/status-ok.png" id="server-status-icon" class="status-icon" width="8" height="8" alt="Server Online" />
+        <span id="server-status-text">Running</span>
+        <span>IP: <span id="lan-ip">...</span></span>
+        <span id="server-version">...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- NetFlim Subpage Container (mirrors #spotimac subpage-view) -->
+  <main class="subpage-view">
+    <div class="subpage-header">
+      <div class="back-btn-wrap">
+        <a href="/" class="back-btn pixel-pill-clip">&larr; Back to Overview</a>
+      </div>
+
+      <div class="subpage-title-group">
+        <h2 class="subpage-title">NetFlim Studio</h2>
+        <div class="toggle-pill-wrap">
+          <div class="toggle-pill pixel-pill-clip">
+            <button type="button" id="tab-btn-library" class="toggle-pill-btn active" onclick="switchTab('library')">Library &amp; Encoder</button>
+            <button type="button" id="tab-btn-sync" class="toggle-pill-btn" onclick="switchTab('sync')">Sync Wall (Sprint 5)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-card-wrap">
+      <section class="settings-card pixel-card-clip">
+        <!-- Live Status Banner (matches SpotiMac status-banner) -->
+        <div class="status-banner">
+          <div class="status-banner-left">
+            <img src="/img/status-off.png" id="nf-status-icon" class="status-icon" width="8" height="8" alt="Status" />
+            <span id="nf-status-text">Checking NetFlim encoder &amp; library...</span>
+          </div>
+          <div class="status-meta-pills">
+            <span class="code-pill" id="nf-lib-pill">0 videos &bull; 0 .flim</span>
+            <span class="code-pill">UDP 6804 VOD / 5050 Sync</span>
+          </div>
+        </div>
+
+        <!-- TAB 1: Library & Encoder -->
+        <div id="tab-library" style="display:flex; flex-direction:column; gap:18px;">
+          <!-- Step / Box 1: Upload & Encode Video -->
+          <div class="section-box">
+            <div class="section-title-row">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <img src="/img/status-ok.png" id="upload-step-icon" class="status-icon" width="8" height="8" alt="" />
+                <span>Upload &amp; Encode Media</span>
+              </div>
+              <span id="tools-detail" style="font-size:11px; font-weight:normal; color:#444;"></span>
+            </div>
+
+            <div id="host-warning" class="inline-notice error hidden"></div>
+            <div id="upload-feedback" class="inline-notice hidden"></div>
+
+            <div id="dropzone" class="netflim-dropzone" onclick="document.getElementById('file-input').click()">
+              <div id="dropzone-title" class="dropzone-main">Drop MP4, MOV, MKV, GIF, or .flim here (or click to browse)</div>
+              <div id="dropzone-sub" class="dropzone-sub">Source videos stay archived so additional 68k profiles &amp; Sync grids can be encoded anytime.</div>
+              <input type="file" id="file-input" style="display:none" accept="video/*,.flim,.gif,.mkv,.mov,.mp4,.avi,.webm" />
+            </div>
+
+            <div class="form-grid">
+              <div class="field-group">
+                <label for="video-title">Title (optional):</label>
+                <input type="text" id="video-title" placeholder="Auto-filled from filename..." maxlength="80" />
+              </div>
+              <div class="field-group">
+                <label for="aspect-select">Aspect Framing:</label>
+                <select id="aspect-select">
+                  <option value="bars">Letterbox Bars (bars)</option>
+                  <option value="crop">Center Crop (crop)</option>
+                  <option value="stretch">Stretch 512x342 (ffmpeg)</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label for="dither-select">Dither Algorithm:</label>
+                <select id="dither-select">
+                  <option value="ordered">Ordered Bayer</option>
+                  <option value="error">Error Diffusion</option>
+                  <option value="blue">Blue Noise</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="dotted-divider" style="display:flex; flex-direction:column; gap:8px;">
+              <div class="section-title-row" style="font-size:13px;">
+                <span>Target Macintosh Profiles:</span>
+              </div>
+              <div class="profiles-select-grid" id="profiles-select-grid">
+                <div class="profile-card-wrap selected" onclick="toggleProfileSelection('se30', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>SE/30 &amp; Mac II (se30)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge active" id="badge-se30">Selected</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">512x342 &bull; ~30 fps &bull; 3800 B/t (~228 KB/s) &bull; Audio</div>
+                    <input type="checkbox" name="profile" value="se30" checked style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('se', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>Macintosh SE (se)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-se">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">512x342 &bull; ~15 fps &bull; 1500 B/t (~90 KB/s) &bull; Audio</div>
+                    <input type="checkbox" name="profile" value="se" style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('plus', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>Mac Plus (plus)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-plus">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">512x342 &bull; ~15 fps &bull; 900 B/t (~54 KB/s) &bull; Low BW</div>
+                    <input type="checkbox" name="profile" value="plus" style="display:none;" />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <div class="field-group">
+                <label for="clip-from">Clip Start (sec, optional):</label>
+                <input type="number" id="clip-from" min="0" step="0.5" placeholder="0" />
+              </div>
+              <div class="field-group">
+                <label for="clip-duration">Clip Length (sec, optional):</label>
+                <input type="number" id="clip-duration" min="1" step="0.5" placeholder="Full duration" />
+              </div>
+              <div>
+                <label class="checkbox-inline">
+                  <input type="checkbox" id="opt-silent" />
+                  <span>Silent (omit audio)</span>
+                </label>
+              </div>
+            </div>
+
+            <div style="display:flex; justify-content:center; align-items:center; gap:12px; flex-wrap:wrap; margin-top:4px;">
+              <div class="mac-btn-wrap">
+                <button type="button" id="upload-btn" class="mac-btn primary pixel-pill-clip" onclick="startUpload()" disabled>
+                  Upload &amp; Encode
+                </button>
+              </div>
+              <div class="mac-btn-wrap">
+                <button type="button" class="mac-btn pixel-pill-clip" onclick="clearSelectedFile()">Clear File</button>
+              </div>
+            </div>
+
+            <div id="upload-progress-wrap" class="progress-wrap">
+              <div class="progress-bar-outer">
+                <div id="upload-progress-fill" class="progress-bar-fill"></div>
+              </div>
+              <div class="progress-label">
+                <span id="upload-progress-text">Uploading...</span>
+                <span id="upload-progress-pct">0%</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Box 2: Encode Queue -->
+          <div class="section-box" id="jobs-section-box">
+            <div class="section-title-row">
+              <span>Encode Queue</span>
+              <div class="action-btn-wrap">
+                <button type="button" class="action-btn-sm pixel-pill-clip" onclick="refreshAll()">
+                  <img src="/img/reload-icon-2.png" class="macdrop-reload-icon" alt="" /> Refresh
+                </button>
+              </div>
+            </div>
+
+            <div id="jobs-container" class="jobs-list">
+              <div class="empty-state" style="padding:16px;">No encode jobs in queue.</div>
+            </div>
+          </div>
+
+          <!-- Box 3: Video Library Gallery -->
+          <div class="section-box">
+            <div class="gallery-toolbar">
+              <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <strong style="font-size:14px;">Video Library</strong>
+                <div class="toggle-pill-wrap">
+                  <div class="toggle-pill pixel-pill-clip">
+                    <button type="button" class="toggle-pill-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="se30" onclick="setFilter('se30')">SE/30</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="se" onclick="setFilter('se')">SE</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="plus" onclick="setFilter('plus')">Plus</button>
+                  </div>
+                </div>
+              </div>
+              <div>
+                <input type="text" id="search-input" class="search-input" placeholder="Search titles..." oninput="renderLibrary()" />
+              </div>
+            </div>
+
+            <div id="library-grid" class="library-grid">
+              <div class="empty-state">Loading NetFlim library...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 2: Sprint 5 NetFlim Sync Wall Preview -->
+        <div id="tab-sync" class="hidden" style="display:flex; flex-direction:column; gap:16px;">
+          <div class="section-box">
+            <div class="section-title-row">
+              <span>NetFlim Sync &mdash; Multi-Mac Video Wall</span>
+              <span class="code-pill">UDP 5050 &bull; Sprint 5</span>
+            </div>
+
+            <div style="font-size:13px; line-height:1.5;">
+              Videos uploaded in the Library preserve their master source files so Sprint 5 can crop, pad, or stretch any movie into synchronized <code>.flim</code> quadrants across multiple compact Macs (including 180&deg;-inverted bottom-row units for thin center bezels).
+            </div>
+
+            <div class="sync-preview-grid" aria-hidden="true">
+              <div class="sync-cell">
+                <strong>Mac #1 (Top-Left)</strong><br />
+                0&deg; Normal &bull; Audio Lead
+              </div>
+              <div class="sync-cell">
+                <strong>Mac #2 (Top-Right)</strong><br />
+                0&deg; Normal &bull; Muted
+              </div>
+              <div class="sync-cell flipped">
+                <strong>Mac #3 (Bottom-Left)</strong><br />
+                180&deg; Inverted (Upside Down)
+              </div>
+              <div class="sync-cell flipped">
+                <strong>Mac #4 (Bottom-Right)</strong><br />
+                180&deg; Inverted (Upside Down)
+              </div>
+            </div>
+
+            <div class="inline-notice">
+              <span>Planned for Sprint 5: 2x2 / 1x3 / 4x1 grid builder, calibration numbers (1..4), single-Mac audio output selector, and synchronized UDP 5050 casting.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Platform Footer (matches index.html) -->
+  <footer class="platform-footer">
+    <div class="footer-pill-wrap">
+      <div class="footer-pill pixel-pill-clip">
+        <img src="/img/coffee.png" class="coffee-icon" alt="coffee" />
+        <span>Do you love MacCompanion? Support this project by <a href="https://buymeacoffee.com/MacCompanion" target="_blank" rel="noopener">Buying me a coffee</a></span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Re-Encode / Add Profile Modal -->
+  <div id="encode-modal" class="modal-backdrop">
+    <div class="modal-wrap">
+      <div class="modal-card pixel-card-clip">
+        <div class="section-title-row">
+          <span id="modal-title">Encode Additional Profile</span>
+          <div class="action-btn-wrap">
+            <button type="button" class="action-btn-sm pixel-pill-clip" onclick="closeEncodeModal()">Close</button>
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label for="modal-profile">Target Profile:</label>
+          <select id="modal-profile">
+            <option value="se30">SE/30 &amp; Mac II (3800 B/t • ~228 KB/s)</option>
+            <option value="se">Macintosh SE (1500 B/t • ~90 KB/s)</option>
+            <option value="plus">Mac Plus (900 B/t • ~54 KB/s)</option>
+          </select>
+        </div>
+
+        <div class="form-grid">
+          <div class="field-group">
+            <label for="modal-aspect">Aspect Framing:</label>
+            <select id="modal-aspect">
+              <option value="bars">Letterbox Bars</option>
+              <option value="crop">Center Crop</option>
+              <option value="stretch">Stretch 512x342</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="modal-dither">Dither Algorithm:</label>
+            <select id="modal-dither">
+              <option value="ordered">Ordered Bayer</option>
+              <option value="error">Error Diffusion</option>
+              <option value="blue">Blue Noise</option>
+            </select>
+          </div>
+        </div>
+
+        <label class="checkbox-inline" style="padding-top:2px;">
+          <input type="checkbox" id="modal-silent" />
+          <span>Silent (omit audio)</span>
+        </label>
+
+        <div style="display:flex; justify-content:center; gap:12px; margin-top:4px;">
+          <div class="mac-btn-wrap">
+            <button type="button" class="mac-btn primary pixel-pill-clip" onclick="submitModalEncode()">Start Encode</button>
+          </div>
+          <div class="mac-btn-wrap">
+            <button type="button" class="mac-btn pixel-pill-clip" onclick="closeEncodeModal()">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let selectedFile = null;
+    let currentLibrary = { items: [], summary: {}, tools: {}, canEncode: false };
+    let currentJobs = [];
+    let activeFilter = 'all';
+    let pollTimer = null;
+    let modalVideoId = null;
+
+    function escapeHtml(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatBytes(bytes) {
+      const b = Number(bytes || 0);
+      if (b < 1024) return `${b} B`;
+      if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+      return `${(b / (1024 * 1024)).toFixed(2)} MB`;
+    }
+
+    function formatDuration(sec) {
+      const s = Math.max(0, Math.round(Number(sec || 0)));
+      const mins = Math.floor(s / 60);
+      const rem = s % 60;
+      return `${mins}:${rem < 10 ? '0' : ''}${rem}`;
+    }
+
+    function toggleProfileSelection(profileKey, cardWrapEl) {
+      const cb = cardWrapEl.querySelector(`input[type="checkbox"][value="${profileKey}"]`);
+      const badge = document.getElementById(`badge-${profileKey}`);
+      if (!cb) return;
+      cb.checked = !cb.checked;
+      cardWrapEl.classList.toggle('selected', cb.checked);
+      if (badge) {
+        badge.classList.toggle('active', cb.checked);
+        badge.textContent = cb.checked ? 'Selected' : 'Select';
+      }
+    }
+
+    function switchTab(tabId) {
+      const libTab = document.getElementById('tab-library');
+      const syncTab = document.getElementById('tab-sync');
+      const btnLib = document.getElementById('tab-btn-library');
+      const btnSync = document.getElementById('tab-btn-sync');
+
+      if (tabId === 'sync') {
+        libTab.classList.add('hidden');
+        syncTab.classList.remove('hidden');
+        btnLib.classList.remove('active');
+        btnSync.classList.add('active');
+      } else {
+        syncTab.classList.add('hidden');
+        libTab.classList.remove('hidden');
+        btnSync.classList.remove('active');
+        btnLib.classList.add('active');
+      }
+    }
+
+    function showFeedback(message, type = 'info') {
+      const box = document.getElementById('upload-feedback');
+      if (!message) {
+        box.classList.add('hidden');
+        box.textContent = '';
+        return;
+      }
+      box.textContent = message;
+      box.className = `inline-notice${type === 'error' ? ' error' : ''}`;
+      box.classList.remove('hidden');
+    }
+
+    function setSelectedFile(file) {
+      selectedFile = file || null;
+      const dzTitle = document.getElementById('dropzone-title');
+      const dzSub = document.getElementById('dropzone-sub');
+      const uploadBtn = document.getElementById('upload-btn');
+      const titleInput = document.getElementById('video-title');
+
+      if (!selectedFile) {
+        dzTitle.textContent = 'Drop MP4, MOV, MKV, GIF, or .flim here (or click to browse)';
+        dzSub.textContent = 'Source videos stay archived so additional 68k profiles & Sync grids can be encoded anytime.';
+        uploadBtn.textContent = 'Upload & Encode';
+        uploadBtn.disabled = true;
+        return;
+      }
+
+      const isFlim = /\.flim$/i.test(selectedFile.name);
+      dzTitle.textContent = `${selectedFile.name} (${formatBytes(selectedFile.size)})`;
+      dzSub.textContent = isFlim
+        ? 'Direct .flim detected — will import directly into NetFlim catalog'
+        : 'Video ready — click Upload & Encode to stream to server';
+      uploadBtn.textContent = isFlim ? 'Import .flim' : 'Upload & Encode';
+      uploadBtn.disabled = false;
+
+      if (!titleInput.value.trim()) {
+        const clean = selectedFile.name.replace(/\.[^/.]+$/, '').replace(/[_]+/g, ' ').trim();
+        titleInput.value = clean;
+      }
+    }
+
+    function clearSelectedFile() {
+      document.getElementById('file-input').value = '';
+      document.getElementById('video-title').value = '';
+      setSelectedFile(null);
+      showFeedback('');
+    }
+
+    const dropzoneEl = document.getElementById('dropzone');
+    const fileInputEl = document.getElementById('file-input');
+
+    dropzoneEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropzoneEl.classList.add('drag-active');
+    });
+    dropzoneEl.addEventListener('dragleave', () => {
+      dropzoneEl.classList.remove('drag-active');
+    });
+    dropzoneEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropzoneEl.classList.remove('drag-active');
+      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+        setSelectedFile(e.dataTransfer.files[0]);
+      }
+    });
+    fileInputEl.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files[0]) {
+        setSelectedFile(e.target.files[0]);
+      }
+    });
+
+    function startUpload() {
+      if (!selectedFile) return;
+
+      const selectedProfiles = Array.from(document.querySelectorAll('input[name="profile"]:checked'))
+        .map((el) => el.value);
+      if (selectedProfiles.length === 0) {
+        showFeedback('Select at least one target profile (e.g. SE/30).', 'error');
+        return;
+      }
+
+      const params = new URLSearchParams({
+        filename: selectedFile.name,
+        title: document.getElementById('video-title').value.trim(),
+        profiles: selectedProfiles.join(','),
+        aspect: document.getElementById('aspect-select').value,
+        dither: document.getElementById('dither-select').value,
+        silent: document.getElementById('opt-silent').checked ? 'true' : 'false',
+      });
+
+      const clipFrom = document.getElementById('clip-from').value.trim();
+      const clipDur = document.getElementById('clip-duration').value.trim();
+      if (clipFrom !== '') params.set('from', clipFrom);
+      if (clipDur !== '') params.set('duration', clipDur);
+
+      const uploadBtn = document.getElementById('upload-btn');
+      const progWrap = document.getElementById('upload-progress-wrap');
+      const progFill = document.getElementById('upload-progress-fill');
+      const progText = document.getElementById('upload-progress-text');
+      const progPct = document.getElementById('upload-progress-pct');
+
+      uploadBtn.disabled = true;
+      progWrap.classList.add('visible');
+      progFill.style.width = '0%';
+      progPct.textContent = '0%';
+      progText.textContent = `Uploading ${selectedFile.name}...`;
+      showFeedback('');
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/netflim/upload?${params.toString()}`, true);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.setRequestHeader('X-File-Name', encodeURIComponent(selectedFile.name));
+
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && ev.total > 0) {
+          const pct = Math.round((ev.loaded / ev.total) * 100);
+          progFill.style.width = `${pct}%`;
+          progPct.textContent = `${pct}%`;
+          progText.textContent = `Uploading (${formatBytes(ev.loaded)} / ${formatBytes(ev.total)})`;
+        }
+      };
+
+      xhr.onload = () => {
+        progWrap.classList.remove('visible');
+        let resJson = {};
+        try { resJson = JSON.parse(xhr.responseText || '{}'); } catch {}
+
+        if (xhr.status >= 200 && xhr.status < 300 && resJson.ok) {
+          const msg = resJson.mode === 'flim'
+            ? `Imported "${resJson.item.title}" directly into NetFlim library.`
+            : `Uploaded "${resJson.item.title}" — encoding queued (${resJson.job.profiles.join(', ')}).`;
+          showFeedback(msg, 'success');
+          clearSelectedFile();
+          refreshAll(true);
+        } else {
+          showFeedback(resJson.error || `Upload failed (HTTP ${xhr.status})`, 'error');
+          uploadBtn.disabled = false;
+        }
+      };
+
+      xhr.onerror = () => {
+        progWrap.classList.remove('visible');
+        showFeedback('Network error during file upload.', 'error');
+        uploadBtn.disabled = false;
+      };
+
+      xhr.send(selectedFile);
+    }
+
+    function setFilter(filterKey) {
+      activeFilter = filterKey;
+      document.querySelectorAll('[data-filter]').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.filter === filterKey);
+      });
+      renderLibrary();
+    }
+
+    function renderHeaderStatus() {
+      const icon = document.getElementById('nf-status-icon');
+      const statusText = document.getElementById('nf-status-text');
+      const libPill = document.getElementById('nf-lib-pill');
+      const toolsDetail = document.getElementById('tools-detail');
+      const hostWarning = document.getElementById('host-warning');
+
+      const tools = currentLibrary.tools || {};
+      const canEncode = Boolean(currentLibrary.canEncode);
+      const sum = currentLibrary.summary || {};
+
+      icon.src = canEncode ? '/img/status-ok.png' : '/img/status-off.png';
+      statusText.textContent = canEncode
+        ? 'NetFlim Encoder Ready (flimmaker active)'
+        : 'flimmaker missing on host (.flim upload ready)';
+      libPill.textContent = `${sum.videoCount || 0} videos • ${sum.flimCount || 0} .flim • ${formatBytes(sum.totalBytes || 0)}`;
+      toolsDetail.textContent = `flimmaker: ${tools.flimmaker ? 'OK' : 'NO'} | ffmpeg: ${tools.ffmpeg ? 'OK' : 'NO'} | ffprobe: ${tools.ffprobe ? 'OK' : 'NO'}`;
+
+      if (!canEncode) {
+        hostWarning.classList.remove('hidden');
+        hostWarning.textContent = 'Notice: flimmaker is not installed on this host. Run MacCompanion inside Docker/OrbStack to encode MP4/MOV videos, or drop pre-encoded .flim files below.';
+      } else {
+        hostWarning.classList.add('hidden');
+      }
+    }
+
+    function renderJobs() {
+      const container = document.getElementById('jobs-container');
+      if (!currentJobs || currentJobs.length === 0) {
+        container.innerHTML = '<div class="empty-state" style="padding:16px;">No encode jobs yet.</div>';
+        return;
+      }
+
+      container.innerHTML = currentJobs.slice(0, 10).map((job) => {
+        const logs = Array.isArray(job.logTail) && job.logTail.length > 0
+          ? `<div class="job-logs">${escapeHtml(job.logTail.slice(-5).join('\n'))}</div>`
+          : '';
+        return `
+          <div class="job-row">
+            <div class="job-row-head">
+              <span>${escapeHtml(job.title || job.videoId)}</span>
+              <span class="job-status-pill ${escapeHtml(job.status)}">${escapeHtml(job.status)} (${Number(job.progressPct || 0)}%)</span>
+            </div>
+            <div class="job-msg">${escapeHtml(job.message || '')}</div>
+            <div class="progress-bar-outer" style="height:10px;">
+              <div class="progress-bar-fill" style="width:${Number(job.progressPct || 0)}%;"></div>
+            </div>
+            ${logs}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderLibrary() {
+      const grid = document.getElementById('library-grid');
+      const q = document.getElementById('search-input').value.trim().toLowerCase();
+      const items = (currentLibrary.items || []).filter((item) => {
+        if (activeFilter !== 'all' && !(item.profileKeys || []).includes(activeFilter)) {
+          return false;
+        }
+        if (q && !String(item.title || '').toLowerCase().includes(q)) {
+          return false;
+        }
+        return true;
+      });
+
+      if (items.length === 0) {
+        grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;">No matching videos in your NetFlim library yet.</div>';
+        return;
+      }
+
+      grid.innerHTML = items.map((item) => {
+        const posterHtml = item.hasPoster && item.posterUrl
+          ? `<img src="${escapeHtml(item.posterUrl)}?t=${encodeURIComponent(item.updatedAt || '')}" alt="${escapeHtml(item.title)}" />`
+          : `<div class="poster-placeholder">${item.profileKeys && item.profileKeys.length === 0 ? 'Encoding 1-bit preview...' : 'No 1-bit poster'}</div>`;
+
+        const profileRows = Object.values(item.profiles || {}).map((prof) => `
+          <div class="profile-row">
+            <div>
+              <strong>${escapeHtml(prof.profile.toUpperCase())}</strong>
+              <span>&bull; ${formatBytes(prof.size)} &bull; ${Number(prof.frameCount || 0)}f</span>
+            </div>
+            <div class="profile-row-actions">
+              <div class="action-btn-wrap">
+                <a class="action-btn-sm pixel-pill-clip" href="/api/netflim/download/${encodeURIComponent(item.id)}/${encodeURIComponent(prof.profile)}">
+                  <img src="/img/download-icon.png" class="download-btn-icon" alt="" /> .flim
+                </a>
+              </div>
+              <button type="button" class="subtle-btn danger" onclick="deleteProfile('${escapeHtml(item.id)}', '${escapeHtml(prof.profile)}')" title="Remove this profile">
+                &times;
+              </button>
+            </div>
+          </div>
+        `).join('');
+
+        return `
+          <div class="video-card-wrap">
+            <article class="video-card pixel-pill-clip">
+              <div class="poster-frame">
+                ${posterHtml}
+                <span class="duration-badge">${formatDuration(item.durationSec)}</span>
+              </div>
+              <div class="video-body">
+                <div class="video-title-row">
+                  <h3 class="video-title">${escapeHtml(item.title)}</h3>
+                  <button type="button" class="subtle-btn" onclick="renameVideo('${escapeHtml(item.id)}')">Rename</button>
+                </div>
+                <div class="video-meta">
+                  <span class="code-pill">${escapeHtml(item.id)}</span>
+                  <span>${item.hasSource ? `Source: ${formatBytes(item.sourceSize)}` : '.flim only'}</span>
+                </div>
+                <div class="profile-list">
+                  ${profileRows || '<div style="font-size:11px;color:#555;">No .flim profiles yet</div>'}
+                </div>
+                <div class="video-actions">
+                  <div class="action-btn-wrap">
+                    <button type="button" class="action-btn-sm pixel-pill-clip"
+                      ${item.hasSource && currentLibrary.canEncode ? '' : 'disabled'}
+                      onclick="openEncodeModal('${escapeHtml(item.id)}')">
+                      + Encode Profile
+                    </button>
+                  </div>
+                  <button type="button" class="subtle-btn danger" onclick="deleteVideo('${escapeHtml(item.id)}')">
+                    Delete Video
+                  </button>
+                </div>
+              </div>
+            </article>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function getItemById(id) {
+      return (currentLibrary.items || []).find((x) => x.id === id) || null;
+    }
+
+    async function renameVideo(id) {
+      const item = getItemById(id);
+      const currentTitle = item ? item.title : '';
+      const next = prompt('Enter new video title:', currentTitle);
+      if (next === null) return;
+      const trimmed = next.trim();
+      if (!trimmed || trimmed === currentTitle) return;
+
+      const resp = await fetch(`/api/netflim/library/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
+      });
+      if (resp.ok) refreshAll();
+    }
+
+    async function deleteVideo(id) {
+      const item = getItemById(id);
+      const title = item ? item.title : id;
+      if (!confirm(`Delete "${title}" and all associated .flim and source files?`)) return;
+      const resp = await fetch(`/api/netflim/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (resp.ok) refreshAll();
+    }
+
+    async function deleteProfile(id, profile) {
+      if (!confirm(`Delete "${profile}" .flim file from this video?`)) return;
+      const resp = await fetch(`/api/netflim/library/${encodeURIComponent(id)}/profiles/${encodeURIComponent(profile)}`, {
+        method: 'DELETE',
+      });
+      if (resp.ok) refreshAll();
+    }
+
+    function openEncodeModal(id) {
+      const item = getItemById(id);
+      modalVideoId = id;
+      document.getElementById('modal-title').textContent = `Encode: ${item ? item.title : id}`;
+      document.getElementById('encode-modal').classList.add('open');
+    }
+
+    function closeEncodeModal() {
+      modalVideoId = null;
+      document.getElementById('encode-modal').classList.remove('open');
+    }
+
+    async function submitModalEncode() {
+      if (!modalVideoId) return;
+      const body = {
+        profiles: [document.getElementById('modal-profile').value],
+        aspect: document.getElementById('modal-aspect').value,
+        dither: document.getElementById('modal-dither').value,
+        silent: document.getElementById('modal-silent').checked,
+      };
+      const resp = await fetch(`/api/netflim/library/${encodeURIComponent(modalVideoId)}/encode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await resp.json().catch(() => ({}));
+      closeEncodeModal();
+      if (!resp.ok || !json.ok) {
+        showFeedback(json.error || 'Failed to enqueue encode', 'error');
+      } else {
+        showFeedback(`Queued ${body.profiles.join(', ')} encode job.`, 'success');
+        refreshAll(true);
+      }
+    }
+
+    async function refreshAll(forceFast = false) {
+      try {
+        const [sysRes, libRes, jobsRes] = await Promise.all([
+          fetch('/api/status'),
+          fetch('/api/netflim/library'),
+          fetch('/api/netflim/jobs'),
+        ]);
+
+        if (sysRes.ok) {
+          const sys = await sysRes.json();
+          if (sys.server) {
+            document.getElementById('lan-ip').textContent = `${sys.server.ip}:${sys.server.httpPort}`;
+            if (sys.server.version) {
+              document.getElementById('server-version').textContent = sys.server.version;
+            }
+          }
+        }
+
+        if (libRes.ok) {
+          currentLibrary = await libRes.json();
+          renderHeaderStatus();
+          renderLibrary();
+        }
+
+        let busy = forceFast;
+        if (jobsRes.ok) {
+          const jData = await jobsRes.json();
+          currentJobs = jData.jobs || [];
+          busy = Boolean(jData.busy);
+          renderJobs();
+        }
+
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(() => refreshAll(false), busy ? 1500 : 8000);
+      } catch {
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(() => refreshAll(false), 8000);
+      }
+    }
+
+    refreshAll(false);
+  </script>
+</body>
+</html>
