@@ -12,6 +12,7 @@ const {
   DEFAULT_VOD_PORT,
   MAGIC_SERVER,
   stripFrameAudio,
+  downsampleFrameAudio11k,
   resolveProfileMatch,
 } = require('./streamer');
 
@@ -140,12 +141,8 @@ function createNetflimModule(opts = {}) {
 
       if (reqProfile && !profMap[reqProfile]) continue;
 
-      const selected =
-        (reqProfile && profMap[reqProfile]) ||
-        profMap.se30 ||
-        profMap.se ||
-        profMap.plus ||
-        profMap[keys[0]];
+      const chosenKey = resolveProfileMatch(item, reqProfile);
+      const selected = (chosenKey && profMap[chosenKey]) || profMap[keys[0]];
 
       rows.push([
         item.id,
@@ -208,12 +205,13 @@ function createNetflimModule(opts = {}) {
     );
     const title = decodeHeaderFilename(req.headers['x-video-title']) || req.query.title || '';
     const profilesRaw = decodeHeaderFilename(req.headers['x-profiles']) || req.query.profiles || '';
-    const aspect = decodeHeaderFilename(req.headers['x-aspect']) || req.query.aspect || 'bars';
-    const dither = decodeHeaderFilename(req.headers['x-dither']) || req.query.dither || 'ordered';
-    const silent = req.headers['x-silent'] || req.query.silent || 'false';
+    const aspect = decodeHeaderFilename(req.headers['x-aspect']) || req.query.aspect;
+    const dither = decodeHeaderFilename(req.headers['x-dither']) || req.query.dither;
+    const silent = req.headers['x-silent'] !== undefined ? req.headers['x-silent'] : req.query.silent;
     const from = req.headers['x-from'] || req.query.from;
     const duration = req.headers['x-duration'] || req.query.duration;
     const byterate = req.headers['x-byterate'] || req.query.byterate;
+    const targetFps = req.headers['x-target-fps'] || req.query.targetFps;
     const fpsRatio = req.headers['x-fps-ratio'] || req.query.fpsRatio;
     const group = req.headers['x-group'] || req.query.group;
     const errorAlgorithm = decodeHeaderFilename(req.headers['x-error-algorithm']) || req.query.errorAlgorithm;
@@ -284,6 +282,7 @@ function createNetflimModule(opts = {}) {
             from,
             duration,
             byterate,
+            targetFps,
             fpsRatio,
             group,
             errorAlgorithm,
@@ -452,6 +451,15 @@ function createNetflimModule(opts = {}) {
     }
 
     const stripAudio = req.query.stripAudio === '1' || req.query.stripAudio === 'true';
+    const audioRateRaw = String(req.query.audioRate || req.query.audio || '').trim().toLowerCase();
+    const halfAudio = !stripAudio && (
+      audioRateRaw === '11k' ||
+      audioRateRaw === '11127' ||
+      audioRateRaw === 'half' ||
+      req.query.halfAudio === '1' ||
+      req.query.halfAudio === 'true'
+    );
+    const align4 = req.query.align4 === '1' || req.query.align4 === 'true';
     const rawStart = parseInt(req.query.start || '0', 10);
     const startFrame = Number.isFinite(rawStart)
       ? Math.max(0, Math.min(rawStart, toc.frames.length))
@@ -494,14 +502,34 @@ function createNetflimModule(opts = {}) {
     };
     activeTcpStreams.add(streamToken);
 
+    const rawPace = req.query.pace !== undefined ? Number(req.query.pace) : 1.18;
+    const paceFactor = rawPace === 0
+      ? 0
+      : (Number.isFinite(rawPace) ? Math.max(1.0, Math.min(4.0, rawPace)) : 1.18);
+
+    const PREBUFFER_TICKS = 96; // ~1.6s startup lead buffer before steady-state trickle
+    const PREBUFFER_BATCH_BYTES = 8192;
+    const PREBUFFER_BATCH_FRAMES = 4;
+    const STEADY_BATCH_BYTES = 10240;
+    const STEADY_TARGET_TICKS = 5; // ~83ms of video per trickle cycle (2-4 frames @ 25-30fps)
+    const STEADY_BATCH_FRAMES = 4;
+    const MAX_WIRE_SLICE_BYTES = 8760; // <= 6x 1460B MSS segments per socket write
+    const SUBSLICE_DELAY_MS = 8;
+
     let closed = false;
     let sentHeader = false;
     let nextFrame = startFrame;
-    const BATCH_TARGET_BYTES = 32768;
+    let emittedTicks = 0;
+    let paceTimer = null;
+    let nextBatchAtMs = 0;
 
     const cleanup = () => {
       if (closed) return;
       closed = true;
+      if (paceTimer !== null) {
+        clearTimeout(paceTimer);
+        paceTimer = null;
+      }
       activeTcpStreams.delete(streamToken);
       if (fd !== null && fd !== undefined) {
         try {
@@ -517,11 +545,81 @@ function createNetflimModule(opts = {}) {
     res.on('close', cleanup);
     res.on('error', cleanup);
 
+    const schedulePump = (delayMs) => {
+      if (closed) return;
+      if (paceTimer !== null) {
+        clearTimeout(paceTimer);
+      }
+      paceTimer = setTimeout(() => {
+        paceTimer = null;
+        pumpBatch();
+      }, Math.max(0, delayMs));
+    };
+
+    const computeDelayAfterBatch = (batchTicks, nowMs) => {
+      if (paceFactor === 0) return 0;
+      const nominalMs = (batchTicks * 1000) / 60;
+      if (emittedTicks < PREBUFFER_TICKS) {
+        const stepMs = Math.max(14, Math.min(24, Math.round(nominalMs / 3.0)));
+        nextBatchAtMs = nowMs + stepMs;
+        return stepMs;
+      }
+      const targetDeltaMs = nominalMs / paceFactor;
+      if (nextBatchAtMs === 0) {
+        nextBatchAtMs = nowMs + targetDeltaMs;
+      } else {
+        // Rebase after pause/drain stalls so TCP resume never bursts to catch up
+        nextBatchAtMs = Math.max(nowMs - 80, nextBatchAtMs + targetDeltaMs);
+      }
+      return Math.max(10, Math.round(nextBatchAtMs - nowMs));
+    };
+
+    const emitBatchBuffer = (batchBuf, batchTicks, isEos) => {
+      const writeNextSlice = (offset) => {
+        if (closed) return;
+        const endOff = paceFactor === 0
+          ? batchBuf.length
+          : Math.min(batchBuf.length, offset + MAX_WIRE_SLICE_BYTES);
+        const slice = (offset === 0 && endOff === batchBuf.length)
+          ? batchBuf
+          : batchBuf.subarray(offset, endOff);
+
+        const canContinue = res.write(slice);
+        if (endOff >= batchBuf.length) {
+          if (isEos) {
+            cleanup();
+            res.end();
+            return;
+          }
+          const delayMs = computeDelayAfterBatch(batchTicks, Date.now());
+          if (canContinue) {
+            schedulePump(delayMs);
+          } else {
+            res.once('drain', () => schedulePump(Math.min(delayMs, 20)));
+          }
+          return;
+        }
+
+        if (canContinue) {
+          paceTimer = setTimeout(() => {
+            paceTimer = null;
+            writeNextSlice(endOff);
+          }, SUBSLICE_DELAY_MS);
+        } else {
+          res.once('drain', () => writeNextSlice(endOff));
+        }
+      };
+
+      writeNextSlice(0);
+    };
+
     const pumpBatch = () => {
       if (closed) return;
       try {
         const chunks = [];
         let queued = 0;
+        let batchTicks = 0;
+        let batchFrames = 0;
 
         if (!sentHeader) {
           chunks.push(hdr);
@@ -529,27 +627,78 @@ function createNetflimModule(opts = {}) {
           sentHeader = true;
         }
 
-        while (nextFrame < toc.frames.length && queued < BATCH_TARGET_BYTES) {
+        const inPrebuffer = paceFactor > 0 && emittedTicks < PREBUFFER_TICKS;
+        const maxBatchBytes = paceFactor === 0
+          ? 32768
+          : (inPrebuffer ? PREBUFFER_BATCH_BYTES : STEADY_BATCH_BYTES);
+        const maxBatchFrames = paceFactor === 0
+          ? 64
+          : (inPrebuffer ? PREBUFFER_BATCH_FRAMES : STEADY_BATCH_FRAMES);
+        const targetBatchTicks = paceFactor === 0
+          ? 999999
+          : (inPrebuffer ? Math.max(1, PREBUFFER_TICKS - emittedTicks) : STEADY_TARGET_TICKS);
+
+        while (nextFrame < toc.frames.length) {
+          if (batchFrames > 0 &&
+              (batchFrames >= maxBatchFrames || queued >= maxBatchBytes || batchTicks >= targetBatchTicks)) {
+            break;
+          }
           const meta = toc.frames[nextFrame];
           const raw = Buffer.allocUnsafe(meta.size);
           const bytesRead = fs.readSync(fd, raw, 0, meta.size, meta.offset);
           const rawSlice = bytesRead < meta.size ? raw.subarray(0, bytesRead) : raw;
-          let payload = stripAudio ? stripFrameAudio(rawSlice) : rawSlice;
+          let payload = stripAudio
+            ? stripFrameAudio(rawSlice)
+            : (halfAudio ? downsampleFrameAudio11k(rawSlice) : rawSlice);
           if (payload.length > maxBytes) {
             payload = payload.subarray(0, maxBytes);
           }
 
-          const padBytes = (4 - (payload.length & 3)) & 3;
+          const frameTicks = payload.length >= 2 ? Math.max(1, payload.readUInt16BE(0)) : 2;
+          let prePad = 0;
+          let midPad = 0;
+          let vidOff = payload.length;
+          if (align4 && payload.length >= 4) {
+            const sndSz = payload.readUInt16BE(2);
+            const sndBytes = sndSz > 2 ? (sndSz - 2) : 0;
+            const rawVidOff = 4 + sndBytes;
+            if (rawVidOff <= payload.length && payload.length < maxBytes) {
+              vidOff = rawVidOff;
+              midPad = rawVidOff & 1; // Keep videoSize/videoHdr even-aligned when 11k PCM is odd
+              // Align video payload (after 2B videoSize + 4B videoHdr) to 0 mod 4 using even prePad (0 or 2)
+              const vidDataRel = rawVidOff + midPad + 6;
+              prePad = (4 - (vidDataRel & 3)) & 3;
+            }
+          }
+
+          const wirePayloadLen = payload.length + midPad;
+          const postPad = (4 - ((prePad + wirePayloadLen) & 3)) & 3;
+          const padWord = align4
+            ? ((midPad ? 0x0400 : 0) | ((prePad & 3) << 8) | (postPad & 3))
+            : postPad;
+
           const fHdr = Buffer.allocUnsafe(8);
           fHdr.writeUInt32BE(nextFrame >>> 0, 0);
-          fHdr.writeUInt16BE(payload.length & 0xffff, 4);
-          fHdr.writeUInt16BE(padBytes, 6);
-          if (padBytes > 0) {
-            chunks.push(fHdr, payload, ZERO_PAD.subarray(0, padBytes));
+          fHdr.writeUInt16BE(wirePayloadLen & 0xffff, 4);
+          fHdr.writeUInt16BE(padWord & 0xffff, 6);
+
+          if (prePad > 0) {
+            chunks.push(fHdr, ZERO_PAD.subarray(0, prePad));
           } else {
-            chunks.push(fHdr, payload);
+            chunks.push(fHdr);
           }
-          queued += 8 + payload.length + padBytes;
+          if (midPad > 0) {
+            chunks.push(payload.subarray(0, vidOff), ZERO_PAD.subarray(0, 1), payload.subarray(vidOff));
+          } else {
+            chunks.push(payload);
+          }
+          if (postPad > 0) {
+            chunks.push(ZERO_PAD.subarray(0, postPad));
+          }
+          queued += 8 + prePad + wirePayloadLen + postPad;
+          batchTicks += frameTicks;
+          emittedTicks += frameTicks;
+          batchFrames++;
           nextFrame++;
         }
 
@@ -563,17 +712,7 @@ function createNetflimModule(opts = {}) {
         }
 
         const batchBuf = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
-        const canContinue = res.write(batchBuf);
-        if (isEos) {
-          cleanup();
-          res.end();
-          return;
-        }
-        if (canContinue) {
-          setImmediate(pumpBatch);
-        } else {
-          res.once('drain', pumpBatch);
-        }
+        emitBatchBuffer(batchBuf, batchTicks, isEos);
       } catch {
         cleanup();
         try {
@@ -584,7 +723,7 @@ function createNetflimModule(opts = {}) {
       }
     };
 
-    setImmediate(pumpBatch);
+    pumpBatch();
   });
 
   // Direct .flim file download

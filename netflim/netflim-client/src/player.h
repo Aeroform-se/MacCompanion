@@ -17,6 +17,7 @@ typedef struct {
     PlayerState   state;
     Boolean       fullscreen;
     Boolean       muted;
+    Boolean       halfAudio;
     Boolean       looping;
     char          videoId[18];
     char          videoTitle[48];
@@ -39,6 +40,8 @@ void    PlayerStop(WindowPtr mainWin);
 void    PlayerTogglePause(void);
 void    PlayerToggleLoop(void);
 void    PlayerToggleMute(void);
+void    PlayerToggleHalfAudio(void);
+void    PlayerToggleDirectAudio(void);
 void    PlayerSetFullscreen(Boolean fullscreen, WindowPtr mainWin);
 void    PlayerToggleFullscreen(WindowPtr mainWin);
 
@@ -53,6 +56,8 @@ void    PlayerDrawViewport(WindowPtr mainWin, const Rect *viewportRect);
 PlayerState PlayerGetState(void);
 Boolean     PlayerIsFullscreen(void);
 Boolean     PlayerIsMuted(void);
+Boolean     PlayerIsHalfAudio(void);
+Boolean     PlayerIsDirectAudio(void);
 Boolean     PlayerIsLooping(void);
 void        PlayerGetSnapshot(PlayerSnapshot *out);
 

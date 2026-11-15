@@ -1024,14 +1024,16 @@
               <div class="field-group">
                 <label for="aspect-select">Aspect Framing:</label>
                 <select id="aspect-select">
+                  <option value="auto" selected>Profile Default (MacFlim)</option>
                   <option value="bars">Letterbox Bars (bars)</option>
                   <option value="crop">Center Crop (crop)</option>
-                  <option value="stretch">Stretch 512x342 (ffmpeg)</option>
+                  <option value="stretch">Stretch to Frame (ffmpeg)</option>
                 </select>
               </div>
               <div class="field-group">
                 <label for="dither-select">Dither Algorithm:</label>
                 <select id="dither-select">
+                  <option value="auto" selected>Profile Default (MacFlim)</option>
                   <option value="ordered">Ordered Bayer</option>
                   <option value="error">Error Diffusion</option>
                   <option value="blue">Blue Noise</option>
@@ -1041,7 +1043,8 @@
 
             <div class="dotted-divider" style="display:flex; flex-direction:column; gap:8px;">
               <div class="section-title-row" style="font-size:13px;">
-                <span>Target Macintosh Profiles:</span>
+                <span>Target MacFlim Standard Profiles:</span>
+                <span style="font-size:11px; color:#444;">Exact upstream flimmaker defaults &bull; Override below anytime</span>
               </div>
               <div class="profiles-select-grid" id="profiles-select-grid">
                 <div class="profile-card-wrap selected" onclick="toggleProfileSelection('se30', this)">
@@ -1052,8 +1055,21 @@
                         <span class="profile-badge active" id="badge-se30">Selected</span>
                       </div>
                     </div>
-                    <div class="profile-card-desc">512x342 &bull; ~30 fps &bull; 3800 B/t (~228 KB/s) &bull; Audio</div>
+                    <div class="profile-card-desc">512x342 &bull; ratio 1 (grp) &bull; 6000 B/t &bull; Audio &bull; Error</div>
                     <input type="checkbox" name="profile" value="se30" checked style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('performer', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>SE Performer (performer)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-performer">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">512x342 &bull; ratio 2 (~30fps) &bull; 5000 B/t &bull; Audio &bull; Blue</div>
+                    <input type="checkbox" name="profile" value="performer" style="display:none;" />
                   </div>
                 </div>
 
@@ -1065,7 +1081,7 @@
                         <span class="profile-badge" id="badge-se">Select</span>
                       </div>
                     </div>
-                    <div class="profile-card-desc">512x342 &bull; ~15 fps &bull; 1500 B/t (~90 KB/s) &bull; Audio</div>
+                    <div class="profile-card-desc">512x342 &bull; ratio 2 (~30fps) &bull; 2500 B/t &bull; Audio &bull; Error</div>
                     <input type="checkbox" name="profile" value="se" style="display:none;" />
                   </div>
                 </div>
@@ -1078,8 +1094,73 @@
                         <span class="profile-badge" id="badge-plus">Select</span>
                       </div>
                     </div>
-                    <div class="profile-card-desc">512x342 &bull; ~15 fps &bull; 900 B/t (~54 KB/s) &bull; Low BW</div>
+                    <div class="profile-card-desc">512x342 &bull; ratio 2 (~30fps) &bull; 1500 B/t &bull; Audio &bull; Ordered</div>
                     <input type="checkbox" name="profile" value="plus" style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('portable', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>Mac Portable (portable)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-portable">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">640x400 &bull; ratio 2 (~30fps) &bull; 2500 B/t &bull; Audio &bull; Error</div>
+                    <input type="checkbox" name="profile" value="portable" style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('perfect', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>Perfect Ref (perfect)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-perfect">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">512x342 &bull; ratio 1 (grp) &bull; 32000 B/t &bull; Audio &bull; Error</div>
+                    <input type="checkbox" name="profile" value="perfect" style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('512k', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>Mac 512K (512k)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-512k">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">512x342 &bull; ratio 4 (~15fps) &bull; 480 B/t &bull; Silent &bull; Ordered</div>
+                    <input type="checkbox" name="profile" value="512k" style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('128k', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>Mac 128K (128k)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-128k">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">512x342 &bull; ratio 4 (~15fps) &bull; 380 B/t &bull; Silent &bull; Ordered</div>
+                    <input type="checkbox" name="profile" value="128k" style="display:none;" />
+                  </div>
+                </div>
+
+                <div class="profile-card-wrap" onclick="toggleProfileSelection('xl', this)">
+                  <div class="profile-card-inner pixel-pill-clip">
+                    <div class="profile-card-head">
+                      <span>Macintosh XL (xl)</span>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge" id="badge-xl">Select</span>
+                      </div>
+                    </div>
+                    <div class="profile-card-desc">704x364 &bull; ratio 4 (grp) &bull; 580 B/t &bull; Silent &bull; Ordered</div>
+                    <input type="checkbox" name="profile" value="xl" style="display:none;" />
                   </div>
                 </div>
               </div>
@@ -1094,11 +1175,15 @@
                 <label for="clip-duration">Clip Length (sec, optional):</label>
                 <input type="number" id="clip-duration" min="1" step="0.5" placeholder="Full duration" />
               </div>
-              <div style="display:flex; align-items:flex-end; padding-bottom:6px; gap:14px; flex-wrap:wrap;">
-                <label class="checkbox-inline">
-                  <input type="checkbox" id="opt-silent" />
-                  <span>Silent (omit audio)</span>
-                </label>
+              <div class="field-group">
+                <label for="opt-silent">Audio Track:</label>
+                <select id="opt-silent">
+                  <option value="auto" selected>Profile Default (MacFlim)</option>
+                  <option value="false">Include Audio (22 kHz / 11 kHz opt)</option>
+                  <option value="true">Silent (omit audio)</option>
+                </select>
+              </div>
+              <div style="display:flex; align-items:flex-end; padding-bottom:2px;">
                 <button type="button" class="subtle-btn" id="adv-toggle-btn" onclick="toggleAdvancedPanel()">
                   &#9881; Show Advanced Codec &amp; 68030 CPU Tuning &darr;
                 </button>
@@ -1136,8 +1221,8 @@
 
               <div class="form-grid">
                 <div class="field-group">
-                  <label for="adv-byterate">Byterate Override (B/t, 300&ndash;10000):</label>
-                  <input type="number" id="adv-byterate" min="300" max="10000" step="100" placeholder="Default (3800 se30 / 1500 se)" oninput="updateByteratePreview('adv')" />
+                  <label for="adv-byterate">Byterate Override (B/t, 300&ndash;32000):</label>
+                  <input type="number" id="adv-byterate" min="300" max="32000" step="100" placeholder="Profile Default (e.g. 6000 se30 / 2500 se)" oninput="updateByteratePreview('adv')" />
                 </div>
                 <div class="field-group">
                   <label for="adv-fps-ratio">Target Frame Rate / Ratio:</label>
@@ -1168,7 +1253,7 @@
                 <div class="field-group">
                   <label for="adv-codec-mode">Delta Codec Strategy (--codec):</label>
                   <select id="adv-codec-mode">
-                    <option value="auto">Hybrid Auto (z32 + lines + invert)</option>
+                    <option value="auto">Profile Default (z32 + lines + invert)</option>
                     <option value="lines">Horizontal Scanlines Only (lines &mdash; 3.5x faster on 68030!)</option>
                     <option value="z32">Vertical 32-bit Strips Only (z32 + invert)</option>
                     <option value="z16">16-bit Strips + Lines (z16 + lines + invert)</option>
@@ -1180,7 +1265,7 @@
                 <div class="field-group">
                   <label for="adv-filters">Pre-Filters (--filters):</label>
                   <select id="adv-filters">
-                    <option value="auto">Profile Default (g1.6sc)</option>
+                    <option value="auto">Profile Default (MacFlim)</option>
                     <option value="g1.6bsc">Denoise + Sharpen (g1.6bsc &bull; Less z32 speckle)</option>
                     <option value="g1.6bbsc">Heavy Denoise (g1.6bbsc &bull; Tallest z32 runs)</option>
                     <option value="g1.6sc">Sharp Gamma 1.6 (g1.6sc)</option>
@@ -1191,7 +1276,7 @@
                 <div class="field-group">
                   <label for="adv-error-alg">Error Diffusion Kernel:</label>
                   <select id="adv-error-alg">
-                    <option value="">Default (Floyd-Steinberg)</option>
+                    <option value="">Profile Default (Floyd-Steinberg)</option>
                     <option value="atkinson">Atkinson (Classic Mac HyperCard look &bull; Cleaner blacks/whites)</option>
                     <option value="sierra-lite">Sierra Lite (Fast 2-row kernel)</option>
                     <option value="false-floyd">False Floyd-Steinberg (3-neighbor kernel)</option>
@@ -1205,11 +1290,11 @@
                 </div>
                 <div class="field-group">
                   <label for="adv-error-stability">Error Stability (0.0&ndash;1.0):</label>
-                  <input type="number" id="adv-error-stability" min="0" max="1" step="0.05" placeholder="0.45 (higher = less dither boiling)" />
+                  <input type="number" id="adv-error-stability" min="0" max="1" step="0.05" placeholder="Profile Default (0.30 / 0.50)" />
                 </div>
                 <div class="field-group">
                   <label for="adv-error-bleed">Error Bleed (0.0&ndash;1.0):</label>
-                  <input type="number" id="adv-error-bleed" min="0" max="1" step="0.02" placeholder="0.95 (lower = fewer 1px z32 runs)" />
+                  <input type="number" id="adv-error-bleed" min="0" max="1" step="0.02" placeholder="Profile Default (0.99 / 0.98)" />
                 </div>
               </div>
               <div style="font-size:11px; color:#333;">
@@ -1260,12 +1345,18 @@
             <div class="gallery-toolbar">
               <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
                 <strong style="font-size:14px;">Video Library</strong>
-                <div class="toggle-pill-wrap">
+                <div class="toggle-pill-wrap" style="max-width:100%; overflow-x:auto;">
                   <div class="toggle-pill pixel-pill-clip">
                     <button type="button" class="toggle-pill-btn active" data-filter="all" onclick="setFilter('all')">All</button>
                     <button type="button" class="toggle-pill-btn" data-filter="se30" onclick="setFilter('se30')">SE/30</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="performer" onclick="setFilter('performer')">Performer</button>
                     <button type="button" class="toggle-pill-btn" data-filter="se" onclick="setFilter('se')">SE</button>
                     <button type="button" class="toggle-pill-btn" data-filter="plus" onclick="setFilter('plus')">Plus</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="portable" onclick="setFilter('portable')">Portable</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="perfect" onclick="setFilter('perfect')">Perfect</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="512k" onclick="setFilter('512k')">512K</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="128k" onclick="setFilter('128k')">128K</button>
+                    <button type="button" class="toggle-pill-btn" data-filter="xl" onclick="setFilter('xl')">XL</button>
                   </div>
                 </div>
               </div>
@@ -1365,21 +1456,29 @@
             <label for="modal-profile">Target Profile Slot:</label>
             <select id="modal-profile">
               <option value="se30">SE/30 &amp; Mac II (se30)</option>
+              <option value="performer">SE Performer (performer)</option>
               <option value="se">Macintosh SE (se)</option>
               <option value="plus">Mac Plus (plus)</option>
+              <option value="portable">Mac Portable (portable)</option>
+              <option value="perfect">Perfect Ref (perfect)</option>
+              <option value="512k">Mac 512K (512k)</option>
+              <option value="128k">Mac 128K (128k)</option>
+              <option value="xl">Macintosh XL (xl)</option>
             </select>
           </div>
           <div class="field-group">
             <label for="modal-aspect">Aspect Framing:</label>
             <select id="modal-aspect">
+              <option value="auto" selected>Profile Default (MacFlim)</option>
               <option value="bars">Letterbox Bars</option>
               <option value="crop">Center Crop</option>
-              <option value="stretch">Stretch 512x342</option>
+              <option value="stretch">Stretch to Frame</option>
             </select>
           </div>
           <div class="field-group">
             <label for="modal-dither">Dither Algorithm:</label>
             <select id="modal-dither">
+              <option value="auto" selected>Profile Default (MacFlim)</option>
               <option value="ordered">Ordered Bayer</option>
               <option value="error">Error Diffusion</option>
               <option value="blue">Blue Noise</option>
@@ -1389,8 +1488,8 @@
 
         <div class="form-grid">
           <div class="field-group">
-            <label for="modal-byterate">Byterate (B/t, 300&ndash;10000):</label>
-            <input type="number" id="modal-byterate" min="300" max="10000" step="100" placeholder="Default (3800 / 1500 / 900)" oninput="updateByteratePreview('modal')" />
+            <label for="modal-byterate">Byterate (B/t, 300&ndash;32000):</label>
+            <input type="number" id="modal-byterate" min="300" max="32000" step="100" placeholder="Profile Default (6000 se30 / 2500 se)" oninput="updateByteratePreview('modal')" />
           </div>
           <div class="field-group">
             <label for="modal-fps-ratio">Target Frame Rate / Ratio:</label>
@@ -1413,7 +1512,7 @@
           <div class="field-group">
             <label for="modal-codec-mode">Delta Codec Strategy:</label>
             <select id="modal-codec-mode">
-              <option value="auto">Hybrid Auto (z32 + lines + invert)</option>
+              <option value="auto">Profile Default (z32 + lines + invert)</option>
               <option value="lines">Horizontal Scanlines Only (lines &mdash; 3.5x faster)</option>
               <option value="z32">Vertical 32-bit Strips Only (z32)</option>
               <option value="z16">16-bit Strips + Lines (z16 + lines)</option>
@@ -1425,7 +1524,7 @@
           <div class="field-group">
             <label for="modal-filters">Pre-Filters (--filters):</label>
             <select id="modal-filters">
-              <option value="auto">Profile Default (g1.6sc)</option>
+              <option value="auto">Profile Default (MacFlim)</option>
               <option value="g1.6bsc">Denoise + Sharpen (g1.6bsc)</option>
               <option value="g1.6bbsc">Heavy Denoise (g1.6bbsc)</option>
               <option value="g1.6sc">Sharp Gamma 1.6 (g1.6sc)</option>
@@ -1436,7 +1535,7 @@
           <div class="field-group">
             <label for="modal-error-alg">Error Kernel:</label>
             <select id="modal-error-alg">
-              <option value="">Default (Floyd-Steinberg)</option>
+              <option value="">Profile Default (Floyd-Steinberg)</option>
               <option value="atkinson">Atkinson</option>
               <option value="sierra-lite">Sierra Lite</option>
               <option value="false-floyd">False Floyd-Steinberg</option>
@@ -1450,19 +1549,23 @@
           </div>
           <div class="field-group">
             <label for="modal-error-stability">Error Stability (0&ndash;1):</label>
-            <input type="number" id="modal-error-stability" min="0" max="1" step="0.05" placeholder="0.45" />
+            <input type="number" id="modal-error-stability" min="0" max="1" step="0.05" placeholder="Profile Default" />
           </div>
           <div class="field-group">
             <label for="modal-error-bleed">Error Bleed (0&ndash;1):</label>
-            <input type="number" id="modal-error-bleed" min="0" max="1" step="0.02" placeholder="0.95" />
+            <input type="number" id="modal-error-bleed" min="0" max="1" step="0.02" placeholder="Profile Default" />
           </div>
         </div>
 
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-          <label class="checkbox-inline" style="padding-top:2px;">
-            <input type="checkbox" id="modal-silent" />
-            <span>Silent (omit audio)</span>
-          </label>
+        <div style="display:flex; justify-content:space-between; align-items:flex-end; flex-wrap:wrap; gap:8px;">
+          <div class="field-group" style="min-width:210px;">
+            <label for="modal-silent">Audio Track:</label>
+            <select id="modal-silent">
+              <option value="auto" selected>Profile Default (MacFlim)</option>
+              <option value="false">Include Audio (22 kHz / 11 kHz opt)</option>
+              <option value="true">Silent (omit audio)</option>
+            </select>
+          </div>
           <span class="code-pill" id="modal-bw-preview">Default Byterate</span>
         </div>
 
@@ -1706,7 +1809,11 @@
         if (stabEl) stabEl.value = '0.40';
         if (bleedEl) bleedEl.value = '0.96';
       } else {
-        if (ditherEl) ditherEl.value = 'ordered';
+        const aspectEl = document.getElementById(isModal ? 'modal-aspect' : 'aspect-select');
+        const silentEl = document.getElementById(isModal ? 'modal-silent' : 'opt-silent');
+        if (aspectEl) aspectEl.value = 'auto';
+        if (ditherEl) ditherEl.value = 'auto';
+        if (silentEl) silentEl.value = 'auto';
         if (brEl) brEl.value = '';
         if (fpsEl) fpsEl.value = '';
         if (groupEl) groupEl.value = '';
@@ -1733,11 +1840,11 @@
         filename: selectedFile.name,
         title: document.getElementById('video-title').value.trim(),
         profiles: selectedProfiles.join(','),
-        aspect: document.getElementById('aspect-select').value,
-        dither: document.getElementById('dither-select').value,
-        silent: document.getElementById('opt-silent').checked ? 'true' : 'false',
       });
 
+      const aspectVal = document.getElementById('aspect-select').value;
+      const ditherVal = document.getElementById('dither-select').value;
+      const silentVal = document.getElementById('opt-silent').value;
       const clipFrom = document.getElementById('clip-from').value.trim();
       const clipDur = document.getElementById('clip-duration').value.trim();
       const advBr = document.getElementById('adv-byterate').value.trim();
@@ -1749,10 +1856,19 @@
       const advStab = document.getElementById('adv-error-stability').value.trim();
       const advBleed = document.getElementById('adv-error-bleed').value.trim();
 
+      if (aspectVal && aspectVal !== 'auto') params.set('aspect', aspectVal);
+      if (ditherVal && ditherVal !== 'auto') params.set('dither', ditherVal);
+      if (silentVal === 'true' || silentVal === 'false') params.set('silent', silentVal);
       if (clipFrom !== '') params.set('from', clipFrom);
       if (clipDur !== '') params.set('duration', clipDur);
       if (advBr !== '') params.set('byterate', advBr);
-      if (advFps !== '') params.set('fpsRatio', advFps);
+      if (advFps !== '') {
+        if (advFps.startsWith('fps:')) {
+          params.set('targetFps', advFps.slice(4));
+        } else {
+          params.set('fpsRatio', advFps);
+        }
+      }
       if (advGroup !== '') params.set('group', advGroup);
       if (advCodec && advCodec !== 'auto') params.set('codecMode', advCodec);
       if (advFilters && advFilters !== 'auto') params.set('filters', advFilters);
@@ -2019,12 +2135,12 @@
       const item = getItemById(id);
       modalVideoId = id;
       document.getElementById('modal-title').textContent = `Tune / Re-Encode: ${item ? item.title : id}`;
-      /* Pre-fill modal from existing se30/primary profile or main form settings */
-      const existingProf = item && item.profiles && (item.profiles.se30 || item.profiles.se || item.profiles.plus);
+      /* Pre-fill modal from existing se30/primary profile or reset to MacFlim profile defaults */
+      const existingProf = item && item.profiles && (item.profiles.se30 || item.profiles.performer || item.profiles.se || item.profiles.plus || Object.values(item.profiles)[0]);
       if (existingProf) {
         document.getElementById('modal-profile').value = existingProf.profile || 'se30';
-        document.getElementById('modal-aspect').value = existingProf.aspect || 'bars';
-        document.getElementById('modal-dither').value = existingProf.dither || 'ordered';
+        document.getElementById('modal-aspect').value = existingProf.aspect || 'auto';
+        document.getElementById('modal-dither').value = existingProf.dither || 'auto';
         document.getElementById('modal-byterate').value = existingProf.byterate || '';
         document.getElementById('modal-fps-ratio').value = existingProf.targetFps
           ? `fps:${existingProf.targetFps}`
@@ -2034,7 +2150,19 @@
         document.getElementById('modal-error-alg').value = existingProf.errorAlgorithm || '';
         document.getElementById('modal-error-stability').value = existingProf.errorStability !== undefined && existingProf.errorStability !== null ? existingProf.errorStability : '';
         document.getElementById('modal-error-bleed').value = existingProf.errorBleed !== undefined && existingProf.errorBleed !== null ? existingProf.errorBleed : '';
-        document.getElementById('modal-silent').checked = Boolean(existingProf.silent);
+        document.getElementById('modal-silent').value = typeof existingProf.silent === 'boolean' ? String(existingProf.silent) : 'auto';
+      } else {
+        document.getElementById('modal-profile').value = 'se30';
+        document.getElementById('modal-aspect').value = 'auto';
+        document.getElementById('modal-dither').value = 'auto';
+        document.getElementById('modal-byterate').value = '';
+        document.getElementById('modal-fps-ratio').value = '';
+        document.getElementById('modal-codec-mode').value = 'auto';
+        document.getElementById('modal-filters').value = 'auto';
+        document.getElementById('modal-error-alg').value = '';
+        document.getElementById('modal-error-stability').value = '';
+        document.getElementById('modal-error-bleed').value = '';
+        document.getElementById('modal-silent').value = 'auto';
       }
       updateByteratePreview('modal');
       document.getElementById('encode-modal').classList.add('open');
@@ -2049,10 +2177,14 @@
       if (!modalVideoId) return;
       const body = {
         profiles: [document.getElementById('modal-profile').value],
-        aspect: document.getElementById('modal-aspect').value,
-        dither: document.getElementById('modal-dither').value,
-        silent: document.getElementById('modal-silent').checked,
       };
+      const aspectVal = document.getElementById('modal-aspect').value;
+      const ditherVal = document.getElementById('modal-dither').value;
+      const silentVal = document.getElementById('modal-silent').value;
+      if (aspectVal && aspectVal !== 'auto') body.aspect = aspectVal;
+      if (ditherVal && ditherVal !== 'auto') body.dither = ditherVal;
+      if (silentVal === 'true') body.silent = true;
+      else if (silentVal === 'false') body.silent = false;
       const br = document.getElementById('modal-byterate').value.trim();
       const fps = document.getElementById('modal-fps-ratio').value.trim();
       const codec = document.getElementById('modal-codec-mode').value.trim();

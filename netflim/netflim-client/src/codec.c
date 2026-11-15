@@ -2,8 +2,41 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifndef NETFLIM_CODEC_020
+#include <Gestalt.h>
+#include <OSUtils.h>
+#endif
+
+/*
+ * Dual-architecture function instantiation:
+ *   - codec.c compiles as base 68000 (_68k symbols) and provides the public
+ *     runtime-dispatched entry points selected via Gestalt/SysEnvirons.
+ *   - codec_020.c defines NETFLIM_CODEC_020 and compiles this exact code
+ *     with -m68020 -msoft-float (_020 symbols) with zero code duplication.
+ */
+#ifdef NETFLIM_CODEC_020
+#define NetFlimFastCopy            NetFlimFastCopy_020
+#define NetFlimResetFramebuffer    NetFlimResetFramebuffer_020
+#define NetFlimParseFrameSliceEx   NetFlimParseFrameSliceEx_020
+#define NetFlimParseFrameSlice     NetFlimParseFrameSlice_020
+#define NetFlimDecodeVideo         NetFlimDecodeVideo_020
+#define NetFlimDecodeVideoClipped  NetFlimDecodeVideoClipped_020
+#else
+#define NetFlimFastCopy            NetFlimFastCopy_68k
+#define NetFlimResetFramebuffer    NetFlimResetFramebuffer_68k
+#define NetFlimParseFrameSliceEx   NetFlimParseFrameSliceEx_68k
+#define NetFlimParseFrameSlice     NetFlimParseFrameSlice_68k
+#define NetFlimDecodeVideo         NetFlimDecodeVideo_68k
+#define NetFlimDecodeVideoClipped  NetFlimDecodeVideoClipped_68k
+#endif
+
 static uint16_t read_be16(const unsigned char *p) {
     return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
+static uint32_t read_be32(const unsigned char *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
 }
 
 void NetFlimFastCopy(void *dst, const void *src, unsigned long len) {
@@ -93,9 +126,10 @@ void NetFlimResetFramebuffer(unsigned char *fb) {
     memset(fb, 0xFF, NETFLIM_FB_BYTES);
 }
 
-int NetFlimParseFrameSlice(const unsigned char *frameBuf,
-                           unsigned short frameBytes,
-                           NetFlimParsedFrame *out) {
+int NetFlimParseFrameSliceEx(const unsigned char *frameBuf,
+                             unsigned short frameBytes,
+                             unsigned char frameFlags,
+                             NetFlimParsedFrame *out) {
     uint16_t ticks;
     uint16_t soundSize;
     uint16_t soundPayload;
@@ -109,9 +143,12 @@ int NetFlimParseFrameSlice(const unsigned char *frameBuf,
     soundSize = read_be16(frameBuf + 2);
     pos = 4;
 
-    out->ticks = ticks ? ticks : 1;
-    out->pcmPtr = NULL;
-    out->pcmBytes = 0;
+    out->ticks        = ticks ? ticks : 1;
+    out->ffSynthPtr   = NULL;
+    out->ffSynthBytes = 0;
+    out->ffSynthRate  = 0x00010000UL;
+    out->pcmPtr       = NULL;
+    out->pcmBytes     = 0;
 
     if (soundSize > 2) {
         soundPayload = (uint16_t)(soundSize - 2);
@@ -119,10 +156,16 @@ int NetFlimParseFrameSlice(const unsigned char *frameBuf,
             return 0;
         }
         if (soundPayload > 6) {
-            out->pcmPtr = frameBuf + pos + 6; /* Skip 2B ffMode + 4B fixed sample rate */
-            out->pcmBytes = (unsigned short)(soundPayload - 6);
+            out->ffSynthPtr   = frameBuf + pos;
+            out->ffSynthBytes = soundPayload;
+            out->ffSynthRate  = read_be32(frameBuf + pos + 2);
+            out->pcmPtr       = frameBuf + pos + 6; /* Skip 2B ffMode + 4B fixed sample rate */
+            out->pcmBytes     = (unsigned short)(soundPayload - 6);
         }
         pos = (uint16_t)(pos + soundPayload);
+        if ((frameFlags & NETFLIM_FRAME_FLAG_MIDPAD1) != 0) {
+            pos = (uint16_t)(pos + 1);
+        }
     }
 
     out->videoPtr = NULL;
@@ -146,6 +189,12 @@ int NetFlimParseFrameSlice(const unsigned char *frameBuf,
     }
 
     return 1;
+}
+
+int NetFlimParseFrameSlice(const unsigned char *frameBuf,
+                           unsigned short frameBytes,
+                           NetFlimParsedFrame *out) {
+    return NetFlimParseFrameSliceEx(frameBuf, frameBytes, 0, out);
 }
 
 static int decode_invert(unsigned char *fb) {
@@ -320,7 +369,7 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
         uint32_t hdr;
         uint32_t off;
         unsigned char *dp;
-        const uint16_t stride4 = NETFLIM_ROW_BYTES * 4;
+        const uint16_t stride = NETFLIM_ROW_BYTES;
 
         if (*(const uint32_t *)sp == 0UL || *(const uint16_t *)(sp + 2) == 0U) {
             return 1;
@@ -328,12 +377,9 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
 
         if (*(const uint32_t *)(end - 4) == 0UL) {
             /*
-             * Ultra-fast 68000/68030/68040 z32 unpacker (fits in 68030 I-cache):
-             * - Zero-branch peeled fast paths for count == 1, 2, 3, and 4
-             *   (covering 70-90% of all z32 runs) using displacement addressing
-             *   64(dp), 128(dp), 192(dp) with zero adda.w overhead.
-             * - 4x unrolled displacement burst for count >= 5 using a single
-             *   adda.w #256,dp per 4 vertical longwords and zero remainder loop.
+             * Compact MacFlim-style 68k z32 unpacker (single-branch 8-byte inner dbra loop):
+             * Eliminates short-run branch mispredict flushes on 1..3-long runs (70-90% of runs)
+             * and keeps the entire inner + outer decoder inside the 256B 68030 I-cache.
              */
             __asm__ volatile (
                 "move.l (%[sp])+,%[hdr]\n\t"
@@ -342,50 +388,18 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
                 "moveq  #0,%[off]\n\t"
                 "move.w %[hdr],%[off]\n\t"
                 "ror.w  #2,%[off]\n\t"
+#if defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__)
+                "lea    (%[base],%[off].l*4),%[dp]\n\t"
+#else
                 "add.l  %[off],%[off]\n\t"
                 "add.l  %[off],%[off]\n\t"
                 "lea    (%[base],%[off].l),%[dp]\n\t"
-                "swap   %[hdr]\n\t"
-                "move.l (%[sp])+,(%[dp])\n\t"
-                "subq.w #1,%[hdr]\n\t"
-                "bcs.s  4f\n\t"
-                "beq.s  5f\n\t"
-                "subq.w #1,%[hdr]\n\t"
-                "beq.s  6f\n\t"
-                "subq.w #2,%[hdr]\n\t"
-                "bcs.s  7f\n"
+#endif
+                "swap   %[hdr]\n"
                 "1:\n\t"
-                "move.l (%[sp])+,64(%[dp])\n\t"
-                "move.l (%[sp])+,128(%[dp])\n\t"
-                "move.l (%[sp])+,192(%[dp])\n\t"
-                "move.l (%[sp])+,256(%[dp])\n\t"
-                "adda.w %[stride4],%[dp]\n\t"
-                "subq.w #4,%[hdr]\n\t"
-                "bcc.s  1b\n\t"
-                "addq.w #2,%[hdr]\n\t"
-                "beq.s  6f\n\t"
-                "bpl.s  7f\n\t"
-                "addq.w #1,%[hdr]\n\t"
-                "beq.s  5f\n\t"
-                "move.l (%[sp])+,%[hdr]\n\t"
-                "bne.s  0b\n\t"
-                "bra.s  9f\n"
-                "7:\n\t"
-                "move.l (%[sp])+,64(%[dp])\n\t"
-                "move.l (%[sp])+,128(%[dp])\n\t"
-                "move.l (%[sp])+,192(%[dp])\n\t"
-                "move.l (%[sp])+,%[hdr]\n\t"
-                "bne.s  0b\n\t"
-                "bra.s  9f\n"
-                "6:\n\t"
-                "move.l (%[sp])+,64(%[dp])\n\t"
-                "move.l (%[sp])+,128(%[dp])\n\t"
-                "move.l (%[sp])+,%[hdr]\n\t"
-                "bne.s  0b\n\t"
-                "bra.s  9f\n"
-                "5:\n\t"
-                "move.l (%[sp])+,64(%[dp])\n"
-                "4:\n\t"
+                "move.l (%[sp])+,(%[dp])\n\t"
+                "adda.w %[stride],%[dp]\n\t"
+                "dbra   %[hdr],1b\n\t"
                 "move.l (%[sp])+,%[hdr]\n\t"
                 "bne.s  0b\n"
                 "9:\n"
@@ -394,7 +408,7 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
                   [off] "=&d"(off),
                   [dp] "=&a"(dp)
                 : [base] "a"(baseMinus4),
-                  [stride4] "d"(stride4)
+                  [stride] "d"(stride)
                 : "memory", "cc"
             );
             return 2;
@@ -725,3 +739,136 @@ int NetFlimDecodeVideoClipped(unsigned char *fbBase,
             return 0;
     }
 }
+
+#ifndef NETFLIM_CODEC_020
+
+#undef NetFlimFastCopy
+#undef NetFlimResetFramebuffer
+#undef NetFlimParseFrameSliceEx
+#undef NetFlimParseFrameSlice
+#undef NetFlimDecodeVideo
+#undef NetFlimDecodeVideoClipped
+
+/*
+ * Prototypes for the -m68020 compiled variants in codec_020.c.
+ * Use __typeof__ against the original codec.h declarations above so any
+ * signature mismatch is impossible and caught cleanly at compile time.
+ */
+extern __typeof__(NetFlimFastCopy)           NetFlimFastCopy_020;
+extern __typeof__(NetFlimResetFramebuffer)   NetFlimResetFramebuffer_020;
+extern __typeof__(NetFlimParseFrameSliceEx)  NetFlimParseFrameSliceEx_020;
+extern __typeof__(NetFlimParseFrameSlice)    NetFlimParseFrameSlice_020;
+extern __typeof__(NetFlimDecodeVideo)        NetFlimDecodeVideo_020;
+extern __typeof__(NetFlimDecodeVideoClipped) NetFlimDecodeVideoClipped_020;
+
+typedef __typeof__(NetFlimFastCopy)           *FastCopyFn;
+typedef __typeof__(NetFlimResetFramebuffer)   *ResetFbFn;
+typedef __typeof__(NetFlimParseFrameSliceEx)  *ParseSliceExFn;
+typedef __typeof__(NetFlimParseFrameSlice)    *ParseSliceFn;
+typedef __typeof__(NetFlimDecodeVideo)        *DecodeVideoFn;
+typedef __typeof__(NetFlimDecodeVideoClipped) *DecodeVideoClippedFn;
+
+/* Default safely to 68000 implementations until NetFlimCodecInit runs */
+static FastCopyFn           gFastCopyFn           = NetFlimFastCopy_68k;
+static ResetFbFn            gResetFbFn            = NetFlimResetFramebuffer_68k;
+static ParseSliceExFn       gParseSliceExFn       = NetFlimParseFrameSliceEx_68k;
+static ParseSliceFn         gParseSliceFn         = NetFlimParseFrameSlice_68k;
+static DecodeVideoFn        gDecodeVideoFn        = NetFlimDecodeVideo_68k;
+static DecodeVideoClippedFn gDecodeVideoClippedFn = NetFlimDecodeVideoClipped_68k;
+
+static int gCodecIs020 = 0;
+static const char *gCodecCpuName = "68000";
+
+void NetFlimCodecInit(void) {
+    long procType = 0;
+    SysEnvRec env;
+    int use020 = 0;
+
+    gCodecCpuName = "68000";
+
+    if (Gestalt(gestaltProcessorType, &procType) == noErr) {
+        if (procType >= gestalt68020) {
+            use020 = 1;
+            if (procType >= gestalt68040) {
+                gCodecCpuName = "68040";
+            } else if (procType == gestalt68030) {
+                gCodecCpuName = "68030";
+            } else {
+                gCodecCpuName = "68020+";
+            }
+        }
+    } else if (SysEnvirons(1, &env) == noErr) {
+        if (env.processor >= env68020) {
+            use020 = 1;
+            if (env.processor >= env68040) {
+                gCodecCpuName = "68040";
+            } else if (env.processor == env68030) {
+                gCodecCpuName = "68030";
+            } else {
+                gCodecCpuName = "68020+";
+            }
+        }
+    }
+
+    gCodecIs020 = use020;
+    if (use020) {
+        gFastCopyFn           = NetFlimFastCopy_020;
+        gResetFbFn            = NetFlimResetFramebuffer_020;
+        gParseSliceExFn       = NetFlimParseFrameSliceEx_020;
+        gParseSliceFn         = NetFlimParseFrameSlice_020;
+        gDecodeVideoFn        = NetFlimDecodeVideo_020;
+        gDecodeVideoClippedFn = NetFlimDecodeVideoClipped_020;
+    } else {
+        gFastCopyFn           = NetFlimFastCopy_68k;
+        gResetFbFn            = NetFlimResetFramebuffer_68k;
+        gParseSliceExFn       = NetFlimParseFrameSliceEx_68k;
+        gParseSliceFn         = NetFlimParseFrameSlice_68k;
+        gDecodeVideoFn        = NetFlimDecodeVideo_68k;
+        gDecodeVideoClippedFn = NetFlimDecodeVideoClipped_68k;
+    }
+}
+
+int NetFlimCodecIs020(void) {
+    return gCodecIs020;
+}
+
+const char *NetFlimCodecCpuName(void) {
+    return gCodecCpuName;
+}
+
+void NetFlimFastCopy(void *dst, const void *src, unsigned long len) {
+    gFastCopyFn(dst, src, len);
+}
+
+void NetFlimResetFramebuffer(unsigned char *fb) {
+    gResetFbFn(fb);
+}
+
+int NetFlimParseFrameSliceEx(const unsigned char *frameBuf,
+                             unsigned short frameBytes,
+                             unsigned char sliceFlags,
+                             NetFlimParsedFrame *out) {
+    return gParseSliceExFn(frameBuf, frameBytes, sliceFlags, out);
+}
+
+int NetFlimParseFrameSlice(const unsigned char *frameBuf,
+                           unsigned short frameBytes,
+                           NetFlimParsedFrame *out) {
+    return gParseSliceFn(frameBuf, frameBytes, out);
+}
+
+int NetFlimDecodeVideo(unsigned char *fb,
+                       const unsigned char *videoPtr,
+                       unsigned short videoBytes) {
+    return gDecodeVideoFn(fb, videoPtr, videoBytes);
+}
+
+int NetFlimDecodeVideoClipped(unsigned char *fbBase,
+                              unsigned short clipMinRow,
+                              unsigned short clipMaxRow,
+                              const unsigned char *videoPtr,
+                              unsigned short videoBytes) {
+    return gDecodeVideoClippedFn(fbBase, clipMinRow, clipMaxRow, videoPtr, videoBytes);
+}
+
+#endif /* !NETFLIM_CODEC_020 */

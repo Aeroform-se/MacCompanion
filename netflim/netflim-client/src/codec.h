@@ -16,11 +16,16 @@ extern "C" {
 #define NETFLIM_CODEC_INVERT 0x03
 #define NETFLIM_CODEC_LINES  0x04
 
+#define NETFLIM_FRAME_FLAG_MIDPAD1 0x01
+
 typedef struct {
     unsigned short        ticks;
+    const unsigned char  *ffSynthPtr;  /* Points to 6B FFSynthRec header + PCM bytes */
+    unsigned short        ffSynthBytes;
+    unsigned long         ffSynthRate; /* 16.16 Fixed step: 0x00010000=22.25k, 0x00008000=11.13k */
     const unsigned char  *pcmPtr;
     unsigned short        pcmBytes;
-    const unsigned char  *videoPtr;   /* Points to 4-byte codec header + payload */
+    const unsigned char  *videoPtr;    /* Points to 4-byte codec header + payload */
     unsigned short        videoBytes;
     unsigned char         codecId;
 } NetFlimParsedFrame;
@@ -38,9 +43,14 @@ void NetFlimFastCopy(void *dst, const void *src, unsigned long len);
 void NetFlimResetFramebuffer(unsigned char *fb);
 
 /**
- * Parses a single serialized .flim frame slice into audio PCM and video codec pointers.
+ * Parses a single serialized .flim frame slice into audio FFSynth/PCM and video codec pointers.
  * Returns 1 on success, 0 if truncated or malformed.
  */
+int NetFlimParseFrameSliceEx(const unsigned char *frameBuf,
+                             unsigned short frameBytes,
+                             unsigned char frameFlags,
+                             NetFlimParsedFrame *out);
+
 int NetFlimParseFrameSlice(const unsigned char *frameBuf,
                            unsigned short frameBytes,
                            NetFlimParsedFrame *out);
@@ -71,5 +81,13 @@ int NetFlimDecodeVideoClipped(unsigned char *fbBase,
 #ifdef __cplusplus
 }
 #endif
+
+/*
+ * Initialize runtime CPU dispatch (Gestalt / SysEnvirons) so 68020/030/040
+ * Macs use the -m68020 compiled decoder & blitter automatically.
+ */
+void NetFlimCodecInit(void);
+int NetFlimCodecIs020(void);
+const char *NetFlimCodecCpuName(void);
 
 #endif /* NETFLIM_CODEC_H */

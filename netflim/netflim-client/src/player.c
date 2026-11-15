@@ -3,10 +3,12 @@
 
 #include <Devices.h>
 #include <Files.h>
+#include <LowMem.h>
 #include <Memory.h>
 #include <OSUtils.h>
 #include <Quickdraw.h>
 #include <Sound.h>
+#include <Traps.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -22,11 +24,14 @@ static inline unsigned long FastTicks(void) {
 #endif
 
 #define SND_DRIVER_REFNUM     (-4)  /* Classic Mac ".Sound" driver */
-#define SND_FF_HDR_BYTES      6     /* int16 mode=ffMode(0) + Fixed rate=1.0(0x00010000) */
+#define SND_FF_HDR_BYTES      6     /* int16 mode=ffMode(0) + Fixed rate */
+#define SND_FF_RATE_22K       0x00010000UL
+#define SND_FF_RATE_11K       0x00008000UL
 #define SND_NUM_BUFS          10
 #define SND_BUF_SIZE          8192
-#define SND_FLUSH_THRESHOLD   3700  /* 10 ticks (166ms) native ASC batching */
-#define SND_PRIME_SILENCE     1480  /* 4 ticks (66ms) lead cushion so slot N+1 queues before slot N ends */
+#define SND_FLUSH_THRESHOLD   3700  /* 10 ticks (166ms) @ 22.25 kHz */
+#define SND_PRIME_SILENCE     1480  /* 4 ticks (66ms) @ 22.25 kHz */
+#define SND_SILENCE_MAX_BYTES (SND_FF_HDR_BYTES + (8 * 370))
 #define PREBUFFER_FRAMES      12
 #define OPEN_TIMEOUT_TICKS    240   /* 4 seconds */
 
@@ -38,19 +43,42 @@ static Boolean         gPlayerInited     = false;
 static PlayerState     gState            = kPlayerStopped;
 static Boolean         gFullscreen       = false;
 static Boolean         gMuted            = false;
+static Boolean         gHalfAudio        = false;
 static Boolean         gLooping          = false;
 static Boolean         gCanDirectVRAM    = false;
 static Boolean         gUsingDirectVRAM  = false;
 static Boolean         gUsingWindowVRAM  = false;
 
+static unsigned char  *gScreenBaseAddr   = NULL;
 static unsigned char  *gOffscreenFB      = NULL;
 static BitMap          gOffscreenBM;
 static WindowPtr       gFsWindow         = NULL;
 
-/* Native ASC Sound Manager channel (initNoInterp, rate22khz) */
-static Boolean         gUseDirectSndDrv  = false;
-static ParamBlockRec   gSndPBs[SND_NUM_BUFS];
-static unsigned long   gSndSubmitTick[SND_NUM_BUFS];
+/* Direct .Sound (-4) interrupt-driven zero-copy audio & Sound Manager fallback */
+typedef struct {
+    unsigned long magic;
+    unsigned long savedA5;
+    ParamBlockRec pb;
+} DirectSoundPB;
+
+#define DIRECT_SND_PB_MAGIC 0x4E464135UL /* 'NFA5' */
+
+static Boolean                  gUseDirectSndDrv  = true;
+static Boolean                  gDirectSndOpen    = false;
+static short                    gDirectSndRef     = SND_DRIVER_REFNUM;
+static DirectSoundPB            gDirectSndPB;
+static IOCompletionUPP          gDirectSndCompUPP = NULL;
+static unsigned char            gSilenceFFBuf[SND_SILENCE_MAX_BYTES];
+static volatile Boolean         gDirectActive     = false;
+static volatile Boolean         gDirectStopReq    = false;
+static volatile Boolean         gDirectFailed     = false;
+static volatile Boolean         gDirectEosReached = false;
+static volatile Boolean         gDirectNeedsBlit  = false;
+static volatile unsigned long   gDirectCurFrame   = 0;
+static volatile unsigned long   gDirectNextFrame  = 0;
+static volatile unsigned long   gDirectCallbacks  = 0;
+static volatile unsigned long   gDirectLastTick   = 0;
+
 static SndChannelPtr   gSndChan          = NULL;
 static SndCallBackUPP  gSndCallBackUPP   = NULL;
 static unsigned char  *gSndBufs[SND_NUM_BUFS];
@@ -66,9 +94,9 @@ static char            gVideoTitle[48];
 static char            gActiveProfile[10];
 static char            gStatusMsg[96]    = "Ready";
 static unsigned long   gStartReqTick     = 0;
-static unsigned long   gCurrentFrame     = 0;
+static volatile unsigned long gCurrentFrame = 0;
 static unsigned long   gTotalFrames      = 0;
-static unsigned long   gElapsedTicks     = 0;
+static volatile unsigned long gElapsedTicks = 0;
 static unsigned long   gTotalTicks       = 0;
 static unsigned long   gNextFrameDueTick = 0;
 static unsigned short  gByterate         = 0;
@@ -77,8 +105,279 @@ static short           gLastHudSecond    = -1;
 static short           gLastHudBuf       = -1;
 
 /* ============================================================================
- * Direct .Sound Driver (ffMode) & Sound Manager Fallback Audio Pipeline
+ * Direct .Sound Driver (ffMode + ioCompletion) & Sound Manager Fallback Pipeline
  * ============================================================================ */
+
+static void UpdateSilenceBufferRate(void) {
+    unsigned long rate = gHalfAudio ? SND_FF_RATE_11K : SND_FF_RATE_22K;
+    gSilenceFFBuf[0] = 0x00;
+    gSilenceFFBuf[1] = 0x00;
+    gSilenceFFBuf[2] = (unsigned char)((rate >> 24) & 0xFFU);
+    gSilenceFFBuf[3] = (unsigned char)((rate >> 16) & 0xFFU);
+    gSilenceFFBuf[4] = (unsigned char)((rate >> 8) & 0xFFU);
+    gSilenceFFBuf[5] = (unsigned char)(rate & 0xFFU);
+}
+
+/*
+ * Classic Mac .Sound (-4) PBWrite takes ioBuffer = FFSynthRec* ([mode(2)][rate(4)][PCM...])
+ * and expects ioReqCount = 6 (header) + PCM sample byte count.
+ */
+static long CalcSilenceFFBytes(unsigned short ticks) {
+    unsigned long perTick = gHalfAudio ? 185UL : 370UL;
+    unsigned long pcmBytes = (unsigned long)(ticks ? ticks : 1) * perTick;
+    unsigned long maxPcm = (unsigned long)(SND_SILENCE_MAX_BYTES - SND_FF_HDR_BYTES);
+    if (pcmBytes > maxPcm) pcmBytes = maxPcm;
+    return (long)(SND_FF_HDR_BYTES + pcmBytes);
+}
+
+static void BlitCurrentFrame(WindowPtr mainWin, const Rect *viewportRect);
+
+/*
+ * Direct .Sound (-4) Device Manager ioCompletion interrupt callback:
+ * Chains the next frame's zero-copy FFSynthRec PBWriteAsync directly from
+ * gArenaMem immediately so hardware audio DMA stays gapless, then decodes the
+ * matching video frame directly into CRT VRAM (or offscreen buffer) while audio plays.
+ * Must make ZERO Memory Manager or QuickDraw toolbox calls.
+ */
+static void PlayerSaveCurrentA5(void) {
+    unsigned long a5 = 0;
+#ifdef __m68k__
+    __asm__ volatile ("move.l %%a5,%0" : "=g"(a5));
+#endif
+    gDirectSndPB.magic   = DIRECT_SND_PB_MAGIC;
+    gDirectSndPB.savedA5 = a5;
+}
+
+#ifdef __m68k__
+extern void NetFlimDirectSoundCompletionAsm(void);
+void NetFlimDirectSoundCompletionC(void);
+
+__asm__(
+    ".text\n"
+    ".even\n"
+    ".globl NetFlimDirectSoundCompletionAsm\n"
+    "NetFlimDirectSoundCompletionAsm:\n\t"
+    "movem.l %d0-%d7/%a0-%a6,%sp@-\n\t"
+    "move.l %a0,%d0\n\t"
+    "beq.s 1f\n\t"
+    "cmp.l #0x4E464135,%a0@(-8)\n\t"
+    "bne.s 1f\n\t"
+    "move.l %a0@(-4),%a5\n\t"
+    "bra.s 2f\n"
+    "1:\n\t"
+    "move.l 0x0904:w,%a5\n"
+    "2:\n\t"
+    "jsr NetFlimDirectSoundCompletionC\n\t"
+    "movem.l %sp@+,%d0-%d7/%a0-%a6\n\t"
+    "rts\n"
+);
+#else
+#define NetFlimDirectSoundCompletionAsm NetFlimDirectSoundCompletionC
+void NetFlimDirectSoundCompletionC(void);
+#endif
+
+void NetFlimDirectSoundCompletionC(void) {
+    OSErr err;
+    unsigned long curIdx;
+    const unsigned char *frameData;
+    unsigned short frameBytes = 0;
+    unsigned char frameFlags = 0;
+    NetFlimParsedFrame parsed;
+
+    if (gDirectStopReq || gState != kPlayerPlaying) {
+        gDirectActive = false;
+        return;
+    }
+
+    if (gDirectSndPB.pb.ioParam.ioResult != noErr) {
+        if (gDirectSndPB.pb.ioParam.ioResult != abortErr) {
+            gDirectFailed = true;
+        }
+        gDirectActive = false;
+        return;
+    }
+
+    gDirectCallbacks++;
+    gDirectLastTick = FAST_TICKS();
+
+    if (gDirectCurFrame != 0xFFFFFFFFUL) {
+        NetVodIrqSetCompletedUpTo(gDirectCurFrame + 1UL);
+    }
+
+    curIdx = gDirectNextFrame;
+    if (gTotalFrames > 0 && curIdx >= gTotalFrames) {
+        gDirectEosReached = true;
+        gDirectActive     = false;
+        return;
+    }
+
+    frameData = NetVodIrqPeekFrame(curIdx, &frameBytes, &frameFlags);
+    if (frameData != NULL && NetFlimParseFrameSliceEx(frameData, frameBytes, frameFlags, &parsed)) {
+        Ptr bufPtr;
+        long reqCount;
+
+        if (!gMuted && !gVodStreamSilent && parsed.ffSynthPtr != NULL && parsed.pcmBytes > 0) {
+            bufPtr   = (Ptr)parsed.ffSynthPtr;
+            reqCount = (long)SND_FF_HDR_BYTES + (long)parsed.pcmBytes;
+        } else {
+            bufPtr   = (Ptr)gSilenceFFBuf;
+            reqCount = CalcSilenceFFBytes(parsed.ticks);
+        }
+
+        gDirectSndPB.pb.ioParam.ioCompletion = gDirectSndCompUPP;
+        gDirectSndPB.pb.ioParam.ioResult     = 0;
+        gDirectSndPB.pb.ioParam.ioRefNum     = gDirectSndRef;
+        gDirectSndPB.pb.ioParam.ioBuffer     = bufPtr;
+        gDirectSndPB.pb.ioParam.ioReqCount   = reqCount;
+        gDirectSndPB.pb.ioParam.ioPosMode    = 0;
+        gDirectSndPB.pb.ioParam.ioPosOffset  = 0;
+
+        gDirectCurFrame  = curIdx;
+        gDirectNextFrame = curIdx + 1UL;
+
+        err = PBWriteAsync((ParmBlkPtr)&gDirectSndPB.pb);
+        if (err != noErr) {
+            gDirectCurFrame = 0xFFFFFFFFUL;
+            gDirectFailed   = true;
+            gDirectActive   = false;
+            return;
+        }
+
+        if (parsed.videoBytes >= 4 && parsed.codecId != NETFLIM_CODEC_NULL) {
+            if (gUsingDirectVRAM && gScreenBaseAddr) {
+                NetFlimDecodeVideo(gScreenBaseAddr, parsed.videoPtr, parsed.videoBytes);
+            } else {
+                int decRes = NetFlimDecodeVideo(gOffscreenFB, parsed.videoPtr, parsed.videoBytes);
+                if (decRes > 0) {
+                    gDirectNeedsBlit = true;
+                }
+            }
+        }
+
+        gCurrentFrame  = curIdx + 1UL;
+        gElapsedTicks += (unsigned long)parsed.ticks;
+    } else {
+        /* Brief network underrun: hold stream clock with 2 ticks silence and retry curIdx */
+        gDirectCurFrame                      = 0xFFFFFFFFUL;
+        gDirectSndPB.pb.ioParam.ioCompletion = gDirectSndCompUPP;
+        gDirectSndPB.pb.ioParam.ioResult     = 0;
+        gDirectSndPB.pb.ioParam.ioRefNum     = gDirectSndRef;
+        gDirectSndPB.pb.ioParam.ioBuffer     = (Ptr)gSilenceFFBuf;
+        gDirectSndPB.pb.ioParam.ioReqCount   = CalcSilenceFFBytes(2);
+        gDirectSndPB.pb.ioParam.ioPosMode    = 0;
+        gDirectSndPB.pb.ioParam.ioPosOffset  = 0;
+
+        err = PBWriteAsync((ParmBlkPtr)&gDirectSndPB.pb);
+        if (err != noErr) {
+            gDirectFailed = true;
+            gDirectActive = false;
+        }
+    }
+}
+
+static Boolean EnsureDirectSoundDriverOpen(void) {
+    DCtlHandle dctl;
+    OSErr err;
+
+    if (gDirectSndOpen) return true;
+
+    /*
+     * Check Unit Table entry for .Sound (-4) first WITHOUT calling OpenDriver
+     * unnecessarily: MacFlim writes straight to refNum -4, and re-opening an
+     * already-open .Sound driver runs dOpen again which can reset/stall it on
+     * System 7 / Sound Manager 3.x Macs.
+     */
+    dctl = GetDCtlEntry(SND_DRIVER_REFNUM);
+    if (!dctl || !*dctl || !(**dctl).dCtlDriver) {
+        return false;
+    }
+
+    if ((**dctl).dCtlFlags & dOpenedMask) {
+        gDirectSndRef = SND_DRIVER_REFNUM;
+        gDirectSndOpen = true;
+        return true;
+    }
+
+    err = OpenDriver("\p.Sound", &gDirectSndRef);
+    if (err != noErr) {
+        return false;
+    }
+    gDirectSndOpen = true;
+    return true;
+}
+
+static Boolean StartDirectAudioAtFrame(unsigned long startIdx, WindowPtr mainWin, const Rect *viewportRect) {
+    const unsigned char *frameData;
+    unsigned short frameBytes = 0;
+    unsigned char frameFlags = 0;
+    NetFlimParsedFrame parsed;
+    Ptr bufPtr;
+    long reqCount;
+    OSErr err;
+
+    if (!gUseDirectSndDrv || !gDirectSndCompUPP) return false;
+    if (!EnsureDirectSoundDriverOpen()) return false;
+
+    frameData = NetVodIrqPeekFrame(startIdx, &frameBytes, &frameFlags);
+    if (!frameData || !NetFlimParseFrameSliceEx(frameData, frameBytes, frameFlags, &parsed)) {
+        return false;
+    }
+
+    UpdateSilenceBufferRate();
+
+    /* Decode initial frame video first so audio and frame image begin in lockstep */
+    if (parsed.videoBytes >= 4 && parsed.codecId != NETFLIM_CODEC_NULL) {
+        if (gUsingDirectVRAM && gScreenBaseAddr) {
+            NetFlimDecodeVideo(gScreenBaseAddr, parsed.videoPtr, parsed.videoBytes);
+        } else {
+            if (NetFlimDecodeVideo(gOffscreenFB, parsed.videoPtr, parsed.videoBytes) > 0) {
+                BlitCurrentFrame(mainWin, viewportRect);
+            }
+        }
+    }
+
+    if (!gMuted && !gVodStreamSilent && parsed.ffSynthPtr != NULL && parsed.pcmBytes > 0) {
+        bufPtr   = (Ptr)parsed.ffSynthPtr;
+        reqCount = (long)SND_FF_HDR_BYTES + (long)parsed.pcmBytes;
+    } else {
+        bufPtr   = (Ptr)gSilenceFFBuf;
+        reqCount = CalcSilenceFFBytes(parsed.ticks);
+    }
+
+    memset(&gDirectSndPB, 0, sizeof(gDirectSndPB));
+    PlayerSaveCurrentA5();
+    gDirectSndPB.pb.ioParam.ioCompletion = gDirectSndCompUPP;
+    gDirectSndPB.pb.ioParam.ioRefNum     = gDirectSndRef;
+    gDirectSndPB.pb.ioParam.ioBuffer     = bufPtr;
+    gDirectSndPB.pb.ioParam.ioReqCount   = reqCount;
+
+    gDirectStopReq    = false;
+    gDirectFailed     = false;
+    gDirectEosReached = false;
+    gDirectNeedsBlit  = false;
+    gDirectCurFrame   = startIdx;
+    gDirectNextFrame  = startIdx + 1UL;
+    gDirectCallbacks  = 0;
+    gDirectLastTick   = FAST_TICKS();
+    gDirectActive     = true;
+    gCurrentFrame     = startIdx + 1UL;
+    gElapsedTicks    += (unsigned long)parsed.ticks;
+    __asm__ volatile ("" ::: "memory");
+
+    err = PBWriteAsync((ParmBlkPtr)&gDirectSndPB.pb);
+    if (err != noErr) {
+        gDirectActive     = false;
+        gDirectCurFrame   = 0xFFFFFFFFUL;
+        gDirectNextFrame  = startIdx;
+        gCurrentFrame     = startIdx;
+        if (gElapsedTicks >= (unsigned long)parsed.ticks) {
+            gElapsedTicks -= (unsigned long)parsed.ticks;
+        }
+        return false;
+    }
+
+    return true;
+}
 
 static pascal void SoundBufferCallback(SndChannelPtr chan, SndCommand *cmd) {
     (void)chan;
@@ -104,12 +403,20 @@ static void FlushAudioChannel(void) {
     SndCommand cmd;
     short i;
 
-    if (gUseDirectSndDrv) {
+    if (gDirectActive) {
         ParamBlockRec killPB;
+        gDirectStopReq = true;
+        __asm__ volatile ("" ::: "memory");
         memset(&killPB, 0, sizeof(killPB));
-        killPB.ioParam.ioRefNum = SND_DRIVER_REFNUM;
+        killPB.ioParam.ioRefNum = gDirectSndRef;
         PBKillIO(&killPB, false);
+        gDirectActive = false;
+    } else {
+        gDirectStopReq = true;
     }
+    gDirectNeedsBlit  = false;
+    gDirectEosReached = false;
+    gDirectFailed     = false;
 
     if (gSndChan) {
         cmd.cmd    = flushCmd;
@@ -117,12 +424,13 @@ static void FlushAudioChannel(void) {
         cmd.param2 = 0;
         SndDoImmediate(gSndChan, &cmd);
         cmd.cmd    = quietCmd;
+        cmd.param1 = 0;
+        cmd.param2 = 0;
         SndDoImmediate(gSndChan, &cmd);
     }
 
     for (i = 0; i < SND_NUM_BUFS; i++) {
         gSndBufBusy[i] = 0;
-        gSndPBs[i].ioParam.ioResult = noErr;
     }
     gSndWriteSlot = -1;
     gSndWritePos  = 0;
@@ -138,35 +446,13 @@ static void CloseSoundChannel(void) {
 }
 
 static Boolean IsAudioSlotBusy(short slot) {
-    if (!gSndBufBusy[slot]) return false;
-    if (gUseDirectSndDrv) {
-        if (gSndPBs[slot].ioParam.ioResult <= 0) {
-            gSndBufBusy[slot] = 0;
-            return false;
-        }
-        /* Watchdog: if an emulator stubs .Sound (-4) without firing ASC interrupts */
-        if ((long)(FAST_TICKS() - gSndSubmitTick[slot]) > 36L) {
-            ParamBlockRec killPB;
-            short i;
-            memset(&killPB, 0, sizeof(killPB));
-            killPB.ioParam.ioRefNum = SND_DRIVER_REFNUM;
-            PBKillIO(&killPB, false);
-            gUseDirectSndDrv = false;
-            EnsureSoundChannelOpen();
-            for (i = 0; i < SND_NUM_BUFS; i++) {
-                gSndBufBusy[i] = 0;
-                gSndPBs[i].ioParam.ioResult = noErr;
-            }
-            return false;
-        }
-    }
-    return true;
+    return (gSndBufBusy[slot] != 0);
 }
 
 static short CountBusySoundBuffers(void) {
     short i, busy = 0;
     for (i = 0; i < SND_NUM_BUFS; i++) {
-        if (IsAudioSlotBusy(i)) busy++;
+        if (gSndBufBusy[i] != 0) busy++;
     }
     return busy;
 }
@@ -190,6 +476,8 @@ static short AcquireAudioWriteSlot(void) {
 static void DispatchCurrentAudioSlot(void) {
     short slot = gSndWriteSlot;
     SndCommand cmd;
+    unsigned long activeRate = gHalfAudio ? rate11khz : rate22khz;
+    unsigned short primeLen = gHalfAudio ? (unsigned short)(SND_PRIME_SILENCE / 2) : (unsigned short)SND_PRIME_SILENCE;
 
     if (slot < 0 || gSndWritePos == 0 || gMuted || gVodStreamSilent) {
         gSndWriteSlot = -1;
@@ -197,87 +485,51 @@ static void DispatchCurrentAudioSlot(void) {
         return;
     }
 
-    if (gUseDirectSndDrv) {
-        OSErr err;
-        ParamBlockRec *pb = &gSndPBs[slot];
-
-        gSndWriteSlot = -1;
-        memset(pb, 0, sizeof(ParamBlockRec));
-        pb->ioParam.ioRefNum     = SND_DRIVER_REFNUM;
-        pb->ioParam.ioBuffer     = (Ptr)gSndBufs[slot];
-        pb->ioParam.ioReqCount   = (long)SND_FF_HDR_BYTES + (long)gSndWritePos;
-        pb->ioParam.ioCompletion = NULL;
-
-        gSndBufBusy[slot]    = 1;
-        gSndSubmitTick[slot] = FAST_TICKS();
-        gSndWritePos         = 0;
-
-        err = PBWrite(pb, true);
-        if (err == noErr && pb->ioParam.ioResult >= 0) {
+    if (!gSndChan) {
+        EnsureSoundChannelOpen();
+        if (!gSndChan) {
+            gSndWriteSlot = -1;
+            gSndWritePos  = 0;
             return;
         }
+    }
 
-        /* Fallback to Sound Manager if .Sound driver (-4) rejected PBWrite */
-        gSndBufBusy[slot] = 0;
-        gUseDirectSndDrv  = false;
-        EnsureSoundChannelOpen();
-        if (!gSndChan) return;
-        gSndHdrs[slot].samplePtr = (Ptr)(gSndBufs[slot] + SND_FF_HDR_BYTES);
-        gSndHdrs[slot].length    = (unsigned long)(pb->ioParam.ioReqCount - SND_FF_HDR_BYTES);
-        gSndBufBusy[slot]        = 1;
-    } else {
-        if (!gSndChan) {
-            EnsureSoundChannelOpen();
-            if (!gSndChan) {
-                gSndWriteSlot = -1;
-                gSndWritePos  = 0;
-                return;
-            }
-        }
+    if (CountBusySoundBuffers() == 0) {
+        short tries;
+        for (tries = 0; tries < SND_NUM_BUFS; tries++) {
+            short pSlot = (slot + 1 + tries) % SND_NUM_BUFS;
+            if (pSlot != slot && !IsAudioSlotBusy(pSlot) && gSndBufs[pSlot] != NULL) {
+                SndCommand pCmd;
+                memset(gSndBufs[pSlot] + SND_FF_HDR_BYTES, 0x80, primeLen);
+                gSndHdrs[pSlot].samplePtr  = (Ptr)(gSndBufs[pSlot] + SND_FF_HDR_BYTES);
+                gSndHdrs[pSlot].sampleRate = activeRate;
+                gSndHdrs[pSlot].length     = primeLen;
+                gSndBufBusy[pSlot]         = 1;
 
-        /*
-         * If the Sound Manager channel is currently completely dry (cold start
-         * or recovery), queue a 4-tick (66ms) silent lead buffer immediately
-         * ahead of this audio buffer. Because video frames are decoded at 1.0x
-         * real-time, this 4-tick cushion guarantees that buffer N+1 is always
-         * queued into gSndChan 4 ticks BEFORE buffer N finishes playing,
-         * preventing ASC FIFO underruns on 25fps (2/3-tick) streams!
-         */
-        if (CountBusySoundBuffers() == 0) {
-            short tries;
-            for (tries = 0; tries < SND_NUM_BUFS; tries++) {
-                short pSlot = (slot + 1 + tries) % SND_NUM_BUFS;
-                if (pSlot != slot && !IsAudioSlotBusy(pSlot) && gSndBufs[pSlot] != NULL) {
-                    SndCommand pCmd;
-                    memset(gSndBufs[pSlot] + SND_FF_HDR_BYTES, 0x80, SND_PRIME_SILENCE);
-                    gSndHdrs[pSlot].samplePtr = (Ptr)(gSndBufs[pSlot] + SND_FF_HDR_BYTES);
-                    gSndHdrs[pSlot].length    = SND_PRIME_SILENCE;
-                    gSndBufBusy[pSlot]        = 1;
-
-                    pCmd.cmd    = bufferCmd;
+                pCmd.cmd    = bufferCmd;
+                pCmd.param1 = 0;
+                pCmd.param2 = (long)&gSndHdrs[pSlot];
+                if (SndDoCommand(gSndChan, &pCmd, true) == noErr) {
+                    pCmd.cmd    = callBackCmd;
                     pCmd.param1 = 0;
-                    pCmd.param2 = (long)&gSndHdrs[pSlot];
-                    if (SndDoCommand(gSndChan, &pCmd, true) == noErr) {
-                        pCmd.cmd    = callBackCmd;
-                        pCmd.param1 = 0;
-                        pCmd.param2 = (long)&gSndBufBusy[pSlot];
-                        if (SndDoCommand(gSndChan, &pCmd, true) != noErr) {
-                            gSndBufBusy[pSlot] = 0;
-                        }
-                    } else {
+                    pCmd.param2 = (long)&gSndBufBusy[pSlot];
+                    if (SndDoCommand(gSndChan, &pCmd, true) != noErr) {
                         gSndBufBusy[pSlot] = 0;
                     }
-                    break;
+                } else {
+                    gSndBufBusy[pSlot] = 0;
                 }
+                break;
             }
         }
-
-        gSndHdrs[slot].samplePtr = (Ptr)(gSndBufs[slot] + SND_FF_HDR_BYTES);
-        gSndHdrs[slot].length    = gSndWritePos;
-        gSndBufBusy[slot]        = 1;
-        gSndWriteSlot            = -1;
-        gSndWritePos             = 0;
     }
+
+    gSndHdrs[slot].samplePtr  = (Ptr)(gSndBufs[slot] + SND_FF_HDR_BYTES);
+    gSndHdrs[slot].sampleRate = activeRate;
+    gSndHdrs[slot].length     = gSndWritePos;
+    gSndBufBusy[slot]         = 1;
+    gSndWriteSlot             = -1;
+    gSndWritePos              = 0;
 
     cmd.cmd    = bufferCmd;
     cmd.param1 = 0;
@@ -297,9 +549,11 @@ static void DispatchCurrentAudioSlot(void) {
 
 static void FeedFrameAudio(const unsigned char *pcm, unsigned short pcmBytes) {
     unsigned short offset = 0;
+    unsigned short flushThresh = gHalfAudio ? (unsigned short)(SND_FLUSH_THRESHOLD / 2) : (unsigned short)SND_FLUSH_THRESHOLD;
+    unsigned short minCold     = gHalfAudio ? 925U : 1850U;
 
     if (gMuted || gVodStreamSilent || !pcm || pcmBytes == 0) return;
-    if (!gUseDirectSndDrv && !gSndChan) return;
+    if (!gSndChan) return;
 
     while (offset < pcmBytes) {
         short slot = AcquireAudioWriteSlot();
@@ -316,8 +570,8 @@ static void FeedFrameAudio(const unsigned char *pcm, unsigned short pcmBytes) {
         gSndWritePos = (unsigned short)(gSndWritePos + take);
         offset       = (unsigned short)(offset + take);
 
-        if ((CountBusySoundBuffers() == 0 && gSndWritePos >= 1850) ||
-            gSndWritePos >= SND_FLUSH_THRESHOLD ||
+        if ((CountBusySoundBuffers() == 0 && gSndWritePos >= minCold) ||
+            gSndWritePos >= flushThresh ||
             gSndWritePos >= SND_BUF_SIZE) {
             DispatchCurrentAudioSlot();
         }
@@ -522,12 +776,85 @@ static void BlitCurrentFrame(WindowPtr mainWin, const Rect *viewportRect) {
  * Lifecycle & State Controls
  * ============================================================================ */
 
+static Boolean LowerBufContains(const unsigned char *buf, short len, const char *needle) {
+    short nlen = (short)strlen(needle);
+    short i, j;
+    if (!buf || nlen <= 0 || len < nlen) return false;
+    for (i = 0; i <= len - nlen; i++) {
+        Boolean match = true;
+        for (j = 0; j < nlen; j++) {
+            unsigned char c = buf[i + j];
+            if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + ('a' - 'A'));
+            if (c != (unsigned char)needle[j]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+/*
+ * Classic 68k emulators (Basilisk II / SheepShaver) stub legacy ".Sound" (-4)
+ * PBWrite as a silent no-op while only implementing Sound Manager 3.x ('sdev').
+ * Scan the Device Manager Unit Table once at init to detect emulator drivers
+ * or a missing -4 DCE so Sound Manager (initMono | initNoInterp) is selected
+ * immediately instead of playing silence.
+ */
+static Boolean ShouldDefaultDirectSoundDriver(void) {
+    DCtlHandle sndDctl;
+    short count;
+    short unit;
+
+    sndDctl = GetDCtlEntry(SND_DRIVER_REFNUM);
+    if (!sndDctl || !*sndDctl || !(**sndDctl).dCtlDriver) {
+        return false;
+    }
+
+    count = LMGetUnitTableEntryCount();
+    if (count <= 0 || count > 128) count = 64;
+
+    for (unit = 0; unit < count; unit++) {
+        DCtlHandle dctl = GetDCtlEntry((short)(-1 - unit));
+        Ptr drvrPtr;
+        DRVRHeaderPtr hdr;
+        short flags;
+        unsigned char nameLen;
+
+        if (!dctl || !*dctl) continue;
+        drvrPtr = (**dctl).dCtlDriver;
+        if (!drvrPtr) continue;
+        flags = (**dctl).dCtlFlags;
+
+        if (flags & dRAMBasedMask) {
+            Handle h = (Handle)drvrPtr;
+            if (!h || !*h) continue;
+            hdr = (DRVRHeaderPtr)*h;
+        } else {
+            hdr = (DRVRHeaderPtr)drvrPtr;
+        }
+
+        if (!hdr || (((unsigned long)hdr & 1UL) != 0)) continue;
+        nameLen = hdr->drvrName[0];
+        if (nameLen == 0 || nameLen > 63) continue;
+
+        if (LowerBufContains(&hdr->drvrName[1], (short)nameLen, "basilisk") ||
+            LowerBufContains(&hdr->drvrName[1], (short)nameLen, "sheepshaver")) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 Boolean PlayerInit(void) {
     short i;
     SysEnvRec env;
 
     if (gPlayerInited) return true;
 
+    gScreenBaseAddr = (unsigned char *)qd.screenBits.baseAddr;
     gOffscreenFB = (unsigned char *)NewPtrClear(NETFLIM_FB_BYTES);
     if (!gOffscreenFB) return false;
     NetFlimResetFramebuffer(gOffscreenFB);
@@ -535,6 +862,10 @@ Boolean PlayerInit(void) {
     gOffscreenBM.baseAddr = (Ptr)gOffscreenFB;
     gOffscreenBM.rowBytes = NETFLIM_ROW_BYTES;
     SetRect(&gOffscreenBM.bounds, 0, 0, NETFLIM_WIDTH, NETFLIM_HEIGHT);
+
+    memset(gSilenceFFBuf + SND_FF_HDR_BYTES, 0x80, SND_SILENCE_MAX_BYTES - SND_FF_HDR_BYTES);
+    UpdateSilenceBufferRate();
+    gDirectSndCompUPP = NewIOCompletionUPP((IOCompletionProcPtr)NetFlimDirectSoundCompletionAsm);
 
     for (i = 0; i < SND_NUM_BUFS; i++) {
         gSndBufs[i] = (unsigned char *)NewPtrClear(SND_FF_HDR_BYTES + SND_BUF_SIZE);
@@ -547,9 +878,7 @@ Boolean PlayerInit(void) {
             gSndBufs[i][4] = 0x00;
             gSndBufs[i][5] = 0x00;
         }
-        gSndBufBusy[i]    = 0;
-        gSndSubmitTick[i] = 0;
-        memset(&gSndPBs[i], 0, sizeof(ParamBlockRec));
+        gSndBufBusy[i] = 0;
         memset(&gSndHdrs[i], 0, sizeof(SoundHeader));
         gSndHdrs[i].samplePtr     = gSndBufs[i] ? (Ptr)(gSndBufs[i] + SND_FF_HDR_BYTES) : NULL;
         gSndHdrs[i].sampleRate    = rate22khz;
@@ -575,6 +904,7 @@ Boolean PlayerInit(void) {
         }
     }
 
+    gUseDirectSndDrv = ShouldDefaultDirectSoundDriver();
     gPlayerInited = true;
     return true;
 }
@@ -584,10 +914,16 @@ void PlayerShutdown(void) {
     PlayerStop(NULL);
     CloseSoundChannel();
 
+#if TARGET_RT_MAC_CFM
+    if (gDirectSndCompUPP) {
+        DisposeRoutineDescriptor((UniversalProcPtr)gDirectSndCompUPP);
+    }
     if (gSndCallBackUPP) {
         DisposeRoutineDescriptor((UniversalProcPtr)gSndCallBackUPP);
-        gSndCallBackUPP = NULL;
     }
+#endif
+    gDirectSndCompUPP = NULL;
+    gSndCallBackUPP = NULL;
     for (i = 0; i < SND_NUM_BUFS; i++) {
         if (gSndBufs[i]) {
             DisposePtr((Ptr)gSndBufs[i]);
@@ -623,7 +959,7 @@ Boolean PlayerStart(const NetFlimVideoItem *item, WindowPtr mainWin, Boolean sta
         EnsureSoundChannelOpen();
     }
 
-    if (!NetVodOpen(gVideoId, gActiveProfile, gMuted, 0)) {
+    if (!NetVodOpen(gVideoId, gActiveProfile, gMuted, gHalfAudio, 0)) {
         gState = kPlayerError;
         strcpy(gStatusMsg, "Failed to open TCP stream (port 6800)");
         return false;
@@ -676,9 +1012,16 @@ void PlayerStop(WindowPtr mainWin) {
 
 void PlayerTogglePause(void) {
     if (gState == kPlayerPlaying) {
+        Boolean wasDirect = gDirectActive;
         SyncWindowVRAMToOffscreen();
         gState = kPlayerPaused;
         FlushAudioChannel();
+        if (wasDirect) {
+            unsigned long resumeAt = gDirectNextFrame;
+            NetVodIrqSetCompletedUpTo(resumeAt);
+            gCurrentFrame = resumeAt;
+            NetVodPump();
+        }
         NetVodSetPaused(true);
         strcpy(gStatusMsg, "Paused");
     } else if (gState == kPlayerPaused) {
@@ -696,6 +1039,31 @@ void PlayerToggleLoop(void) {
     gLooping = !gLooping;
 }
 
+static void ReopenStreamForAudioChange(void) {
+    if (gState == kPlayerPlaying || gState == kPlayerPaused || gState == kPlayerBuffering) {
+        Boolean wasPaused = (gState == kPlayerPaused);
+        Boolean wasDirect = (gState == kPlayerPlaying && gDirectActive);
+        unsigned long resumeFrame;
+        FlushAudioChannel();
+        if (wasDirect) {
+            NetVodIrqSetCompletedUpTo(gDirectNextFrame);
+            gCurrentFrame = gDirectNextFrame;
+        }
+        resumeFrame = gCurrentFrame;
+        if (NetVodOpen(gVideoId, gActiveProfile, gMuted, gHalfAudio, resumeFrame)) {
+            gVodStreamSilent = gMuted;
+            if (wasPaused) {
+                NetVodSetPaused(true);
+            } else {
+                gState        = kPlayerBuffering;
+                gStartReqTick = FAST_TICKS();
+                sprintf(gStatusMsg, "Buffering %s (%s)...", gVideoTitle, gActiveProfile);
+            }
+            gNextFrameDueTick = FAST_TICKS();
+        }
+    }
+}
+
 void PlayerToggleMute(void) {
     gMuted = !gMuted;
     if (gMuted) {
@@ -705,22 +1073,70 @@ void PlayerToggleMute(void) {
     }
 
     /* Re-open active VOD stream at current frame so server toggles audio stripping */
-    if (gState == kPlayerPlaying || gState == kPlayerPaused || gState == kPlayerBuffering) {
-        Boolean wasPaused = (gState == kPlayerPaused);
-        unsigned long resumeFrame = gCurrentFrame;
-        if (NetVodOpen(gVideoId, gActiveProfile, gMuted, resumeFrame)) {
-            if (wasPaused) NetVodSetPaused(true);
-            gNextFrameDueTick = FAST_TICKS();
+    ReopenStreamForAudioChange();
+}
+
+void PlayerToggleHalfAudio(void) {
+    gHalfAudio = !gHalfAudio;
+    UpdateSilenceBufferRate();
+    ReopenStreamForAudioChange();
+}
+
+void PlayerToggleDirectAudio(void) {
+    Boolean activeStream = (gState == kPlayerPlaying || gState == kPlayerPaused || gState == kPlayerBuffering);
+    Boolean wasDirect = (gState == kPlayerPlaying && gDirectActive);
+
+    if (gUseDirectSndDrv) {
+        if (activeStream) {
+            SyncWindowVRAMToOffscreen();
+            FlushAudioChannel();
+            if (wasDirect) {
+                NetVodIrqSetCompletedUpTo(gDirectNextFrame);
+                gCurrentFrame = gDirectNextFrame;
+            }
         }
+        gUseDirectSndDrv = false;
+        if (!gMuted && !gVodStreamSilent && (gState == kPlayerPlaying || gState == kPlayerPaused)) {
+            EnsureSoundChannelOpen();
+        }
+    } else {
+        if (!EnsureDirectSoundDriverOpen()) {
+            return;
+        }
+        if (activeStream) {
+            CloseSoundChannel();
+        }
+        gUseDirectSndDrv = true;
+        gDirectFailed    = false;
+    }
+
+    if (activeStream) {
+        ReopenStreamForAudioChange();
     }
 }
 
+Boolean PlayerIsDirectAudio(void) {
+    return gUseDirectSndDrv;
+}
+
 void PlayerSetFullscreen(Boolean fullscreen, WindowPtr mainWin) {
+    Boolean wasDirect;
+
     if (gState == kPlayerStopped || gState == kPlayerError) {
         gFullscreen = false;
         return;
     }
     if (fullscreen == gFullscreen) return;
+
+    wasDirect = (gState == kPlayerPlaying && gDirectActive);
+    if (wasDirect) {
+        unsigned long resumeAt;
+        FlushAudioChannel();
+        resumeAt = gDirectNextFrame;
+        NetVodIrqSetCompletedUpTo(resumeAt);
+        gCurrentFrame = resumeAt;
+        NetVodPump();
+    }
 
     gFullscreen = fullscreen;
     if (gFullscreen) {
@@ -752,12 +1168,12 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
 
     /*
      * Always service completed TCPRcv chunks first (<1 us check when idle)
-     * so Open Transport / MacTCP stays continuously armed at 250-350+ KB/s.
+     * so Open Transport / MacTCP stays continuously armed and IRQ-finished frames are freed.
      */
     NetVodPump();
 
     now = FAST_TICKS();
-    if (gState == kPlayerPlaying && (long)(now - gNextFrameDueTick) < 0L) {
+    if (gState == kPlayerPlaying && !gUseDirectSndDrv && (long)(now - gNextFrameDueTick) < 0L) {
         return true;
     }
 
@@ -819,6 +1235,16 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
             gNextFrameDueTick = now;
             sprintf(gStatusMsg, "Playing %s (%s)", gVideoTitle, gActiveProfile);
             if (outUiChanged) *outUiChanged = true;
+            if (gUseDirectSndDrv) {
+                if (!StartDirectAudioAtFrame(gCurrentFrame, mainWin, viewportRect)) {
+                    gUseDirectSndDrv = false;
+                    if (!gMuted && !gVodStreamSilent) {
+                        EnsureSoundChannelOpen();
+                    }
+                } else {
+                    return true;
+                }
+            }
         } else if (info.eosReached && info.bufferedReady == 0) {
             PlayerStop(mainWin);
             if (outUiChanged) *outUiChanged = true;
@@ -828,7 +1254,66 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
         }
     }
 
-    /* Check end-of-stream completion */
+    /* Direct .Sound (-4) interrupt-driven path: main thread only pumps network, blits offscreen & watches EOS/errors */
+    if (gUseDirectSndDrv) {
+        if (gDirectEosReached) {
+            if (gLooping) {
+                FlushAudioChannel();
+                NetFlimResetFramebuffer(gOffscreenFB);
+                if (gUsingDirectVRAM && gScreenBaseAddr) {
+                    NetFlimFastCopy(gScreenBaseAddr, gOffscreenFB, NETFLIM_FB_BYTES);
+                }
+                gCurrentFrame     = 0;
+                gElapsedTicks     = 0;
+                gNextFrameDueTick = now;
+                gState            = kPlayerBuffering;
+                gStartReqTick     = now;
+                sprintf(gStatusMsg, "Buffering %s (%s)...", gVideoTitle, gActiveProfile);
+                NetVodSeek(0);
+                if (outUiChanged) *outUiChanged = true;
+                return true;
+            } else {
+                PlayerStop(mainWin);
+                if (outUiChanged) *outUiChanged = true;
+                return false;
+            }
+        }
+
+        if (!gDirectActive && !gDirectFailed) {
+            if (!StartDirectAudioAtFrame(gCurrentFrame, mainWin, viewportRect)) {
+                gDirectFailed = true;
+            }
+        }
+
+        /* Watchdog or driver error: fall back transparently to Sound Manager */
+        if (gDirectFailed ||
+            (gDirectActive && gDirectCallbacks == 0 && (long)(now - gDirectLastTick) > 36L)) {
+            unsigned long resumeAt = info.nextNeededFrame;
+            FlushAudioChannel();
+            gUseDirectSndDrv = false;
+            if (!gMuted && !gVodStreamSilent) {
+                EnsureSoundChannelOpen();
+            }
+            gCurrentFrame     = resumeAt;
+            gNextFrameDueTick = now;
+        } else {
+            if (gDirectNeedsBlit) {
+                gDirectNeedsBlit = false;
+                BlitCurrentFrame(mainWin, viewportRect);
+            }
+            if (!gFullscreen) {
+                short secBucket = (short)(gElapsedTicks / 300UL);
+                if (secBucket != gLastHudSecond) {
+                    gLastHudSecond = secBucket;
+                    gLastHudBuf    = info.bufferedReady;
+                    if (outUiChanged) *outUiChanged = true;
+                }
+            }
+            return true;
+        }
+    }
+
+    /* Check end-of-stream completion (Sound Manager fallback path) */
     if (gTotalFrames > 0 && info.nextNeededFrame >= gTotalFrames) {
         if (gLooping) {
             NetFlimResetFramebuffer(gOffscreenFB);
@@ -854,17 +1339,16 @@ Boolean PlayerTick(WindowPtr mainWin, const Rect *viewportRect, Boolean *outUiCh
     }
 
     /*
-     * Single-frame VBL pacer: decode at most 1 video frame per PlayerTick pass
-     * so NetVodPump() is serviced before AND after every single frame decode
-     * and the display never executes multi-frame catch-up bursts.
+     * Single-frame VBL pacer (Sound Manager fallback path)
      */
     if (now >= gNextFrameDueTick) {
         Boolean needBlit = false;
+        unsigned char frameFlags = 0;
 
-        frameData = NetVodPeekNextFrame(&frameBytes, &frameIdx);
+        frameData = NetVodPeekNextFrameEx(&frameBytes, &frameIdx, &frameFlags);
         if (frameData != NULL) {
             NetFlimParsedFrame parsed;
-            if (NetFlimParseFrameSlice(frameData, frameBytes, &parsed)) {
+            if (NetFlimParseFrameSliceEx(frameData, frameBytes, frameFlags, &parsed)) {
                 Boolean canWinVRAM = false;
                 if (!gFullscreen && gCanDirectVRAM && mainWin && viewportRect &&
                     (viewportRect->right - viewportRect->left) == NETFLIM_WIDTH &&
@@ -945,6 +1429,9 @@ Boolean PlayerWantsZeroSleep(void) {
     if (gState == kPlayerBuffering) return true;
     if (gState != kPlayerPlaying) return false;
     if (NetVodNeedsFastPump()) return true;
+    if (gUseDirectSndDrv && gDirectActive) {
+        return (gDirectNeedsBlit || gDirectEosReached || gDirectFailed);
+    }
     if ((long)(gNextFrameDueTick - FAST_TICKS()) <= 1L) return true;
     return false;
 }
@@ -952,6 +1439,7 @@ Boolean PlayerWantsZeroSleep(void) {
 PlayerState PlayerGetState(void)    { return gState; }
 Boolean     PlayerIsFullscreen(void){ return gFullscreen; }
 Boolean     PlayerIsMuted(void)     { return gMuted; }
+Boolean     PlayerIsHalfAudio(void) { return gHalfAudio; }
 Boolean     PlayerIsLooping(void)   { return gLooping; }
 
 void PlayerGetSnapshot(PlayerSnapshot *out) {
@@ -961,6 +1449,7 @@ void PlayerGetSnapshot(PlayerSnapshot *out) {
     out->state         = gState;
     out->fullscreen    = gFullscreen;
     out->muted         = gMuted;
+    out->halfAudio     = gHalfAudio;
     out->looping       = gLooping;
     strncpy(out->videoId, gVideoId, sizeof(out->videoId));
     strncpy(out->videoTitle, gVideoTitle, sizeof(out->videoTitle));

@@ -6,29 +6,176 @@ const { parseFlimFile, renderPosterPng } = require('./flim-parser');
 const { generateVideoId, sanitizeFilename, titleFromFilename } = require('./library');
 
 const PROFILES = {
-  se30: {
-    id: 'se30',
-    label: 'SE/30 & Mac II',
-    description: '512x342 • ~30 fps (ratio 1) • 3800 B/t (~228 KB/s) • Audio',
+  '128k': {
+    id: '128k',
+    label: 'Mac 128K (128k)',
+    description: '512x342 • ratio 4 (~15 fps) • 380 B/t • Silent • Ordered',
     width: 512,
     height: 342,
-    byterate: 3800,
+    byterate: 380,
+    filters: 'g1.6bbscz',
+    fpsRatio: 4,
+    group: false,
+    errorStability: 0.5,
+    bars: true,
+    dither: 'ordered',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.95,
+    silent: true,
+    codecs: ['null', 'z32', 'lines:count=10', 'invert'],
   },
-  se: {
-    id: 'se',
-    label: 'Macintosh SE',
-    description: '512x342 • ~15 fps (ratio 2) • 1500 B/t (~90 KB/s) • Audio',
+  '512k': {
+    id: '512k',
+    label: 'Mac 512K (512k)',
+    description: '512x342 • ratio 4 (~15 fps) • 480 B/t • Silent • Ordered',
     width: 512,
     height: 342,
-    byterate: 1500,
+    byterate: 480,
+    filters: 'g1.6bbscz',
+    fpsRatio: 4,
+    group: false,
+    errorStability: 0.5,
+    bars: true,
+    dither: 'ordered',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.95,
+    silent: true,
+    codecs: ['null', 'z32', 'lines:count=10', 'invert'],
+  },
+  xl: {
+    id: 'xl',
+    label: 'Macintosh XL (xl)',
+    description: '704x364 • ratio 4 (grp) • 580 B/t • Silent • Ordered',
+    width: 704,
+    height: 364,
+    byterate: 580,
+    filters: 'g1.6bbsc',
+    fpsRatio: 4,
+    group: true,
+    errorStability: 0.5,
+    bars: true,
+    dither: 'ordered',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.95,
+    silent: true,
+    codecs: ['null', 'z32', 'lines:count=50', 'invert'],
   },
   plus: {
     id: 'plus',
-    label: 'Mac Plus / Low BW',
-    description: '512x342 • ~15 fps (ratio 2) • 900 B/t (~54 KB/s) • Low BW',
+    label: 'Mac Plus (plus)',
+    description: '512x342 • ratio 2 (~30 fps) • 1500 B/t (~90 KB/s) • Audio • Ordered',
     width: 512,
     height: 342,
-    byterate: 900,
+    byterate: 1500,
+    filters: 'g1.6bbscz',
+    fpsRatio: 2,
+    group: false,
+    errorStability: 0.5,
+    bars: true,
+    dither: 'ordered',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.95,
+    silent: false,
+    codecs: ['null', 'z32', 'lines:count=30', 'invert'],
+  },
+  performer: {
+    id: 'performer',
+    label: 'SE Performer (performer)',
+    description: '512x342 • ratio 2 (~30 fps) • 5000 B/t (~300 KB/s) • Audio • Blue',
+    width: 512,
+    height: 342,
+    byterate: 5000,
+    filters: 'g1.6bsc',
+    fpsRatio: 2,
+    group: false,
+    errorStability: 0.5,
+    bars: true,
+    dither: 'blue',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.95,
+    silent: false,
+    codecs: ['null', 'z32', 'lines:count=30', 'invert'],
+  },
+  portable: {
+    id: 'portable',
+    label: 'Mac Portable (portable)',
+    description: '640x400 • ratio 2 (~30 fps) • 2500 B/t (~150 KB/s) • Audio • Error',
+    width: 640,
+    height: 400,
+    byterate: 2500,
+    filters: 'g1.6bsc',
+    fpsRatio: 2,
+    group: false,
+    errorStability: 0.5,
+    bars: true,
+    dither: 'error',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.98,
+    silent: false,
+    codecs: ['null', 'z32', 'lines:count=50', 'invert'],
+  },
+  se: {
+    id: 'se',
+    label: 'Macintosh SE (se)',
+    description: '512x342 • ratio 2 (~30 fps) • 2500 B/t (~150 KB/s) • Audio • Error',
+    width: 512,
+    height: 342,
+    byterate: 2500,
+    filters: 'g1.6bsc',
+    fpsRatio: 2,
+    group: false,
+    errorStability: 0.5,
+    bars: true,
+    dither: 'error',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.98,
+    silent: false,
+    codecs: ['null', 'z32', 'lines:count=50', 'invert'],
+  },
+  se30: {
+    id: 'se30',
+    label: 'SE/30 & Mac II (se30)',
+    description: '512x342 • ratio 1 (grp) • 6000 B/t (~360 KB/s) • Audio • Error',
+    width: 512,
+    height: 342,
+    byterate: 6000,
+    filters: 'g1.6sc',
+    fpsRatio: 1,
+    group: true,
+    errorStability: 0.3,
+    bars: false,
+    dither: 'error',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 0.99,
+    silent: false,
+    codecs: ['null', 'z32', 'lines:count=70', 'invert'],
+  },
+  perfect: {
+    id: 'perfect',
+    label: 'Perfect Reference (perfect)',
+    description: '512x342 • ratio 1 (grp) • 32000 B/t • Audio • Error',
+    width: 512,
+    height: 342,
+    byterate: 32000,
+    filters: 'g1.6sc',
+    fpsRatio: 1,
+    group: true,
+    errorStability: 0.3,
+    bars: false,
+    dither: 'error',
+    errorAlgorithm: 'floyd',
+    errorBidi: true,
+    errorBleed: 1.0,
+    silent: false,
+    codecs: ['null', 'z32', 'lines:count=70', 'invert'],
   },
 };
 
@@ -116,10 +263,18 @@ function parseProfilesParam(input) {
 }
 
 function normalizeEncodeOptions(raw = {}) {
-  const aspect = VALID_ASPECTS.includes(raw.aspect) ? raw.aspect : 'bars';
-  const dither = VALID_DITHERS.includes(raw.dither) ? raw.dither : 'ordered';
-  const silent =
-    raw.silent === true || raw.silent === 'true' || raw.silent === '1' || raw.silent === 1;
+  const rawAspect = typeof raw.aspect === 'string' ? raw.aspect.trim().toLowerCase() : '';
+  const aspect = VALID_ASPECTS.includes(rawAspect) ? rawAspect : null;
+
+  const rawDither = typeof raw.dither === 'string' ? raw.dither.trim().toLowerCase() : '';
+  const dither = VALID_DITHERS.includes(rawDither) ? rawDither : null;
+
+  let silent = null;
+  if (raw.silent === true || raw.silent === 'true' || raw.silent === '1' || raw.silent === 1) {
+    silent = true;
+  } else if (raw.silent === false || raw.silent === 'false' || raw.silent === '0' || raw.silent === 0) {
+    silent = false;
+  }
 
   const fromSec =
     raw.from !== undefined && raw.from !== '' && Number.isFinite(Number(raw.from))
@@ -297,10 +452,78 @@ function inferProfileFromFlim(parsed, explicitProfile) {
   if (explicitProfile && PROFILES[explicitProfile]) {
     return explicitProfile;
   }
+  const w = (parsed && parsed.info && parsed.info.width) || 512;
+  const h = (parsed && parsed.info && parsed.info.height) || 342;
+  if (w === 704 && h === 364) return 'xl';
+  if (w === 640 && h === 400) return 'portable';
+
   const br = (parsed && parsed.info && parsed.info.byterate) || 3000;
-  if (br >= 2400) return 'se30';
-  if (br >= 1200) return 'se';
-  return 'plus';
+  if (br >= 16000) return 'perfect';
+  if (br >= 5500) return 'se30';
+  if (br >= 4000) return 'performer';
+  if (br >= 2000) return 'se';
+  if (br >= 1000) return 'plus';
+  if (br >= 430) return '512k';
+  return '128k';
+}
+
+function resolveProfileEncodeSettings(profileId, options = {}) {
+  const prof = PROFILES[profileId] || PROFILES.se30;
+  const effectiveAspect = options.aspect || (prof.bars ? 'bars' : 'crop');
+  const effectiveBars = effectiveAspect === 'crop' ? false : (options.aspect ? true : prof.bars);
+  const effectiveDither = options.dither || prof.dither;
+  const effectiveSilent =
+    options.silent !== null && options.silent !== undefined ? Boolean(options.silent) : Boolean(prof.silent);
+  const effectiveByterate =
+    options.byterate !== null && options.byterate !== undefined ? options.byterate : prof.byterate;
+  const effectiveFpsRatio =
+    options.fpsRatio !== null && options.fpsRatio !== undefined ? options.fpsRatio : prof.fpsRatio;
+  const effectiveGroup =
+    options.group !== null && options.group !== undefined ? Boolean(options.group) : Boolean(prof.group);
+  const effectiveErrorAlgorithm = options.errorAlgorithm || prof.errorAlgorithm;
+  const effectiveErrorStability =
+    options.errorStability !== null && options.errorStability !== undefined
+      ? options.errorStability
+      : prof.errorStability;
+  const effectiveErrorBleed =
+    options.errorBleed !== null && options.errorBleed !== undefined
+      ? options.errorBleed
+      : prof.errorBleed;
+  const effectiveErrorBidi =
+    options.errorBidi !== null && options.errorBidi !== undefined
+      ? Boolean(options.errorBidi)
+      : Boolean(prof.errorBidi);
+  const effectiveFilters =
+    options.filters !== null && options.filters !== undefined ? options.filters : prof.filters;
+  const effectiveCodecMode = options.codecMode || 'auto';
+
+  let cliCodecs;
+  if (effectiveCodecMode === 'lines') {
+    cliCodecs = ['lines', 'invert'];
+  } else if (effectiveCodecMode === 'z32') {
+    cliCodecs = ['z32', 'invert'];
+  } else if (effectiveCodecMode === 'z16') {
+    cliCodecs = ['z16', 'lines', 'invert'];
+  } else {
+    cliCodecs = (prof.codecs || ['null', 'z32', 'lines:count=50', 'invert']).filter((c) => c !== 'null');
+  }
+
+  return {
+    aspect: effectiveAspect,
+    bars: effectiveBars,
+    dither: effectiveDither,
+    silent: effectiveSilent,
+    byterate: effectiveByterate,
+    fpsRatio: effectiveFpsRatio,
+    group: effectiveGroup,
+    errorAlgorithm: effectiveErrorAlgorithm,
+    errorStability: effectiveErrorStability,
+    errorBleed: effectiveErrorBleed,
+    errorBidi: effectiveErrorBidi,
+    filters: effectiveFilters,
+    codecMode: effectiveCodecMode,
+    cliCodecs,
+  };
 }
 
 async function savePosterArtifacts(library, videoId, posterBitmap) {
@@ -402,59 +625,51 @@ function createEncoder({ library }) {
 
   function runFlimmaker({ flimmakerBin, inputPath, outPath, profileId, options, job, profileIndex }) {
     return new Promise((resolve, reject) => {
-      const targetByterate = options.byterate || (PROFILES[profileId] && PROFILES[profileId].byterate) || 3000;
+      const cfg = resolveProfileEncodeSettings(profileId, options);
       const args = [
         inputPath,
         '--flim',
         outPath,
         '--profile',
         profileId,
-        '--byterate',
-        String(targetByterate),
-        '--bars',
-        options.aspect === 'crop' ? 'false' : 'true',
-        '--dither',
-        options.dither,
-        '--silent',
-        options.silent ? 'true' : 'false',
       ];
 
-      if (options.fpsRatio !== null && options.fpsRatio !== undefined) {
-        args.push('--fps-ratio', String(options.fpsRatio));
+      if (options.aspect === 'stretch') {
+        args.push('--width', '512', '--height', '342');
       }
-      if (options.group !== null && options.group !== undefined) {
-        args.push('--group', options.group ? 'true' : 'false');
+
+      args.push(
+        '--byterate',
+        String(cfg.byterate),
+        '--fps-ratio',
+        String(cfg.fpsRatio),
+        '--group',
+        cfg.group ? 'true' : 'false',
+        '--bars',
+        cfg.bars ? 'true' : 'false',
+        '--dither',
+        cfg.dither,
+        '--silent',
+        cfg.silent ? 'true' : 'false'
+      );
+
+      if (cfg.dither === 'error') {
+        args.push(
+          '--error-algorithm',
+          cfg.errorAlgorithm,
+          '--error-stability',
+          String(cfg.errorStability),
+          '--error-bleed',
+          String(cfg.errorBleed),
+          '--error-bidi',
+          cfg.errorBidi ? 'true' : 'false'
+        );
       }
-      if (options.dither === 'error') {
-        if (options.errorAlgorithm) {
-          args.push('--error-algorithm', options.errorAlgorithm);
-        }
-        /* Default SE/30 error stability to 0.45 and bleed to 0.95 to suppress 1px z32 dither boiling */
-        const stab = options.errorStability !== null && options.errorStability !== undefined
-          ? options.errorStability
-          : (profileId === 'se30' ? 0.45 : null);
-        const bleed = options.errorBleed !== null && options.errorBleed !== undefined
-          ? options.errorBleed
-          : (profileId === 'se30' ? 0.95 : null);
-        if (stab !== null) {
-          args.push('--error-stability', String(stab));
-        }
-        if (bleed !== null) {
-          args.push('--error-bleed', String(bleed));
-        }
-        if (options.errorBidi !== null && options.errorBidi !== undefined) {
-          args.push('--error-bidi', options.errorBidi ? 'true' : 'false');
-        }
+      if (cfg.filters !== null && cfg.filters !== undefined) {
+        args.push('--filters', cfg.filters);
       }
-      if (options.filters !== null && options.filters !== undefined) {
-        args.push('--filters', options.filters);
-      }
-      if (options.codecMode === 'lines') {
-        args.push('--codec', 'lines', '--codec', 'invert');
-      } else if (options.codecMode === 'z32') {
-        args.push('--codec', 'z32', '--codec', 'invert');
-      } else if (options.codecMode === 'z16') {
-        args.push('--codec', 'z16', '--codec', 'lines', '--codec', 'invert');
+      for (const spec of cfg.cliCodecs) {
+        args.push('--codec', spec);
       }
 
       if (options.from !== null) {
@@ -616,6 +831,8 @@ function createEncoder({ library }) {
             ? Number(((parsed.info.frameCount * 60) / parsed.info.totalTicks).toFixed(1))
             : null;
 
+        const cfg = resolveProfileEncodeSettings(profileId, effectiveOptions);
+
         library.addProfileToItem(item.id, profileId, {
           profile: profileId,
           file: library.toRelativePath(outAbsPath),
@@ -629,15 +846,17 @@ function createEncoder({ library }) {
           fps: encodedFps,
           targetFps: job.options.targetFps || null,
           silent: parsed.info.silent,
-          aspect: job.options.aspect,
-          dither: job.options.dither,
-          fpsRatio: effectiveOptions.fpsRatio,
-          group: job.options.group,
-          errorAlgorithm: job.options.errorAlgorithm,
-          errorStability: job.options.errorStability,
-          errorBleed: job.options.errorBleed,
-          codecMode: job.options.codecMode || 'auto',
-          filters: job.options.filters,
+          aspect: cfg.aspect,
+          dither: cfg.dither,
+          fpsRatio: cfg.fpsRatio,
+          group: cfg.group,
+          errorAlgorithm: cfg.errorAlgorithm,
+          errorStability: cfg.errorStability,
+          errorBleed: cfg.errorBleed,
+          errorBidi: cfg.errorBidi,
+          codecMode: cfg.codecMode,
+          codecs: cfg.cliCodecs,
+          filters: cfg.filters,
           createdAt: new Date().toISOString(),
         });
 
@@ -866,6 +1085,7 @@ module.exports = {
   getToolsStatus,
   parseProfilesParam,
   normalizeEncodeOptions,
+  resolveProfileEncodeSettings,
   isFlimFile,
   createEncoder,
 };

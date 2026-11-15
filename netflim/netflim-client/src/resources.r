@@ -262,6 +262,8 @@ resource 'MENU' (130, "Playback") {
         "-", noIcon, noKey, noMark, plain,
         "Loop Video", noIcon, "L", noMark, plain,
         "Mute Audio", noIcon, "M", noMark, plain,
+        "Half Audio (11 kHz)", noIcon, "H", noMark, plain,
+        "Direct .Sound Audio", noIcon, noKey, noMark, plain,
         "-", noIcon, noKey, noMark, plain,
         "Next Page", noIcon, noKey, noMark, plain,
         "Previous Page", noIcon, noKey, noMark, plain

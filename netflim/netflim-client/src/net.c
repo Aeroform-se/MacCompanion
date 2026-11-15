@@ -5,6 +5,7 @@
 #include <Errors.h>
 #include <Files.h>
 #include <Folders.h>
+#include <Gestalt.h>
 #include <Memory.h>
 #include <OSUtils.h>
 #include <stdio.h>
@@ -89,15 +90,16 @@ static unsigned long     gHttpConnectTimeoutTicks = 120UL;
 #define NF_ARENA_LOW          131072UL  /* 128 KB on compact Macs */
 #define NF_ARENA_TAIL         (NF_MAX_FRAME_BYTES + 16UL)
 #define NF_INDEX_SLOTS        128
-#define TCP_VOD_CREATE_MAX    65535L
-#define TCP_VOD_CHUNK_MAX     32768UL
+#define TCP_VOD_CREATE_MAX    24576L
+#define TCP_VOD_CHUNK_MAX     12288UL
 
 typedef struct {
-    Boolean        ready;
-    unsigned long  frameIdx;
-    unsigned char *dataPtr;
-    unsigned short payloadLen;
-    unsigned long  recordBytes;
+    volatile Boolean ready;
+    unsigned char    flags;
+    unsigned long    frameIdx;
+    unsigned char   *dataPtr;
+    unsigned short   payloadLen;
+    unsigned long    recordBytes;
 } VodFrameDesc;
 
 typedef enum {
@@ -113,6 +115,7 @@ typedef enum {
     kParseFrames
 } VodParsePhase;
 
+static unsigned char  *gArenaRaw           = NULL;
 static unsigned char  *gArenaMem           = NULL;
 static unsigned long   gArenaCap           = 0;
 static unsigned long   gArenaWrite         = 0;
@@ -121,6 +124,8 @@ static unsigned long   gArenaUsed          = 0;
 static unsigned long   gArenaAvailToParse  = 0;
 static short           gRingNumSlots       = 0;
 static short           gBufferedCount      = 0;
+static unsigned long   gReclaimCursor      = 0;
+static volatile unsigned long gIrqCompletedUpTo = 0;
 static VodFrameDesc    gDescRing[NF_INDEX_SLOTS];
 
 static unsigned char  *gTcpCreateBuf       = NULL;
@@ -128,8 +133,9 @@ static unsigned long   gTcpCreateBufSize   = 0;
 static StreamPtr       gVodTcpStream       = 0;
 static TCPiopb         gVodOpenPB;
 static TCPiopb         gVodSendPB;
-static TCPiopb         gVodRxPB;
-static Boolean         gTcpRxArmed         = false;
+static TCPiopb         gVodRxPB[2];
+static Boolean         gTcpRxArmed[2];
+static short           gTcpRxActiveSlot    = 0;
 static VodTcpConnState gTcpConnState       = kVodTcpClosed;
 static char            gVodHttpReq[384];
 static wdsEntry        gVodWds[2];
@@ -146,6 +152,7 @@ static Boolean         gVodEosReached      = false;
 static Boolean         gVodSilent          = false;
 static Boolean         gVodPaused          = false;
 static Boolean         gVodStripAudio      = false;
+static Boolean         gVodHalfAudio       = false;
 static char            gVodVideoId[18];
 static char            gVodProfile[10];
 static unsigned short  gVodWidth           = 512;
@@ -504,6 +511,14 @@ const char *NetGetPrefsSourceName(void) {
     return gPrefsSource;
 }
 
+Boolean NetHasOpenTransport(void) {
+    long otAttr = 0;
+    if (Gestalt(gestaltOpenTpt, &otAttr) == noErr) {
+        return ((otAttr & (gestaltOpenTptPresentMask | gestaltOpenTptTCPPresentMask)) != 0);
+    }
+    return false;
+}
+
 /* ============================================================================
  * IP Helpers & MacTCP Initialization
  * ============================================================================ */
@@ -585,8 +600,9 @@ static void AllocVodMemoryOnce(void) {
 
     while (targetCap >= 65536UL) {
         if (FreeMem() >= (long)(targetCap + NF_ARENA_TAIL + 81920UL)) {
-            gArenaMem = (unsigned char *)NewPtrClear((Size)(targetCap + NF_ARENA_TAIL));
-            if (gArenaMem != NULL) {
+            gArenaRaw = (unsigned char *)NewPtrClear((Size)(targetCap + NF_ARENA_TAIL + 4UL));
+            if (gArenaRaw != NULL) {
+                gArenaMem = (unsigned char *)(((unsigned long)gArenaRaw + 3UL) & ~3UL);
                 gArenaCap = targetCap;
                 if (targetCap >= NF_ARENA_ULTRA) {
                     gRingNumSlots = NF_INDEX_SLOTS - 1;
@@ -601,11 +617,11 @@ static void AllocVodMemoryOnce(void) {
         targetCap /= 2UL;
     }
 
-    createAlloc = (FreeMem() >= 180000L) ? 65536L : 32768L;
+    createAlloc = (FreeMem() >= 90000L) ? TCP_VOD_CREATE_MAX : 16384L;
     while (createAlloc >= 16384L && !gTcpCreateBuf) {
         gTcpCreateBuf = (unsigned char *)NewPtrClear(createAlloc);
         if (gTcpCreateBuf) {
-            gTcpCreateBufSize = (createAlloc >= 65536L) ? 65535UL : (unsigned long)createAlloc;
+            gTcpCreateBufSize = (unsigned long)createAlloc;
             break;
         }
         createAlloc /= 2L;
@@ -657,8 +673,9 @@ void NetShutdown(void) {
         gTcpCreateBuf = NULL;
         gTcpCreateBufSize = 0;
     }
-    if (gArenaMem) {
-        DisposePtr((Ptr)gArenaMem);
+    if (gArenaRaw) {
+        DisposePtr((Ptr)gArenaRaw);
+        gArenaRaw = NULL;
         gArenaMem = NULL;
         gArenaCap = 0;
         gRingNumSlots = 0;
@@ -1358,13 +1375,40 @@ Boolean NetFetchPosterRaw(const char *videoId, unsigned char *out1376) {
  * Zero-Copy Flat Circular Stream Arena VOD Client (6800/tcp - /api/netflim/stream)
  * ============================================================================ */
 
-static void ResetRingSlots(void) {
+static void ResetRingSlots(unsigned long startFrame) {
     memset(gDescRing, 0, sizeof(gDescRing));
     gArenaWrite        = 0;
     gArenaParse        = 0;
     gArenaUsed         = 0;
     gArenaAvailToParse = 0;
     gBufferedCount     = 0;
+    gReclaimCursor     = startFrame;
+    gIrqCompletedUpTo  = startFrame;
+}
+
+static void ReapIrqCompletedFrames(void) {
+    unsigned long a, b, doneUpTo;
+    if (!gVodActive || gRingNumSlots <= 0) return;
+
+    do {
+        a = gIrqCompletedUpTo;
+        b = gIrqCompletedUpTo;
+    } while (a != b);
+    doneUpTo = a;
+
+    while (gReclaimCursor < doneUpTo) {
+        VodFrameDesc *d = &gDescRing[gReclaimCursor % NF_INDEX_SLOTS];
+        if (d->ready && d->frameIdx == gReclaimCursor) {
+            if (gArenaUsed >= d->recordBytes) gArenaUsed -= d->recordBytes;
+            else gArenaUsed = 0;
+            d->ready = false;
+            if (gBufferedCount > 0) gBufferedCount--;
+        }
+        gReclaimCursor++;
+        if (gNextNeededFrame < gReclaimCursor) {
+            gNextNeededFrame = gReclaimCursor;
+        }
+    }
 }
 
 static Boolean RingCanQueueMore(void) {
@@ -1389,7 +1433,8 @@ static void CloseTcpStreamOnly(void) {
         waitStart = TickCount();
         while ((gVodOpenPB.ioResult == 1 ||
                 gVodSendPB.ioResult == 1 ||
-                (gTcpRxArmed && gVodRxPB.ioResult == 1)) &&
+                (gTcpRxArmed[0] && gVodRxPB[0].ioResult == 1) ||
+                (gTcpRxArmed[1] && gVodRxPB[1].ioResult == 1)) &&
                (TickCount() - waitStart) < 60UL) {
             SystemTask();
         }
@@ -1403,21 +1448,23 @@ static void CloseTcpStreamOnly(void) {
         gVodTcpStream = 0;
     }
 
-    gTcpConnState = kVodTcpClosed;
-    gTcpRxArmed   = false;
+    gTcpConnState    = kVodTcpClosed;
+    gTcpRxArmed[0]   = false;
+    gTcpRxArmed[1]   = false;
+    gTcpRxActiveSlot = 0;
     memset(&gVodOpenPB, 0, sizeof(gVodOpenPB));
     memset(&gVodSendPB, 0, sizeof(gVodSendPB));
-    memset(&gVodRxPB, 0, sizeof(gVodRxPB));
+    memset(gVodRxPB, 0, sizeof(gVodRxPB));
 }
 
-static void ArmTcpRecv(void) {
+static void ArmTcpRecvSlot(short slot) {
     OSErr err;
     unsigned long freeBytes;
     unsigned long toEnd;
     unsigned long chunk;
 
     if (gVodTcpStream == 0 || gTcpConnState != kVodTcpStreaming ||
-        gTcpRxArmed || gTcpRemoteEof || gArenaCap == 0 || !gArenaMem) {
+        gTcpRxArmed[0] || gTcpRxArmed[1] || gTcpRemoteEof || gArenaCap == 0 || !gArenaMem) {
         return;
     }
 
@@ -1430,23 +1477,31 @@ static void ArmTcpRecv(void) {
         freeBytes = (gArenaCap > gArenaUsed) ? (gArenaCap - gArenaUsed) : 0UL;
         toEnd     = gArenaCap - gArenaWrite;
         chunk     = (freeBytes < toEnd) ? freeBytes : toEnd;
-        if (chunk > TCP_VOD_CHUNK_MAX) chunk = TCP_VOD_CHUNK_MAX;
+        {
+            unsigned long maxChunk = (gTcpCreateBufSize >= 24576UL) ? TCP_VOD_CHUNK_MAX : 8192UL;
+            if (chunk > maxChunk) chunk = maxChunk;
+        }
         if (chunk == 0) return;
     }
 
-    memset(&gVodRxPB, 0, sizeof(gVodRxPB));
-    gVodRxPB.ioCompletion = NULL;
-    gVodRxPB.ioCRefNum = gMacTCPRef;
-    gVodRxPB.csCode = TCPRcv;
-    gVodRxPB.tcpStream = gVodTcpStream;
-    gVodRxPB.csParam.receive.commandTimeoutValue = 3;
-    gVodRxPB.csParam.receive.rcvBuff = (Ptr)(gArenaMem + gArenaWrite);
-    gVodRxPB.csParam.receive.rcvBuffLen = (unsigned short)chunk;
+    memset(&gVodRxPB[slot], 0, sizeof(TCPiopb));
+    gVodRxPB[slot].ioCompletion = NULL;
+    gVodRxPB[slot].ioCRefNum = gMacTCPRef;
+    gVodRxPB[slot].csCode = TCPRcv;
+    gVodRxPB[slot].tcpStream = gVodTcpStream;
+    gVodRxPB[slot].csParam.receive.commandTimeoutValue = 3;
+    gVodRxPB[slot].csParam.receive.rcvBuff = (Ptr)(gArenaMem + gArenaWrite);
+    gVodRxPB[slot].csParam.receive.rcvBuffLen = (unsigned short)chunk;
 
-    err = PBControlAsync((ParmBlkPtr)&gVodRxPB);
+    err = PBControlAsync((ParmBlkPtr)&gVodRxPB[slot]);
     if (err == noErr) {
-        gTcpRxArmed = true;
+        gTcpRxArmed[slot] = true;
+        gTcpRxActiveSlot  = slot;
     }
+}
+
+static void ArmTcpRecv(void) {
+    ArmTcpRecvSlot(gTcpRxActiveSlot);
 }
 
 /*
@@ -1460,7 +1515,10 @@ static void ScanArenaFrames(void) {
         const unsigned char *hdr;
         unsigned long frameIdx;
         unsigned short payloadLen;
-        unsigned short padBytes;
+        unsigned short padWord;
+        unsigned short prePad;
+        unsigned short postPad;
+        unsigned char  midFlag;
         unsigned long recordBytes;
 
         if (gArenaParse + 8UL > gArenaCap) {
@@ -1471,7 +1529,10 @@ static void ScanArenaFrames(void) {
         hdr        = gArenaMem + gArenaParse;
         frameIdx   = read_u32be(hdr);
         payloadLen = read_u16be(hdr + 4);
-        padBytes   = (unsigned short)(read_u16be(hdr + 6) & 3U);
+        padWord    = read_u16be(hdr + 6);
+        prePad     = (unsigned short)((padWord >> 8) & 3U);
+        postPad    = (unsigned short)(padWord & 3U);
+        midFlag    = (padWord & 0x0400U) ? NETFLIM_FRAME_FLAG_MIDPAD1 : 0;
 
         if (payloadLen == 0xFFFFU) {
             gVodEosReached     = true;
@@ -1481,14 +1542,14 @@ static void ScanArenaFrames(void) {
             break;
         }
 
-        recordBytes = 8UL + (unsigned long)payloadLen + (unsigned long)padBytes;
+        recordBytes = 8UL + (unsigned long)prePad + (unsigned long)payloadLen + (unsigned long)postPad;
         if (gArenaAvailToParse < recordBytes) {
             /* Full frame payload has not arrived in the arena yet */
             break;
         }
 
-        if (frameIdx >= gNextNeededFrame + (unsigned long)NF_INDEX_SLOTS) {
-            /* Descriptor ring index full; wait for consumer to advance */
+        if (frameIdx >= gReclaimCursor + (unsigned long)gRingNumSlots) {
+            /* Descriptor ring index full or frame audio still pinned; wait for consumer to advance */
             break;
         }
 
@@ -1504,11 +1565,13 @@ static void ScanArenaFrames(void) {
             else gArenaUsed = 0;
         } else {
             VodFrameDesc *d = &gDescRing[frameIdx % NF_INDEX_SLOTS];
-            d->ready       = true;
             d->frameIdx    = frameIdx;
-            d->dataPtr     = gArenaMem + gArenaParse + 8UL;
+            d->dataPtr     = gArenaMem + gArenaParse + 8UL + (unsigned long)prePad;
             d->payloadLen  = payloadLen;
             d->recordBytes = recordBytes;
+            d->flags       = midFlag;
+            __asm__ volatile ("" ::: "memory");
+            d->ready       = true;
             gBufferedCount++;
         }
 
@@ -1612,7 +1675,7 @@ static Boolean StartTcpVodConnection(unsigned long startFrame) {
     OSErr err;
 
     CloseTcpStreamOnly();
-    ResetRingSlots();
+    ResetRingSlots(startFrame);
 
     if (!gMacTCPReady && !NetInit()) return false;
     if (!gArenaMem || gArenaCap == 0 || gRingNumSlots <= 0 || !gTcpCreateBuf) {
@@ -1635,13 +1698,13 @@ static Boolean StartTcpVodConnection(unsigned long startFrame) {
 
     FormatIPAddress(gServerIP, hostStr);
     sprintf(gVodHttpReq,
-            "GET /api/netflim/stream/%s?profile=%s&start=%lu&maxBytes=%u%s HTTP/1.0\r\n"
+            "GET /api/netflim/stream/%s?profile=%s&start=%lu&maxBytes=%u&align4=1%s HTTP/1.0\r\n"
             "Host: %s:%u\r\nUser-Agent: NetFlim/0.1\r\nConnection: close\r\n\r\n",
             gVodVideoId,
             gVodProfile,
             startFrame,
             (unsigned int)NF_MAX_FRAME_BYTES,
-            gVodStripAudio ? "&stripAudio=1" : "",
+            gVodStripAudio ? "&stripAudio=1" : (gVodHalfAudio ? "&audioRate=11k" : ""),
             hostStr,
             (unsigned int)gServerHttpPort);
 
@@ -1650,7 +1713,9 @@ static Boolean StartTcpVodConnection(unsigned long startFrame) {
     gTcpRemoteEof    = false;
     gParsePhase      = kParseHttpHdr;
     gHdrAccumLen     = 0;
-    gTcpRxArmed      = false;
+    gTcpRxArmed[0]   = false;
+    gTcpRxArmed[1]   = false;
+    gTcpRxActiveSlot = 0;
 
     memset(&gVodOpenPB, 0, sizeof(gVodOpenPB));
     gVodOpenPB.ioCompletion = NULL;
@@ -1676,7 +1741,7 @@ static Boolean StartTcpVodConnection(unsigned long startFrame) {
     return true;
 }
 
-Boolean NetVodOpen(const char *videoId, const char *profile, Boolean stripAudio, unsigned long startFrame) {
+Boolean NetVodOpen(const char *videoId, const char *profile, Boolean stripAudio, Boolean halfAudio, unsigned long startFrame) {
     NetVodClose();
 
     if (!gMacTCPReady && !NetInit()) return false;
@@ -1691,6 +1756,7 @@ Boolean NetVodOpen(const char *videoId, const char *profile, Boolean stripAudio,
     gVodProfile[sizeof(gVodProfile) - 1] = '\0';
 
     gVodStripAudio     = stripAudio;
+    gVodHalfAudio      = (!stripAudio && halfAudio);
     gVodPaused         = false;
     gVodAckReceived    = false;
     gVodOpenStatus     = NF_OPEN_OK;
@@ -1716,7 +1782,7 @@ void NetVodClose(void) {
     CloseTcpStreamOnly();
     gVodActive      = false;
     gVodAckReceived = false;
-    ResetRingSlots();
+    ResetRingSlots(0UL);
 }
 
 void NetVodPump(void) {
@@ -1778,17 +1844,25 @@ void NetVodPump(void) {
 
     if (gTcpConnState != kVodTcpStreaming) return;
 
+    ReapIrqCompletedFrames();
+
+    if (!gTcpRxArmed[0] && !gTcpRxArmed[1] && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
+        ArmTcpRecvSlot((short)(gTcpRxActiveSlot ^ 1));
+    }
+
     if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
         ScanArenaFrames();
     }
 
     while (budget-- > 0) {
-        if (gTcpRxArmed && gVodRxPB.ioResult != 1) {
-            OSErr res = gVodRxPB.ioResult;
+        short cur = gTcpRxActiveSlot;
+        if (gTcpRxArmed[cur] && gVodRxPB[cur].ioResult != 1) {
+            OSErr res = gVodRxPB[cur].ioResult;
             unsigned short got = (res == noErr || res == connectionClosing)
-                ? gVodRxPB.csParam.receive.rcvBuffLen
+                ? gVodRxPB[cur].csParam.receive.rcvBuffLen
                 : 0;
-            gTcpRxArmed = false;
+            short nextSlot = (short)(cur ^ 1);
+            gTcpRxArmed[cur] = false;
 
             if (res == connectionClosing) {
                 gTcpRemoteEof = true;
@@ -1804,6 +1878,9 @@ void NetVodPump(void) {
                 if (gParsePhase != kParseFrames) {
                     gArenaWrite += (unsigned long)got;
                     ParseInitialHandshake();
+                    if (!gTcpRemoteEof && (res == noErr || res == -23016) && RingCanQueueMore()) {
+                        ArmTcpRecvSlot(nextSlot);
+                    }
                 } else {
                     gArenaWrite += (unsigned long)got;
                     if (gArenaWrite >= gArenaCap) {
@@ -1811,12 +1888,15 @@ void NetVodPump(void) {
                     }
                     gArenaUsed         += (unsigned long)got;
                     gArenaAvailToParse += (unsigned long)got;
+
+                    /* Immediately post alternating PB before CPU-side ScanArenaFrames work */
+                    if (!gTcpRemoteEof && (res == noErr || res == -23016) && RingCanQueueMore()) {
+                        ArmTcpRecvSlot(nextSlot);
+                    }
                     ScanArenaFrames();
                 }
-            }
-
-            if (!gTcpRemoteEof && (res == noErr || res == -23016) && RingCanQueueMore()) {
-                ArmTcpRecv();
+            } else if (!gTcpRemoteEof && (res == noErr || res == -23016) && RingCanQueueMore()) {
+                ArmTcpRecvSlot(nextSlot);
             }
 
             if (gTcpRemoteEof && gVodAckReceived && !gVodEosReached) {
@@ -1833,8 +1913,8 @@ void NetVodPump(void) {
         }
     }
 
-    if (!gTcpRxArmed && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
-        ArmTcpRecv();
+    if (!gTcpRxArmed[0] && !gTcpRxArmed[1] && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
+        ArmTcpRecvSlot((short)(gTcpRxActiveSlot ^ 1));
     }
 }
 
@@ -1854,15 +1934,16 @@ void NetVodSetPaused(Boolean paused) {
 }
 
 Boolean NetVodNeedsFastPump(void) {
+    short cur = gTcpRxActiveSlot;
     if (!gVodActive) return false;
     if (gTcpConnState == kVodTcpOpening || gTcpConnState == kVodTcpSending) return true;
     if (!gVodAckReceived) return true;
-    if (gTcpRxArmed && gVodRxPB.ioResult != 1) return true;
+    if (gTcpRxArmed[cur] && gVodRxPB[cur].ioResult != 1) return true;
     if (gVodPaused || gVodEosReached || gTcpRemoteEof) return false;
     return (gBufferedCount < 16);
 }
 
-const unsigned char *NetVodPeekNextFrame(unsigned short *outBytes, unsigned long *outFrameIdx) {
+const unsigned char *NetVodPeekNextFrameEx(unsigned short *outBytes, unsigned long *outFrameIdx, unsigned char *outFlags) {
     VodFrameDesc *d;
     if (!gVodActive || !gVodAckReceived || gRingNumSlots <= 0) return NULL;
     if (gVodFrameCount > 0 && gNextNeededFrame >= gVodFrameCount) return NULL;
@@ -1874,7 +1955,12 @@ const unsigned char *NetVodPeekNextFrame(unsigned short *outBytes, unsigned long
 
     if (outBytes) *outBytes = d->payloadLen;
     if (outFrameIdx) *outFrameIdx = d->frameIdx;
+    if (outFlags) *outFlags = d->flags;
     return d->dataPtr;
+}
+
+const unsigned char *NetVodPeekNextFrame(unsigned short *outBytes, unsigned long *outFrameIdx) {
+    return NetVodPeekNextFrameEx(outBytes, outFrameIdx, NULL);
 }
 
 void NetVodConsumeNextFrame(void) {
@@ -1889,13 +1975,38 @@ void NetVodConsumeNextFrame(void) {
         if (gBufferedCount > 0) gBufferedCount--;
     }
     gNextNeededFrame++;
+    if (gReclaimCursor < gNextNeededFrame) {
+        gReclaimCursor = gNextNeededFrame;
+    }
+    if (gIrqCompletedUpTo < gNextNeededFrame) {
+        gIrqCompletedUpTo = gNextNeededFrame;
+    }
 
     if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
         ScanArenaFrames();
     }
-    if (!gTcpRxArmed && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
+    if (!gTcpRxArmed[0] && !gTcpRxArmed[1] && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
         ArmTcpRecv();
     }
+}
+
+const unsigned char *NetVodIrqPeekFrame(unsigned long frameIdx, unsigned short *outBytes, unsigned char *outFlags) {
+    VodFrameDesc *d;
+    if (!gVodActive || !gVodAckReceived || gRingNumSlots <= 0) return NULL;
+    if (gVodFrameCount > 0 && frameIdx >= gVodFrameCount) return NULL;
+
+    d = &gDescRing[frameIdx % NF_INDEX_SLOTS];
+    if (!d->ready || d->frameIdx != frameIdx) {
+        return NULL;
+    }
+
+    if (outBytes) *outBytes = d->payloadLen;
+    if (outFlags) *outFlags = d->flags;
+    return d->dataPtr;
+}
+
+void NetVodIrqSetCompletedUpTo(unsigned long completedUpTo) {
+    gIrqCompletedUpTo = completedUpTo;
 }
 
 void NetVodGetInfo(NetVodInfo *outInfo) {

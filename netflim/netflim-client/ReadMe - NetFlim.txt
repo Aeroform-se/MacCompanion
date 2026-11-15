@@ -1,4 +1,4 @@
-NetFlim v0.1.0 "First Reel"
+NetFlim
 ===========================
 Streaming MacFlim Cinema for Vintage 68k Macintosh
 

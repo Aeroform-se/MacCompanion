@@ -93,6 +93,7 @@ Boolean     NetAutoConnect(char *outStatus, int statusMax);
 Boolean     NetReadSiblingServerIP(ip_addr *outIp, unsigned short *outPort, char *outSource, int srcMax);
 const char *NetGetLastErrorNote(void);
 const char *NetGetPrefsSourceName(void);
+Boolean     NetHasOpenTransport(void);
 
 /* HTTP Catalog & Posters */
 Boolean NetHttpGet(const char *path, char *outBuf, long outMax, long *outLen, short *outHttpStatus);
@@ -100,7 +101,7 @@ short   NetFetchCatalog(NetFlimVideoItem *items, short maxItems, char *outErr, i
 Boolean NetFetchPosterRaw(const char *videoId, unsigned char *out1376);
 
 /* Framed TCP VOD Streaming Session (port 6800) */
-Boolean NetVodOpen(const char *videoId, const char *profile, Boolean stripAudio, unsigned long startFrame);
+Boolean NetVodOpen(const char *videoId, const char *profile, Boolean stripAudio, Boolean halfAudio, unsigned long startFrame);
 void    NetVodClose(void);
 void    NetVodPump(void);
 void    NetVodSeek(unsigned long targetFrame);
@@ -109,7 +110,11 @@ Boolean NetVodNeedsFastPump(void);
 
 /* Returns pointer to complete frame data for gNextNeededFrame if ready, else NULL */
 const unsigned char *NetVodPeekNextFrame(unsigned short *outBytes, unsigned long *outFrameIdx);
+const unsigned char *NetVodPeekNextFrameEx(unsigned short *outBytes, unsigned long *outFrameIdx, unsigned char *outFlags);
 void                 NetVodConsumeNextFrame(void);
+/* Lock-free descriptor lookup & reclaim watermark for interrupt-driven .Sound playback */
+const unsigned char *NetVodIrqPeekFrame(unsigned long frameIdx, unsigned short *outBytes, unsigned char *outFlags);
+void                 NetVodIrqSetCompletedUpTo(unsigned long completedUpTo);
 void                 NetVodGetInfo(NetVodInfo *outInfo);
 
 #endif /* NETFLIM_NET_H */

@@ -19,6 +19,7 @@
 #include "codec.h"
 #include "net.h"
 #include "player.h"
+#include "codec.h"
 
 /* ============================================================================
  * Window & UI Constants (Fits 512x342 Compact Mac SE / SE/30 Screen Cleanly)
@@ -64,8 +65,10 @@ static short            gCardTopMargin    = 29;
 #define iFullscreen         2
 #define iLoopVideo          4
 #define iMuteAudio          5
-#define iNextPage           7
-#define iPrevPage           8
+#define iHalfAudio          6
+#define iDirectAudio        7
+#define iNextPage           9
+#define iPrevPage           10
 
 #define mProfile            131
 #define iProfileAuto        1
@@ -259,6 +262,8 @@ static void SyncMenuState(void) {
         CheckItem(playM, iFullscreen, PlayerIsFullscreen());
         CheckItem(playM, iLoopVideo, PlayerIsLooping());
         CheckItem(playM, iMuteAudio, PlayerIsMuted());
+        CheckItem(playM, iHalfAudio, PlayerIsHalfAudio());
+        CheckItem(playM, iDirectAudio, PlayerIsDirectAudio());
 
         if (!active && gVideoCount > ITEMS_PER_PAGE) {
             EnableItem(playM, iNextPage);
@@ -931,8 +936,12 @@ static void HandleMenuCommand(long menuChoice) {
     switch (menuId) {
         case mApple:
             if (itemId == iAbout) {
-                char line2[64];
-                sprintf(line2, "HTTP/TCP 6800 Streaming Player (%s)", NetResolveProfileName());
+                char line2[96];
+                sprintf(line2, "CPU: %s (%s) | %s | Net: %s",
+                        NetFlimCodecCpuName(),
+                        NetFlimCodecIs020() ? "020+" : "68k",
+                        NetResolveProfileName(),
+                        NetHasOpenTransport() ? "OT .IPP" : "MacTCP");
                 ShowMessageAlert(APP_VERSION_LONG, "MacFlim Cinema Client for Macintosh SE / SE/30+", line2);
             } else {
                 MenuHandle appleM = GetMenuHandle(mApple);
@@ -991,6 +1000,20 @@ static void HandleMenuCommand(long menuChoice) {
                     break;
                 case iMuteAudio:
                     PlayerToggleMute();
+                    SyncMenuState();
+                    if (PlayerGetState() != kPlayerStopped && PlayerGetState() != kPlayerError) {
+                        RedrawPlayerChromeOnly();
+                    }
+                    break;
+                case iHalfAudio:
+                    PlayerToggleHalfAudio();
+                    SyncMenuState();
+                    if (PlayerGetState() != kPlayerStopped && PlayerGetState() != kPlayerError) {
+                        RedrawPlayerChromeOnly();
+                    }
+                    break;
+                case iDirectAudio:
+                    PlayerToggleDirectAudio();
                     SyncMenuState();
                     if (PlayerGetState() != kPlayerStopped && PlayerGetState() != kPlayerError) {
                         RedrawPlayerChromeOnly();
@@ -1153,6 +1176,13 @@ static void HandleKeyDown(const EventRecord *ev) {
         return;
     }
 
+    if (ch == 'h' || ch == 'H') {
+        PlayerToggleHalfAudio();
+        SyncMenuState();
+        if (active) RedrawPlayerChromeOnly();
+        return;
+    }
+
     if (ch == 'l' || ch == 'L') {
         PlayerToggleLoop();
         SyncMenuState();
@@ -1282,6 +1312,7 @@ int main(void) {
     SetPort(gMainWindow);
     UpdateHitRects();
 
+    NetFlimCodecInit();
     PlayerInit();
     gMacTcpOk = NetInit();
     SyncMenuState();

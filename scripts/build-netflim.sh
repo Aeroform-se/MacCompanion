@@ -34,8 +34,15 @@ fi
 cmake -S "$NETFLIM_DIR" -B "$BUILD_DIR" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN"
 ninja -C "$BUILD_DIR"
 
-# Set HasBundle (0x2000) | HasCustomIcon (0x0400) = 0x2400 so System 7 Finder displays NetFlim icon
-python3 - "$BUILD_DIR/$APP_NAME.bin" "$BUILD_DIR/$APP_NAME.dsk" <<'PYEOF'
+# Remove stale NetFlim-030 artifacts from prior dual-binary builds
+rm -f "$BUILD_DIR/${APP_NAME}-030"* "$DIST_DIR/${APP_NAME}-030"*
+
+# Patch Finder flags and bundle ReadMe for the unified NetFlim target
+TARGETS=("$APP_NAME")
+
+for TARGET_NAME in "${TARGETS[@]}"; do
+    # Set HasBundle (0x2000) | HasCustomIcon (0x0400) = 0x2400 so System 7 Finder displays NetFlim icon
+    python3 - "$BUILD_DIR/$TARGET_NAME.bin" "$BUILD_DIR/$TARGET_NAME.dsk" "$TARGET_NAME" <<'PYEOF'
 import binascii, pathlib, struct, sys
 
 bin_path = pathlib.Path(sys.argv[1])
@@ -49,6 +56,7 @@ if bin_path.exists():
         bin_path.write_bytes(bdata)
 
 dsk_path = pathlib.Path(sys.argv[2])
+target_name = sys.argv[3]
 if dsk_path.exists():
     dsk = bytearray(dsk_path.read_bytes())
     sig = b"\x02\x00\x00\x00APPLNFLM\x00\x00"
@@ -58,19 +66,20 @@ if dsk_path.exists():
         d_flags, = struct.unpack(">H", dsk[f_off:f_off + 2])
         struct.pack_into(">H", dsk, f_off, d_flags | 0x2400)
         dsk_path.write_bytes(dsk)
-        print("Patched DSK HasBundle/HasCustomIcon flags.")
+        print(f"Patched {target_name} DSK HasBundle/HasCustomIcon flags.")
 PYEOF
 
-if [ -f "$BUILD_DIR/$APP_NAME.dsk" ] && [ -f "$NETFLIM_DIR/ReadMe - NetFlim.txt" ]; then
-    bash "$ROOT_DIR/scripts/inject-dsk-readme.sh" "$BUILD_DIR/$APP_NAME.dsk" "$NETFLIM_DIR/ReadMe - NetFlim.txt" "ReadMe - NetFlim"
-fi
+    if [ -f "$BUILD_DIR/$TARGET_NAME.dsk" ] && [ -f "$NETFLIM_DIR/ReadMe - NetFlim.txt" ]; then
+        bash "$ROOT_DIR/scripts/inject-dsk-readme.sh" "$BUILD_DIR/$TARGET_NAME.dsk" "$NETFLIM_DIR/ReadMe - NetFlim.txt" "ReadMe - NetFlim"
+    fi
 
-# Mirror latest build outputs to dist/
-cp -f "$BUILD_DIR/$APP_NAME.bin" "$DIST_DIR/$APP_NAME.bin"
-cp -f "$BUILD_DIR/$APP_NAME.dsk" "$DIST_DIR/$APP_NAME.dsk"
-if [ -f "$BUILD_DIR/$APP_NAME.APPL" ]; then
-    cp -f "$BUILD_DIR/$APP_NAME.APPL" "$DIST_DIR/$APP_NAME.APPL"
-fi
+    # Mirror latest build outputs to dist/
+    cp -f "$BUILD_DIR/$TARGET_NAME.bin" "$DIST_DIR/$TARGET_NAME.bin"
+    cp -f "$BUILD_DIR/$TARGET_NAME.dsk" "$DIST_DIR/$TARGET_NAME.dsk"
+    if [ -f "$BUILD_DIR/$TARGET_NAME.APPL" ]; then
+        cp -f "$BUILD_DIR/$TARGET_NAME.APPL" "$DIST_DIR/$TARGET_NAME.APPL"
+    fi
+done
 
 # Archive versioned artifacts into releases/netflim/<version_slug>/
 # Never overwrite an existing release directory; append b, c, d... if same version exists
@@ -86,11 +95,13 @@ if [ -d "$ROOT_DIR/releases/netflim/$EFFECTIVE_SLUG" ]; then
 fi
 RELEASE_DIR="$ROOT_DIR/releases/netflim/$EFFECTIVE_SLUG"
 mkdir -p "$RELEASE_DIR"
-cp -f "$BUILD_DIR/$APP_NAME.bin" "$RELEASE_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.bin"
-cp -f "$BUILD_DIR/$APP_NAME.dsk" "$RELEASE_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.dsk"
-if [ -f "$BUILD_DIR/$APP_NAME.APPL" ]; then
-    cp -f "$BUILD_DIR/$APP_NAME.APPL" "$RELEASE_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.APPL"
-fi
+for TARGET_NAME in "${TARGETS[@]}"; do
+    cp -f "$BUILD_DIR/$TARGET_NAME.bin" "$RELEASE_DIR/${TARGET_NAME}-${EFFECTIVE_SLUG}.bin"
+    cp -f "$BUILD_DIR/$TARGET_NAME.dsk" "$RELEASE_DIR/${TARGET_NAME}-${EFFECTIVE_SLUG}.dsk"
+    if [ -f "$BUILD_DIR/$TARGET_NAME.APPL" ]; then
+        cp -f "$BUILD_DIR/$TARGET_NAME.APPL" "$RELEASE_DIR/${TARGET_NAME}-${EFFECTIVE_SLUG}.APPL"
+    fi
+done
 
 deploy_appl_to_folder() {
     local src_appl="$1"
@@ -120,40 +131,43 @@ PYEOF
 }
 
 if [ -d "/Applications/Basillisk/driveshare" ]; then
-    echo "==> Deploying $APP_NAME to Basilisk II Unix Shared Drive: $DRIVESHARE_DIR"
+    echo "==> Deploying unified ${APP_NAME} to Basilisk II Unix Shared Drive: $DRIVESHARE_DIR"
     OLDER_RELEASES_DIR="$DRIVESHARE_DIR/Older releases"
     CURRENT_BUILD_RELEASES_DIR="$DRIVESHARE_DIR/current build releases"
     mkdir -p "$OLDER_RELEASES_DIR" "$CURRENT_BUILD_RELEASES_DIR"
 
     rm -f "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-"*
-    cp "$BUILD_DIR/$APP_NAME.dsk" "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.dsk"
-    cp "$BUILD_DIR/$APP_NAME.bin" "$CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.bin"
+    rm -f "$DRIVESHARE_DIR/${APP_NAME}-030" "$DRIVESHARE_DIR/.rsrc/${APP_NAME}-030" "$DRIVESHARE_DIR/.finf/${APP_NAME}-030"
 
-    deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$DRIVESHARE_DIR" "$APP_NAME" "NFLM"
+    for TARGET_NAME in "${TARGETS[@]}"; do
+        cp "$BUILD_DIR/$TARGET_NAME.dsk" "$CURRENT_BUILD_RELEASES_DIR/${TARGET_NAME}-${EFFECTIVE_SLUG}.dsk"
+        cp "$BUILD_DIR/$TARGET_NAME.bin" "$CURRENT_BUILD_RELEASES_DIR/${TARGET_NAME}-${EFFECTIVE_SLUG}.bin"
 
-    VERSIONED_APP_NAME="$APP_NAME $VERSION_SHORT"
-    if [ -e "$OLDER_RELEASES_DIR/$VERSIONED_APP_NAME" ] || [ -e "$OLDER_RELEASES_DIR/.rsrc/$VERSIONED_APP_NAME" ]; then
-        for suffix in b c d e f g h; do
-            CANDIDATE="${APP_NAME} ${VERSION_SHORT}${suffix}"
-            if [ ! -e "$OLDER_RELEASES_DIR/$CANDIDATE" ] && [ ! -e "$OLDER_RELEASES_DIR/.rsrc/$CANDIDATE" ]; then
-                VERSIONED_APP_NAME="$CANDIDATE"
-                break
-            fi
-        done
-    fi
-    deploy_appl_to_folder "$BUILD_DIR/$APP_NAME.APPL" "$OLDER_RELEASES_DIR" "$VERSIONED_APP_NAME" "NFLM"
+        deploy_appl_to_folder "$BUILD_DIR/$TARGET_NAME.APPL" "$DRIVESHARE_DIR" "$TARGET_NAME" "NFLM"
 
-    echo "==> Deployed $APP_NAME to Basilisk II:"
-    echo "    - Latest build:           $DRIVESHARE_DIR/$APP_NAME"
+        VERSIONED_APP_NAME="$TARGET_NAME $VERSION_SHORT"
+        if [ -e "$OLDER_RELEASES_DIR/$VERSIONED_APP_NAME" ] || [ -e "$OLDER_RELEASES_DIR/.rsrc/$VERSIONED_APP_NAME" ]; then
+            for suffix in b c d e f g h; do
+                CANDIDATE="${TARGET_NAME} ${VERSION_SHORT}${suffix}"
+                if [ ! -e "$OLDER_RELEASES_DIR/$CANDIDATE" ] && [ ! -e "$OLDER_RELEASES_DIR/.rsrc/$CANDIDATE" ]; then
+                    VERSIONED_APP_NAME="$CANDIDATE"
+                    break
+                fi
+            done
+        fi
+        deploy_appl_to_folder "$BUILD_DIR/$TARGET_NAME.APPL" "$OLDER_RELEASES_DIR" "$VERSIONED_APP_NAME" "NFLM"
+    done
+
+    echo "==> Deployed to Basilisk II:"
+    echo "    - Latest build:           $DRIVESHARE_DIR/${APP_NAME}"
     echo "    - Current build releases: $CURRENT_BUILD_RELEASES_DIR/${APP_NAME}-${EFFECTIVE_SLUG}.{dsk,bin}"
-    echo "    - Older releases:         $OLDER_RELEASES_DIR/$VERSIONED_APP_NAME"
+    echo "    - Older releases:         $OLDER_RELEASES_DIR/${APP_NAME} $VERSION_SHORT"
 fi
 
 echo ""
 echo "=================================================="
 echo "  NetFlim ${EFFECTIVE_SLUG} \"${VERSION_CODENAME}\" Built!"
 echo "=================================================="
-echo "  BinHex/MacBinary: $DIST_DIR/NetFlim.bin"
-echo "  Disk Image:       $DIST_DIR/NetFlim.dsk"
+echo "  Unified Build:    $DIST_DIR/NetFlim.{bin,dsk} (68000 + Gestalt 68020+)"
 echo "  Release Archive:  $RELEASE_DIR/"
 echo ""

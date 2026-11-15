@@ -56,14 +56,48 @@ function stripFrameAudio(frameBuf) {
   return out;
 }
 
+/**
+ * Downsamples a 22.254 kHz (ffMode, count = 1.0) audio slice 2:1 to 11.127 kHz
+ * (count = 0x00008000 / 185 B/tick), halving audio bandwidth and ASC CPU load.
+ */
+function downsampleFrameAudio11k(frameBuf) {
+  if (!Buffer.isBuffer(frameBuf) || frameBuf.length < 4) return frameBuf;
+  const soundSize = frameBuf.readUInt16BE(2);
+  if (soundSize <= 8) return frameBuf;
+
+  const soundBytes = soundSize - 2;
+  const videoStart = 4 + soundBytes;
+  if (videoStart > frameBuf.length) return frameBuf;
+
+  const pcmStart = 10; // ticks(2) + soundSize(2) + ffMode(2) + rate(4)
+  const pcmLen = soundBytes - 6;
+  const halfPcmLen = pcmLen >> 1;
+  if (halfPcmLen <= 0) return stripFrameAudio(frameBuf);
+
+  const videoLen = frameBuf.length - videoStart;
+  const out = Buffer.allocUnsafe(4 + 6 + halfPcmLen + videoLen);
+  out.writeUInt16BE(frameBuf.readUInt16BE(0), 0); // ticks
+  out.writeUInt16BE(2 + 6 + halfPcmLen, 2); // new soundSize
+  out.writeUInt16BE(0, 4); // ffMode
+  out.writeUInt32BE(0x00008000, 6); // FixRatio(1, 2) = 11,127.27 Hz
+
+  for (let i = 0, s = pcmStart; i < halfPcmLen; i++, s += 2) {
+    out[10 + i] = (frameBuf[s] + frameBuf[s + 1] + 1) >> 1;
+  }
+
+  frameBuf.copy(out, 10 + halfPcmLen, videoStart, frameBuf.length);
+  return out;
+}
+
 function resolveProfileMatch(item, requestedProfile) {
   const profiles = (item && item.profiles) || {};
   if (requestedProfile && profiles[requestedProfile]) {
     return requestedProfile;
   }
-  if (profiles.se30) return 'se30';
-  if (profiles.se) return 'se';
-  if (profiles.plus) return 'plus';
+  const order = ['se30', 'performer', 'se', 'plus', 'perfect', 'portable', '512k', '128k', 'xl'];
+  for (const key of order) {
+    if (profiles[key]) return key;
+  }
   const keys = Object.keys(profiles);
   return keys[0] || null;
 }
@@ -173,7 +207,9 @@ function createVodStreamer({ library, port = DEFAULT_VOD_PORT }) {
     const raw = Buffer.allocUnsafe(meta.size);
     const bytesRead = fs.readSync(sess.fd, raw, 0, meta.size, meta.offset);
     const slice = bytesRead < meta.size ? raw.subarray(0, bytesRead) : raw;
-    const payload = sess.stripAudio ? stripFrameAudio(slice) : slice;
+    const payload = sess.stripAudio
+      ? stripFrameAudio(slice)
+      : (sess.halfAudio ? downsampleFrameAudio11k(slice) : slice);
     const totalChunks = Math.max(
       1,
       Math.min(MAX_CHUNKS_PER_FRAME, Math.ceil(payload.length / CHUNK_PAYLOAD_MAX))
@@ -325,6 +361,7 @@ function createVodStreamer({ library, port = DEFAULT_VOD_PORT }) {
         videoId: item.id,
         profile: chosenProfile,
         stripAudio: Boolean(flags & 1),
+        halfAudio: Boolean((flags & 2) && !(flags & 1)),
         maxFrameBytes,
         windowFrames,
         nextNeededFrame: Math.min(startFrame, toc.frames.length),
@@ -524,6 +561,7 @@ module.exports = {
   OPEN_ERROR,
   CHUNK_PAYLOAD_MAX,
   stripFrameAudio,
+  downsampleFrameAudio11k,
   resolveProfileMatch,
   createVodStreamer,
 };
