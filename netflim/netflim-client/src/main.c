@@ -941,7 +941,8 @@ static void HandleMenuCommand(long menuChoice) {
                         NetFlimCodecCpuName(),
                         NetFlimCodecIs020() ? "020+" : "68k",
                         NetResolveProfileName(),
-                        NetHasOpenTransport() ? "OT .IPP" : "MacTCP");
+                        NetIsUsingNativeOT() ? "Native OT" :
+                        (NetHasOpenTransport() ? "OT .IPP" : "MacTCP"));
                 ShowMessageAlert(APP_VERSION_LONG, "MacFlim Cinema Client for Macintosh SE / SE/30+", line2);
             } else {
                 MenuHandle appleM = GetMenuHandle(mApple);
@@ -1324,7 +1325,9 @@ int main(void) {
             OpenSetServerDialog();
         }
     } else {
-        strcpy(gGalleryStatus, "MacTCP driver (.IPP) not installed");
+        strcpy(gGalleryStatus, NetHasOpenTransport()
+               ? "Open Transport TCP/IP unavailable"
+               : "MacTCP driver (.IPP) not installed");
         InvalidateWindow();
     }
 

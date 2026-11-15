@@ -94,6 +94,7 @@ Boolean     NetReadSiblingServerIP(ip_addr *outIp, unsigned short *outPort, char
 const char *NetGetLastErrorNote(void);
 const char *NetGetPrefsSourceName(void);
 Boolean     NetHasOpenTransport(void);
+Boolean     NetIsUsingNativeOT(void);
 
 /* HTTP Catalog & Posters */
 Boolean NetHttpGet(const char *path, char *outBuf, long outMax, long *outLen, short *outHttpStatus);

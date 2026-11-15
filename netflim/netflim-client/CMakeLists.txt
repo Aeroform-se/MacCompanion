@@ -22,7 +22,23 @@ target_include_directories(NetFlim PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_compile_options(NetFlim PRIVATE -Wall -Wextra -Wno-multichar -Wno-unused-parameter -Wno-pointer-sign)
+target_compile_options(NetFlim PRIVATE
+    -Wall
+    -Wextra
+    -Wno-multichar
+    -Wno-unused-parameter
+    -Wno-pointer-sign
+    -ffunction-sections
+    -fdata-sections
+)
+
+target_link_options(NetFlim PRIVATE "LINKER:--gc-sections")
+
+target_link_libraries(NetFlim PRIVATE
+    OpenTransport
+    OpenTransportApp
+    OpenTptInet
+)
 
 set_target_properties(NetFlim PROPERTIES
     REZ_INCLUDE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/src"
