@@ -109,13 +109,38 @@ void    NetVodSeek(unsigned long targetFrame);
 void    NetVodSetPaused(Boolean paused);
 Boolean NetVodNeedsFastPump(void);
 
-/* Returns pointer to complete frame data for gNextNeededFrame if ready, else NULL */
-const unsigned char *NetVodPeekNextFrame(unsigned short *outBytes, unsigned long *outFrameIdx);
-const unsigned char *NetVodPeekNextFrameEx(unsigned short *outBytes, unsigned long *outFrameIdx, unsigned char *outFlags);
-void                 NetVodConsumeNextFrame(void);
-/* Lock-free descriptor lookup & reclaim watermark for interrupt-driven .Sound playback */
-const unsigned char *NetVodIrqPeekFrame(unsigned long frameIdx, unsigned short *outBytes, unsigned char *outFlags);
-void                 NetVodIrqSetCompletedUpTo(unsigned long completedUpTo);
-void                 NetVodGetInfo(NetVodInfo *outInfo);
+/* Fixed 32-byte power-of-2 pre-parsed frame descriptor shared with .Sound ISR */
+typedef struct {
+    unsigned long          frameIdx;     /*  0..3  */
+    const unsigned char   *ffSynthPtr;   /*  4..7  */
+    const unsigned char   *videoPtr;     /*  8..11 */
+    unsigned long          recordBytes;  /* 12..15 */
+    unsigned short         ticks;        /* 16..17 */
+    unsigned short         ffReqBytes;   /* 18..19 */
+    unsigned short         videoBytes;   /* 20..21 */
+    unsigned short         pcmBytes;     /* 22..23 */
+    unsigned char          codecId;      /* 24 */
+    volatile unsigned char ready;        /* 25 */
+    unsigned char          flags;        /* 26 */
+    unsigned char          pad[5];       /* 27..31 */
+} NetVodFrameDesc;
+
+/* Pre-parsed descriptor lookup & reclaim watermark for Sound Manager and interrupt-driven .Sound */
+const NetVodFrameDesc *NetVodPeekNextSlot(void);
+void                   NetVodConsumeNextFrame(void);
+const NetVodFrameDesc *NetVodIrqPeekSlot(unsigned long frameIdx);
+void                   NetVodIrqSetCompletedUpTo(unsigned long completedUpTo);
+void                   NetVodGetInfo(NetVodInfo *outInfo);
+short                  NetVodGetBufferedReady(void);
+
+/* Direct CPU-specific hot entry points selected via Gestalt */
+void                   NetVodPump_68k(void);
+void                   NetVodPump_020(void);
+void                   NetVodConsumeNextFrame_68k(void);
+void                   NetVodConsumeNextFrame_020(void);
+const NetVodFrameDesc *NetVodIrqPeekSlot_68k(unsigned long frameIdx);
+const NetVodFrameDesc *NetVodIrqPeekSlot_020(unsigned long frameIdx);
+const NetVodFrameDesc *NetVodPeekNextSlot_68k(void);
+const NetVodFrameDesc *NetVodPeekNextSlot_020(void);
 
 #endif /* NETFLIM_NET_H */

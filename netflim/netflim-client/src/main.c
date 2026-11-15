@@ -1360,11 +1360,11 @@ int main(void) {
             now = FAST_TICKS();
             if (streamingActive) {
                 /*
-                 * Cooperative 10 Hz SystemTask() for Open Transport (.IPP) STREAMS
-                 * packet scheduling & TCP window updates (matching MacDrop's
-                 * high-throughput TCP loop), while avoiding 60 Hz WaitNextEvent traps.
+                 * Native Open Transport notifies via asynchronous Deferred Task / IRQ and
+                 * does not require periodic SystemTask() polling; keep 10 Hz SystemTask()
+                 * only for Classic MacTCP (.IPP) background driver servicing.
                  */
-                if ((now - lastSysTick) >= 6UL) {
+                if (!NetIsUsingNativeOT() && (now - lastSysTick) >= 6UL) {
                     SystemTask();
                     lastSysTick = now;
                 }

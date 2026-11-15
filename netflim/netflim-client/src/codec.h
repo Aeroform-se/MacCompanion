@@ -82,6 +82,10 @@ int NetFlimDecodeVideoClipped(unsigned char *fbBase,
 }
 #endif
 
+typedef int (*NetFlimDecodeVideoFn)(unsigned char *fb,
+                                     const unsigned char *videoPtr,
+                                     unsigned short videoBytes);
+
 /*
  * Initialize runtime CPU dispatch (Gestalt / SysEnvirons) so 68020/030/040
  * Macs use the -m68020 compiled decoder & blitter automatically.
@@ -89,5 +93,36 @@ int NetFlimDecodeVideoClipped(unsigned char *fbBase,
 void NetFlimCodecInit(void);
 int NetFlimCodecIs020(void);
 const char *NetFlimCodecCpuName(void);
+NetFlimDecodeVideoFn NetFlimGetDecodeVideoFn(void);
+
+/* Direct CPU-specific symbols exported for dual-compiled _020/_68k hot paths */
+void NetFlimFastCopy_68k(void *dst, const void *src, unsigned long len);
+void NetFlimFastCopy_020(void *dst, const void *src, unsigned long len);
+void NetFlimResetFramebuffer_68k(unsigned char *fb);
+void NetFlimResetFramebuffer_020(unsigned char *fb);
+int  NetFlimParseFrameSliceEx_68k(const unsigned char *frameBuf,
+                                  unsigned short frameBytes,
+                                  unsigned char frameFlags,
+                                  NetFlimParsedFrame *out);
+int  NetFlimParseFrameSliceEx_020(const unsigned char *frameBuf,
+                                  unsigned short frameBytes,
+                                  unsigned char frameFlags,
+                                  NetFlimParsedFrame *out);
+int  NetFlimDecodeVideo_68k(unsigned char *fb,
+                            const unsigned char *videoPtr,
+                            unsigned short videoBytes);
+int  NetFlimDecodeVideo_020(unsigned char *fb,
+                            const unsigned char *videoPtr,
+                            unsigned short videoBytes);
+int  NetFlimDecodeVideoClipped_68k(unsigned char *fbBase,
+                                   unsigned short clipMinRow,
+                                   unsigned short clipMaxRow,
+                                   const unsigned char *videoPtr,
+                                   unsigned short videoBytes);
+int  NetFlimDecodeVideoClipped_020(unsigned char *fbBase,
+                                   unsigned short clipMinRow,
+                                   unsigned short clipMaxRow,
+                                   const unsigned char *videoPtr,
+                                   unsigned short videoBytes);
 
 #endif /* NETFLIM_CODEC_H */

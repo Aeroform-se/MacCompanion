@@ -43,12 +43,81 @@ void NetFlimFastCopy(void *dst, const void *src, unsigned long len) {
     if (!dst || !src || len == 0 || dst == src) return;
 
 #ifdef __m68k__
-    if ((((unsigned long)dst | (unsigned long)src) & 1UL) == 0) {
+#ifdef NETFLIM_CODEC_020
+    {
         unsigned char *d = (unsigned char *)dst;
         const unsigned char *s = (const unsigned char *)src;
-        unsigned long chunks32 = len >> 5;
+        unsigned long chunks32;
         unsigned short rem;
 
+        /* 68020+ supports unaligned src natively: align dst to 0 mod 4 for 32-bit writes */
+        if (len >= 8UL) {
+            while (((unsigned long)d & 3UL) != 0UL && len > 0UL) {
+                *d++ = *s++;
+                len--;
+            }
+        }
+
+        chunks32 = len >> 5;
+        if (chunks32 > 0 && chunks32 <= 65536UL) {
+            uint16_t dbraCnt = (uint16_t)(chunks32 - 1UL);
+            __asm__ volatile (
+                "1:\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "move.l (%0)+,(%1)+\n\t"
+                "dbra   %2,1b\n"
+                : "+a"(s), "+a"(d), "+d"(dbraCnt)
+                :
+                : "memory", "cc"
+            );
+        } else {
+            while (chunks32--) {
+                __asm__ volatile (
+                    "move.l (%0)+,(%1)+\n\t"
+                    "move.l (%0)+,(%1)+\n\t"
+                    "move.l (%0)+,(%1)+\n\t"
+                    "move.l (%0)+,(%1)+\n\t"
+                    "move.l (%0)+,(%1)+\n\t"
+                    "move.l (%0)+,(%1)+\n\t"
+                    "move.l (%0)+,(%1)+\n\t"
+                    "move.l (%0)+,(%1)+\n\t"
+                    : "+a"(s), "+a"(d)
+                    :
+                    : "memory"
+                );
+            }
+        }
+
+        rem = (unsigned short)(len & 31UL);
+        while (rem >= 4) {
+            __asm__ volatile ("move.l (%0)+,(%1)+\n\t" : "+a"(s), "+a"(d) : : "memory");
+            rem -= 4;
+        }
+        while (rem--) {
+            *d++ = *s++;
+        }
+        return;
+    }
+#else
+    /* 68000 requires even alignment on both src and dst for move.l */
+    if ((((unsigned long)dst ^ (unsigned long)src) & 1UL) == 0) {
+        unsigned char *d = (unsigned char *)dst;
+        const unsigned char *s = (const unsigned char *)src;
+        unsigned long chunks32;
+        unsigned short rem;
+
+        if (((unsigned long)d & 1UL) != 0 && len > 0UL) {
+            *d++ = *s++;
+            len--;
+        }
+
+        chunks32 = len >> 5;
         if (chunks32 > 0 && chunks32 <= 65536UL) {
             uint16_t dbraCnt = (uint16_t)(chunks32 - 1UL);
             __asm__ volatile (
@@ -93,6 +162,7 @@ void NetFlimFastCopy(void *dst, const void *src, unsigned long len) {
         }
         return;
     }
+#endif
 #endif
 
     memcpy(dst, src, (size_t)len);
@@ -367,7 +437,6 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
         const unsigned char *sp = p;
         unsigned char *baseMinus4 = fb - 4;
         uint32_t hdr;
-        uint32_t off;
         unsigned char *dp;
         const uint16_t stride = NETFLIM_ROW_BYTES;
 
@@ -378,23 +447,14 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
         if (*(const uint32_t *)(end - 4) == 0UL) {
             /*
              * Compact MacFlim-style 68k z32 unpacker (single-branch 8-byte inner dbra loop):
-             * Eliminates short-run branch mispredict flushes on 1..3-long runs (70-90% of runs)
-             * and keeps the entire inner + outer decoder inside the 256B 68030 I-cache.
+             * storedOff in the low word is pre-scaled (tOff * 4 <= 21888 < 32768) so
+             * (%base,%hdr.w) indexes baseMinus4 directly without shift/rotate or an extra reg.
              */
             __asm__ volatile (
                 "move.l (%[sp])+,%[hdr]\n\t"
                 "beq.s  9f\n"
                 "0:\n\t"
-                "moveq  #0,%[off]\n\t"
-                "move.w %[hdr],%[off]\n\t"
-                "ror.w  #2,%[off]\n\t"
-#if defined(__mc68020__) || defined(__mc68030__) || defined(__mc68040__)
-                "lea    (%[base],%[off].l*4),%[dp]\n\t"
-#else
-                "add.l  %[off],%[off]\n\t"
-                "add.l  %[off],%[off]\n\t"
-                "lea    (%[base],%[off].l),%[dp]\n\t"
-#endif
+                "lea    (%[base],%[hdr].w),%[dp]\n\t"
                 "swap   %[hdr]\n"
                 "1:\n\t"
                 "move.l (%[sp])+,(%[dp])\n\t"
@@ -405,7 +465,6 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
                 "9:\n"
                 : [sp] "+a"(sp),
                   [hdr] "=&d"(hdr),
-                  [off] "=&d"(off),
                   [dp] "=&a"(dp)
                 : [base] "a"(baseMinus4),
                   [stride] "d"(stride)
@@ -441,11 +500,15 @@ static int decode_z32(unsigned char *fb, const unsigned char *p, const unsigned 
 
         dst = fb + ((uint32_t)runIdx << 2);
         while (count--) {
+#ifdef NETFLIM_CODEC_020
+            __asm__ volatile ("move.l (%0)+,(%1)\n\t" : "+a"(p) : "a"(dst) : "memory");
+#else
             dst[0] = p[0];
             dst[1] = p[1];
             dst[2] = p[2];
             dst[3] = p[3];
             p += 4;
+#endif
 
             dst += NETFLIM_ROW_BYTES;
             if (dst >= fbEnd) {
@@ -481,7 +544,11 @@ static int decode_z32_clipped(unsigned char *fbBase,
         if (tOff == 0) continue;
 
         runIdx = (uint16_t)(tOff - 1);
-        if (runIdx >= T_SIZE) runIdx %= T_SIZE;
+        if (runIdx >= T_SIZE) {
+            do {
+                runIdx = (uint16_t)(runIdx - T_SIZE);
+            } while (runIdx >= T_SIZE);
+        }
 
         count = (uint32_t)countMinus1 + 1UL;
         nextP = p + (count << 2);
@@ -559,8 +626,15 @@ static int decode_z32_clipped(unsigned char *fbBase,
         }
 #endif
         while (visCount--) {
-            *(uint32_t *)dp = *(const uint32_t *)p;
+#ifdef NETFLIM_CODEC_020
+            __asm__ volatile ("move.l (%0)+,(%1)\n\t" : "+a"(p) : "a"(dp) : "memory");
+#else
+            dp[0] = p[0];
+            dp[1] = p[1];
+            dp[2] = p[2];
+            dp[3] = p[3];
             p += 4;
+#endif
             dp += NETFLIM_ROW_BYTES;
         }
         p = nextP;
@@ -632,7 +706,11 @@ static int decode_z16_clipped(unsigned char *fbBase,
         if (tOff == 0) continue;
 
         runIdx = (uint16_t)(tOff - 1);
-        if (runIdx >= T_SIZE) runIdx %= T_SIZE;
+        if (runIdx >= T_SIZE) {
+            do {
+                runIdx = (uint16_t)(runIdx - T_SIZE);
+            } while (runIdx >= T_SIZE);
+        }
 
         count = (uint32_t)countMinus1 + 1UL;
         nextP = p + (count << 1);
@@ -834,6 +912,10 @@ int NetFlimCodecIs020(void) {
 
 const char *NetFlimCodecCpuName(void) {
     return gCodecCpuName;
+}
+
+NetFlimDecodeVideoFn NetFlimGetDecodeVideoFn(void) {
+    return gDecodeVideoFn;
 }
 
 void NetFlimFastCopy(void *dst, const void *src, unsigned long len) {

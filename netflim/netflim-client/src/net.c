@@ -1,23 +1,9 @@
-#include "net.h"
-#include "codec.h"
-
-#include <Devices.h>
-#include <Errors.h>
+#include "net_internal.h"
 #include <Files.h>
 #include <Folders.h>
 #include <Gestalt.h>
 #include <Memory.h>
 #include <OSUtils.h>
-#include <OpenTransport.h>
-#include <OpenTransportProviders.h>
-/* Universal Interfaces defines Mentat uid_t/gid_t/dev_t as UInt32, conflicting with newlib <sys/types.h> */
-#define uid_t _ot_uid_t
-#define gid_t _ot_gid_t
-#define dev_t _ot_dev_t
-#include <OpenTransportProtocol.h>
-#undef dev_t
-#undef gid_t
-#undef uid_t
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,15 +61,15 @@ static unsigned long read_u32be(const unsigned char *p) {
  * Globals
  * ============================================================================ */
 
-static short             gMacTCPRef       = 0;
+short                    gMacTCPRef       = 0;
 static Boolean           gNetReady        = false;
 static Boolean           gHasNativeOT     = false;
-static Boolean           gUseNativeOT     = false;
+Boolean                  gUseNativeOT     = false;
 static Boolean           gOTInited        = false;
 static ip_addr           gOurIP           = 0;
 static ip_addr           gOurNetMask      = 0xFFFFFF00UL;
-static ip_addr           gServerIP        = 0;
-static unsigned short    gServerHttpPort  = DEFAULT_HTTP_PORT;
+ip_addr                  gServerIP        = 0;
+unsigned short           gServerHttpPort  = DEFAULT_HTTP_PORT;
 static NetFlimProfileMode gProfileMode    = kProfileAuto;
 static Boolean           gHas68020OrLater = false;
 static Boolean           gHasSystem7      = false;
@@ -91,7 +77,7 @@ static Boolean           gHasSystem7      = false;
 static char             *gHttpScratch     = NULL;
 static char              gLastErrorNote[128] = "";
 static char              gPrefsSource[32]    = "";
-static OSErr             gLastTcpErr      = noErr;
+OSErr                    gLastTcpErr      = noErr;
 static Boolean           gSawMacDropOnly  = false;
 static ip_addr           gMacDropHintIP   = 0;
 static unsigned long     gHttpConnectTimeoutTicks = 120UL;
@@ -101,70 +87,43 @@ static unsigned long     gHttpConnectTimeoutTicks = 120UL;
 #define NF_ARENA_HIGH         524288UL  /* 512 KB on >= 620 KB free */
 #define NF_ARENA_MID          262144UL  /* 256 KB on >= 360 KB free */
 #define NF_ARENA_LOW          131072UL  /* 128 KB on compact Macs */
-#define NF_ARENA_TAIL         (NF_MAX_FRAME_BYTES + 16UL)
-#define NF_INDEX_SLOTS        128
-#define TCP_VOD_CREATE_MAX    24576L
-#define TCP_VOD_CHUNK_MAX     12288UL
-
-typedef struct {
-    volatile Boolean ready;
-    unsigned char    flags;
-    unsigned long    frameIdx;
-    unsigned char   *dataPtr;
-    unsigned short   payloadLen;
-    unsigned long    recordBytes;
-} VodFrameDesc;
-
-typedef enum {
-    kVodTcpClosed = 0,
-    kVodTcpOpening,
-    kVodTcpConnecting,
-    kVodTcpSending,
-    kVodTcpStreaming
-} VodTcpConnState;
-
-typedef enum {
-    kParseHttpHdr = 0,
-    kParseStreamHdr,
-    kParseFrames
-} VodParsePhase;
 
 static unsigned char  *gArenaRaw           = NULL;
-static unsigned char  *gArenaMem           = NULL;
-static unsigned long   gArenaCap           = 0;
-static unsigned long   gArenaWrite         = 0;
-static unsigned long   gArenaParse         = 0;
-static unsigned long   gArenaUsed          = 0;
-static unsigned long   gArenaAvailToParse  = 0;
-static short           gRingNumSlots       = 0;
-static short           gBufferedCount      = 0;
-static unsigned long   gReclaimCursor      = 0;
-static volatile unsigned long gIrqCompletedUpTo = 0;
-static VodFrameDesc    gDescRing[NF_INDEX_SLOTS];
+unsigned char         *gArenaMem           = NULL;
+unsigned long          gArenaCap           = 0;
+unsigned long          gArenaWrite         = 0;
+unsigned long          gArenaParse         = 0;
+unsigned long          gArenaUsed          = 0;
+unsigned long          gArenaAvailToParse  = 0;
+short                  gRingNumSlots       = 0;
+short                  gBufferedCount      = 0;
+unsigned long          gReclaimCursor      = 0;
+volatile unsigned long gIrqCompletedUpTo   = 0;
+NetVodFrameDesc        gDescRing[NF_INDEX_SLOTS];
 
 static unsigned char  *gTcpCreateBuf       = NULL;
-static unsigned long   gTcpCreateBufSize   = 0;
-static StreamPtr       gVodTcpStream       = 0;
-static TCPiopb         gVodOpenPB;
-static TCPiopb         gVodSendPB;
-static TCPiopb         gVodRxPB[2];
-static Boolean         gTcpRxArmed[2];
-static short           gTcpRxActiveSlot    = 0;
-static VodTcpConnState gTcpConnState       = kVodTcpClosed;
-static char            gVodHttpReq[384];
-static wdsEntry        gVodWds[2];
+unsigned long          gTcpCreateBufSize   = 0;
+StreamPtr              gVodTcpStream       = 0;
+TCPiopb                gVodOpenPB;
+TCPiopb                gVodSendPB;
+TCPiopb                gVodRxPB[2];
+Boolean                gTcpRxArmed[2];
+short                  gTcpRxActiveSlot    = 0;
+VodTcpConnState        gTcpConnState       = kVodTcpClosed;
+char                   gVodHttpReq[384];
+wdsEntry               gVodWds[2];
 
-static Boolean         gTcpRemoteEof       = false;
-static VodParsePhase   gParsePhase         = kParseHttpHdr;
+Boolean                gTcpRemoteEof       = false;
+VodParsePhase          gParsePhase         = kParseHttpHdr;
 static unsigned char   gHdrAccum[512];
 static unsigned short  gHdrAccumLen        = 0;
 
-static Boolean         gVodActive          = false;
-static Boolean         gVodAckReceived     = false;
-static unsigned char   gVodOpenStatus      = 0;
-static Boolean         gVodEosReached      = false;
+Boolean                gVodActive          = false;
+Boolean                gVodAckReceived     = false;
+unsigned char          gVodOpenStatus      = 0;
+Boolean                gVodEosReached      = false;
 static Boolean         gVodSilent          = false;
-static Boolean         gVodPaused          = false;
+Boolean                gVodPaused          = false;
 static Boolean         gVodStripAudio      = false;
 static Boolean         gVodHalfAudio       = false;
 static char            gVodVideoId[18];
@@ -172,9 +131,9 @@ static char            gVodProfile[10];
 static unsigned short  gVodWidth           = 512;
 static unsigned short  gVodHeight          = 342;
 static unsigned short  gVodByterate        = 0;
-static unsigned long   gVodFrameCount      = 0;
+unsigned long          gVodFrameCount      = 0;
 static unsigned long   gVodTotalTicks      = 0;
-static unsigned long   gNextNeededFrame    = 0;
+unsigned long          gNextNeededFrame    = 0;
 
 /* Native Open Transport HTTP & Zero-Copy VOD State */
 typedef struct {
@@ -197,26 +156,52 @@ static unsigned long    gOtHttpGen          = 0;
 static EndpointRef      gOtHttpOrphanEp     = kOTInvalidEndpointRef;
 static OTNotifyUPP      gOtHttpNotifyUPP    = NULL;
 
-static EndpointRef      gOtVodEp            = kOTInvalidEndpointRef;
+EndpointRef             gOtVodEp            = kOTInvalidEndpointRef;
 static unsigned long    gOtVodGen           = 0;
 static volatile EndpointRef gOtVodOrphanEp  = kOTInvalidEndpointRef;
 static volatile Boolean gOtVodOrphanDone    = false;
 static OTNotifyUPP      gOtVodNotifyUPP     = NULL;
-static InetAddress      gOtVodCallAddr;
-static TCall            gOtVodCall;
-static unsigned short   gOtVodSendOff       = 0;
-static unsigned short   gOtVodSendLen       = 0;
-static volatile Boolean gOtVodOpenDone      = false;
-static volatile OSStatus gOtVodOpenErr      = noErr;
-static volatile EndpointRef gOtVodOpenEp    = kOTInvalidEndpointRef;
-static volatile Boolean gOtVodConnectDone   = false;
-static volatile Boolean gOtVodHasData       = false;
-static volatile Boolean gOtVodNeedLook      = false;
-static volatile Boolean gOtVodGoData        = false;
-static Boolean          gOtVodPausedForRoom = false;
-static OTBuffer        *gOtPendingHead      = NULL;
-static OTBuffer        *gOtPendingCur       = NULL;
-static unsigned long    gOtPendingOff       = 0;
+InetAddress             gOtVodCallAddr;
+TCall                   gOtVodCall;
+unsigned short          gOtVodSendOff       = 0;
+unsigned short          gOtVodSendLen       = 0;
+volatile Boolean        gOtVodOpenDone      = false;
+volatile OSStatus       gOtVodOpenErr       = noErr;
+volatile EndpointRef    gOtVodOpenEp        = kOTInvalidEndpointRef;
+volatile Boolean        gOtVodConnectDone   = false;
+volatile Boolean        gOtVodHasData       = false;
+volatile Boolean        gOtVodNeedLook      = false;
+volatile Boolean        gOtVodGoData        = false;
+Boolean                 gOtVodPausedForRoom = false;
+OTBuffer               *gOtPendingHead      = NULL;
+OTBuffer               *gOtPendingCur       = NULL;
+unsigned long           gOtPendingOff       = 0;
+
+typedef void (*VodHotVoidFn)(void);
+typedef const NetVodFrameDesc *(*VodHotIrqPeekFn)(unsigned long frameIdx);
+typedef const NetVodFrameDesc *(*VodHotPeekNextFn)(void);
+
+static VodHotVoidFn     gScanArenaFramesFn = ScanArenaFrames_68k;
+static VodHotVoidFn     gVodPumpFn         = NetVodPump_68k;
+static VodHotVoidFn     gVodConsumeFn      = NetVodConsumeNextFrame_68k;
+static VodHotIrqPeekFn  gVodIrqPeekSlotFn  = NetVodIrqPeekSlot_68k;
+static VodHotPeekNextFn gVodPeekNextSlotFn = NetVodPeekNextSlot_68k;
+
+static void InitNetHotDispatch(void) {
+    if (NetFlimCodecIs020()) {
+        gScanArenaFramesFn = ScanArenaFrames_020;
+        gVodPumpFn         = NetVodPump_020;
+        gVodConsumeFn      = NetVodConsumeNextFrame_020;
+        gVodIrqPeekSlotFn  = NetVodIrqPeekSlot_020;
+        gVodPeekNextSlotFn = NetVodPeekNextSlot_020;
+    } else {
+        gScanArenaFramesFn = ScanArenaFrames_68k;
+        gVodPumpFn         = NetVodPump_68k;
+        gVodConsumeFn      = NetVodConsumeNextFrame_68k;
+        gVodIrqPeekSlotFn  = NetVodIrqPeekSlot_68k;
+        gVodPeekNextSlotFn = NetVodPeekNextSlot_68k;
+    }
+}
 
 /* ============================================================================
  * System Detection & Preferences
@@ -692,6 +677,10 @@ static void AllocVodMemoryOnce(Boolean allocCreateBuf) {
 }
 
 static OSStatus OtSetFourByteOption(EndpointRef ep, OTXTILevel level, OTXTIName name, UInt32 val) {
+    return NetInternalOtSetFourByteOption(ep, level, name, val);
+}
+
+OSStatus NetInternalOtSetFourByteOption(EndpointRef ep, OTXTILevel level, OTXTIName name, UInt32 val) {
     TOption optReq;
     TOption optRet;
     TOptMgmt req;
@@ -717,11 +706,15 @@ static OSStatus OtSetFourByteOption(EndpointRef ep, OTXTILevel level, OTXTIName 
     return OTOptionManagement(ep, &req, &ret);
 }
 
-static void OtCloseEndpointSync(EndpointRef ep) {
+void NetInternalOtCloseEndpointSync(EndpointRef ep) {
     if (ep != kOTInvalidEndpointRef) {
         OTSetSynchronous(ep);
         OTCloseProvider(ep);
     }
+}
+
+static void OtCloseEndpointSync(EndpointRef ep) {
+    NetInternalOtCloseEndpointSync(ep);
 }
 
 static void OtCleanupOrphans(void) {
@@ -869,6 +862,7 @@ Boolean NetInit(void) {
     if (gNetReady) return true;
 
     DetectEnvironment();
+    InitNetHotDispatch();
     LoadPrefs();
 
     if (!gHttpScratch) {
@@ -2001,36 +1995,15 @@ static void ResetRingSlots(unsigned long startFrame) {
     gIrqCompletedUpTo  = startFrame;
 }
 
-static void ReapIrqCompletedFrames(void) {
-    unsigned long a, b, doneUpTo;
-    if (!gVodActive || gRingNumSlots <= 0) return;
-
-    do {
-        a = gIrqCompletedUpTo;
-        b = gIrqCompletedUpTo;
-    } while (a != b);
-    doneUpTo = a;
-
-    while (gReclaimCursor < doneUpTo) {
-        VodFrameDesc *d = &gDescRing[gReclaimCursor % NF_INDEX_SLOTS];
-        if (d->ready && d->frameIdx == gReclaimCursor) {
-            if (gArenaUsed >= d->recordBytes) gArenaUsed -= d->recordBytes;
-            else gArenaUsed = 0;
-            d->ready = false;
-            if (gBufferedCount > 0) gBufferedCount--;
-        }
-        gReclaimCursor++;
-        if (gNextNeededFrame < gReclaimCursor) {
-            gNextNeededFrame = gReclaimCursor;
-        }
-    }
-}
-
 static Boolean RingCanQueueMore(void) {
     if (gArenaCap == 0 || gRingNumSlots <= 0) return false;
     if (gVodEosReached || gTcpRemoteEof) return false;
     if (gParsePhase != kParseFrames) return true;
     return (gBufferedCount < gRingNumSlots) && ((gArenaCap - gArenaUsed) >= 4096UL);
+}
+
+Boolean NetInternalRingCanQueueMore(void) {
+    return RingCanQueueMore();
 }
 
 static void FormatVodHttpRequest(unsigned long startFrame) {
@@ -2183,83 +2156,16 @@ static void ArmTcpRecv(void) {
     ArmTcpRecvSlot(gTcpRxActiveSlot);
 }
 
-/*
- * ScanArenaFrames: Zero-copy in-place 8-byte aligned frame scanner.
- * Reads [u32 frameIdx][u16 payloadLen][u16 padBytes] directly inside gArenaMem.
- * Only mirrors bytes into gArenaMem[gArenaCap..] when a frame straddles the
- * wrap boundary (<1.5% of frames).
- */
-static void ScanArenaFrames(void) {
-    while (gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
-        const unsigned char *hdr;
-        unsigned long frameIdx;
-        unsigned short payloadLen;
-        unsigned short padWord;
-        unsigned short prePad;
-        unsigned short postPad;
-        unsigned char  midFlag;
-        unsigned long recordBytes;
+void NetInternalArmTcpRecvSlot(short slot) {
+    ArmTcpRecvSlot(slot);
+}
 
-        if (gArenaParse + 8UL > gArenaCap) {
-            unsigned long hWrap = (gArenaParse + 8UL) - gArenaCap;
-            memcpy(gArenaMem + gArenaCap, gArenaMem, hWrap);
-        }
+void NetInternalArmTcpRecv(void) {
+    ArmTcpRecv();
+}
 
-        hdr        = gArenaMem + gArenaParse;
-        frameIdx   = read_u32be(hdr);
-        payloadLen = read_u16be(hdr + 4);
-        padWord    = read_u16be(hdr + 6);
-        prePad     = (unsigned short)((padWord >> 8) & 3U);
-        postPad    = (unsigned short)(padWord & 3U);
-        midFlag    = (padWord & 0x0400U) ? NETFLIM_FRAME_FLAG_MIDPAD1 : 0;
-
-        if (payloadLen == 0xFFFFU) {
-            gVodEosReached     = true;
-            gVodFrameCount     = frameIdx;
-            gTcpRemoteEof      = true;
-            gArenaAvailToParse = 0;
-            break;
-        }
-
-        recordBytes = 8UL + (unsigned long)prePad + (unsigned long)payloadLen + (unsigned long)postPad;
-        if (gArenaAvailToParse < recordBytes) {
-            /* Full frame payload has not arrived in the arena yet */
-            break;
-        }
-
-        if (frameIdx >= gReclaimCursor + (unsigned long)gRingNumSlots) {
-            /* Descriptor ring index full or frame audio still pinned; wait for consumer to advance */
-            break;
-        }
-
-        if (gArenaParse + recordBytes > gArenaCap) {
-            unsigned long overflow = (gArenaParse + recordBytes) - gArenaCap;
-            if (overflow <= NF_ARENA_TAIL) {
-                NetFlimFastCopy(gArenaMem + gArenaCap, gArenaMem, overflow);
-            }
-        }
-
-        if (frameIdx < gNextNeededFrame || payloadLen > NF_MAX_FRAME_BYTES) {
-            if (gArenaUsed >= recordBytes) gArenaUsed -= recordBytes;
-            else gArenaUsed = 0;
-        } else {
-            VodFrameDesc *d = &gDescRing[frameIdx % NF_INDEX_SLOTS];
-            d->frameIdx    = frameIdx;
-            d->dataPtr     = gArenaMem + gArenaParse + 8UL + (unsigned long)prePad;
-            d->payloadLen  = payloadLen;
-            d->recordBytes = recordBytes;
-            d->flags       = midFlag;
-            __asm__ volatile ("" ::: "memory");
-            d->ready       = true;
-            gBufferedCount++;
-        }
-
-        gArenaParse += recordBytes;
-        if (gArenaParse >= gArenaCap) {
-            gArenaParse -= gArenaCap;
-        }
-        gArenaAvailToParse -= recordBytes;
-    }
+void NetInternalOtCloseVodStream(void) {
+    OtCloseVodStream();
 }
 
 static void ParseInitialHandshake(void) {
@@ -2342,10 +2248,14 @@ static void ParseInitialHandshake(void) {
                 gArenaUsed         = rem;
                 gArenaAvailToParse = rem;
             }
-            ScanArenaFrames();
+            gScanArenaFramesFn();
             break;
         }
     }
+}
+
+void NetInternalParseInitialHandshake(void) {
+    ParseInitialHandshake();
 }
 
 static Boolean StartMacTcpVodConnection(unsigned long startFrame) {
@@ -2409,7 +2319,7 @@ static Boolean StartMacTcpVodConnection(unsigned long startFrame) {
     return true;
 }
 
-static void OtVodFailClosed(OSErr err) {
+void NetInternalOtVodFailClosed(OSErr err) {
     if (err != noErr) {
         gLastTcpErr = err;
     }
@@ -2419,212 +2329,6 @@ static void OtVodFailClosed(OSErr err) {
     gTcpRemoteEof  = true;
     gVodEosReached = true;
     gTcpConnState  = kVodTcpClosed;
-}
-
-static unsigned long OtCopyChainToArena(void) {
-    unsigned long freeBytes = (gArenaCap > gArenaUsed) ? (gArenaCap - gArenaUsed) : 0UL;
-    unsigned long totalCopied = 0UL;
-
-    while (gOtPendingCur != NULL && freeBytes > 0UL) {
-        unsigned long fragLen = (unsigned long)gOtPendingCur->fLen;
-        unsigned long fragRem;
-        unsigned long take;
-
-        if (gOtPendingOff >= fragLen) {
-            gOtPendingCur = gOtPendingCur->fNext;
-            gOtPendingOff = 0UL;
-            continue;
-        }
-
-        fragRem = fragLen - gOtPendingOff;
-        take = (fragRem < freeBytes) ? fragRem : freeBytes;
-
-        if (take > 0UL) {
-            const unsigned char *src = (const unsigned char *)gOtPendingCur->fData + gOtPendingOff;
-            unsigned long toEnd = gArenaCap - gArenaWrite;
-
-            if (take <= toEnd) {
-                NetFlimFastCopy(gArenaMem + gArenaWrite, src, take);
-                gArenaWrite += take;
-                if (gArenaWrite >= gArenaCap) {
-                    gArenaWrite = 0UL;
-                }
-            } else {
-                NetFlimFastCopy(gArenaMem + gArenaWrite, src, toEnd);
-                NetFlimFastCopy(gArenaMem, src + toEnd, take - toEnd);
-                gArenaWrite = take - toEnd;
-            }
-
-            gArenaUsed         += take;
-            gArenaAvailToParse += take;
-            gOtPendingOff      += take;
-            freeBytes          -= take;
-            totalCopied        += take;
-        }
-
-        if (gOtPendingOff >= fragLen) {
-            gOtPendingCur = gOtPendingCur->fNext;
-            gOtPendingOff = 0UL;
-        }
-    }
-
-    if (gOtPendingCur == NULL && gOtPendingHead != NULL) {
-        OTReleaseBuffer(gOtPendingHead);
-        gOtPendingHead = NULL;
-        gOtPendingCur  = NULL;
-        gOtPendingOff  = 0UL;
-    }
-
-    return totalCopied;
-}
-
-static void OtDrainIncoming(void) {
-    int budget = 16;
-
-    if (gOtVodEp == kOTInvalidEndpointRef || gTcpConnState != kVodTcpStreaming || !gArenaMem || gArenaCap == 0) {
-        return;
-    }
-
-    if (gOtPendingHead != NULL) {
-        if (gParsePhase != kParseFrames) {
-            OTReleaseBuffer(gOtPendingHead);
-            gOtPendingHead = NULL;
-            gOtPendingCur  = NULL;
-            gOtPendingOff  = 0UL;
-        } else {
-            OtCopyChainToArena();
-            ScanArenaFrames();
-            if (gOtPendingHead != NULL) {
-                gOtVodPausedForRoom = true;
-                return;
-            }
-        }
-    }
-
-    while (budget-- > 0 && !gTcpRemoteEof && !gVodEosReached) {
-        OTFlags rxFlags = 0;
-        OTResult n;
-
-        if (gParsePhase != kParseFrames) {
-            unsigned long toEnd = (gArenaCap > gArenaWrite) ? (gArenaCap - gArenaWrite) : 0UL;
-            unsigned long chunk = (toEnd > 4096UL) ? 4096UL : toEnd;
-            if (chunk == 0UL) {
-                gOtVodPausedForRoom = true;
-                break;
-            }
-            gOtVodHasData = false;
-            n = OTRcv(gOtVodEp, gArenaMem + gArenaWrite, (OTByteCount)chunk, &rxFlags);
-            if (n > 0) {
-                gOtVodHasData = true;
-                gOtVodPausedForRoom = false;
-                gArenaWrite += (unsigned long)n;
-                ParseInitialHandshake();
-                continue;
-            }
-        } else {
-            OTBuffer *rxBuf = NULL;
-            if (!RingCanQueueMore()) {
-                gOtVodPausedForRoom = true;
-                break;
-            }
-            gOtVodHasData = false;
-            n = OTRcv(gOtVodEp, &rxBuf, kOTNetbufDataIsOTBufferStar, &rxFlags);
-            if (n >= 0 && rxBuf != NULL) {
-                gOtVodHasData = true;
-                gOtVodPausedForRoom = false;
-                gOtPendingHead = rxBuf;
-                gOtPendingCur  = rxBuf;
-                gOtPendingOff  = 0UL;
-                OtCopyChainToArena();
-                ScanArenaFrames();
-                if (gOtPendingHead != NULL) {
-                    gOtVodPausedForRoom = true;
-                    break;
-                }
-                continue;
-            } else if (n == 0) {
-                gOtVodPausedForRoom = false;
-                break;
-            }
-        }
-
-        if (n == kOTNoDataErr) {
-            gOtVodPausedForRoom = false;
-            if (gOtVodNeedLook) {
-                OTResult look;
-                gOtVodNeedLook = false;
-                look = OTLook(gOtVodEp);
-                if (look == T_ORDREL) {
-                    OTRcvOrderlyDisconnect(gOtVodEp);
-                    gTcpRemoteEof = true;
-                } else if (look == T_DISCONNECT) {
-                    OTRcvDisconnect(gOtVodEp, NULL);
-                    gTcpRemoteEof = true;
-                    if (!gVodAckReceived) {
-                        gVodOpenStatus = NF_OPEN_ERROR;
-                    }
-                }
-            }
-            break;
-        } else if (n == kOTLookErr) {
-            OTResult look;
-            gOtVodNeedLook = false;
-            look = OTLook(gOtVodEp);
-            if (look == T_ORDREL) {
-                OTRcvOrderlyDisconnect(gOtVodEp);
-                gTcpRemoteEof = true;
-                break;
-            } else if (look == T_DISCONNECT) {
-                OTRcvDisconnect(gOtVodEp, NULL);
-                gTcpRemoteEof = true;
-                if (!gVodAckReceived) {
-                    gVodOpenStatus = NF_OPEN_ERROR;
-                }
-                break;
-            } else {
-                gOtVodHasData = true;
-                continue;
-            }
-        } else {
-            gLastTcpErr = (OSErr)n;
-            gTcpRemoteEof = true;
-            if (!gVodAckReceived) {
-                gVodOpenStatus = NF_OPEN_ERROR;
-            }
-            break;
-        }
-    }
-
-    if (gOtVodNeedLook && !gTcpRemoteEof) {
-        OTResult look;
-        gOtVodNeedLook = false;
-        look = OTLook(gOtVodEp);
-        if (look == T_ORDREL) {
-            if (RingCanQueueMore()) {
-                OTRcvOrderlyDisconnect(gOtVodEp);
-                gTcpRemoteEof = true;
-            } else {
-                /* Wait to consume orderly release until queued T_DATA has drained cleanly */
-                gOtVodNeedLook = true;
-            }
-        } else if (look == T_DISCONNECT) {
-            OTRcvDisconnect(gOtVodEp, NULL);
-            gTcpRemoteEof = true;
-            if (!gVodAckReceived) {
-                gVodOpenStatus = NF_OPEN_ERROR;
-            }
-        }
-    }
-
-    if (gTcpRemoteEof && gVodAckReceived && !gVodEosReached) {
-        if (gArenaAvailToParse < 8UL && gOtPendingHead == NULL) {
-            gVodEosReached = true;
-        }
-    }
-    if (gTcpRemoteEof && !gVodAckReceived && gVodOpenStatus == NF_OPEN_OK) {
-        gVodOpenStatus = NF_OPEN_ERROR;
-        gVodEosReached = true;
-    }
 }
 
 static Boolean StartOtVodConnection(unsigned long startFrame) {
@@ -2673,142 +2377,6 @@ static Boolean StartOtVodConnection(unsigned long startFrame) {
     }
 
     return true;
-}
-
-static void OtVodPump(void) {
-    OSStatus err;
-
-    if (gTcpConnState == kVodTcpOpening) {
-        EndpointRef ep;
-        if (!gOtVodOpenDone) return;
-
-        ep = (EndpointRef)gOtVodOpenEp;
-        gOtVodOpenEp = kOTInvalidEndpointRef;
-        if (gOtVodOpenErr != noErr || ep == kOTInvalidEndpointRef) {
-            if (ep != kOTInvalidEndpointRef) {
-                OtCloseEndpointSync(ep);
-            }
-            OtVodFailClosed((OSErr)(gOtVodOpenErr ? gOtVodOpenErr : -23016));
-            return;
-        }
-        gOtVodEp = ep;
-
-        OTSetSynchronous(ep);
-        err = OTBind(ep, NULL, NULL);
-        if (err != noErr) {
-            OtCloseVodStream();
-            OtVodFailClosed((OSErr)err);
-            return;
-        }
-        OtSetFourByteOption(ep, INET_TCP, TCP_NODELAY, T_YES);
-        OtSetFourByteOption(ep, XTI_GENERIC, XTI_RCVBUF, TCP_VOD_CREATE_MAX);
-
-        OTSetAsynchronous(ep);
-        OTSetNonBlocking(ep);
-
-        OTInitInetAddress(&gOtVodCallAddr, gServerHttpPort, gServerIP);
-        memset(&gOtVodCall, 0, sizeof(gOtVodCall));
-        gOtVodCall.addr.buf = (UInt8 *)&gOtVodCallAddr;
-        gOtVodCall.addr.len = sizeof(gOtVodCallAddr);
-
-        gOtVodConnectDone = false;
-        err = OTConnect(ep, &gOtVodCall, NULL);
-        if (err == noErr) {
-            gTcpConnState = kVodTcpSending;
-        } else if (err == kOTNoDataErr) {
-            gTcpConnState = kVodTcpConnecting;
-            return;
-        } else if (err == kOTLookErr) {
-            OTResult look = OTLook(ep);
-            if (look == T_CONNECT && OTRcvConnect(ep, NULL) == noErr) {
-                gTcpConnState = kVodTcpSending;
-            } else {
-                if (look == T_DISCONNECT) {
-                    OTRcvDisconnect(ep, NULL);
-                }
-                OtCloseVodStream();
-                OtVodFailClosed(connectionTerminated);
-                return;
-            }
-        } else {
-            OtCloseVodStream();
-            OtVodFailClosed((OSErr)err);
-            return;
-        }
-    }
-
-    if (gTcpConnState == kVodTcpConnecting) {
-        OTResult look;
-        if (gOtVodEp == kOTInvalidEndpointRef) return;
-        if (!gOtVodConnectDone) {
-            look = OTLook(gOtVodEp);
-            if (look != T_CONNECT && look != T_DISCONNECT) {
-                return;
-            }
-            gOtVodConnectDone = true;
-        }
-        err = OTRcvConnect(gOtVodEp, NULL);
-        if (err == noErr) {
-            gTcpConnState = kVodTcpSending;
-        } else if (err == kOTNoDataErr) {
-            gOtVodConnectDone = false;
-            return;
-        } else {
-            if (err == kOTLookErr && OTLook(gOtVodEp) == T_DISCONNECT) {
-                OTRcvDisconnect(gOtVodEp, NULL);
-            }
-            OtCloseVodStream();
-            OtVodFailClosed((OSErr)err);
-            return;
-        }
-    }
-
-    if (gTcpConnState == kVodTcpSending) {
-        if (gOtVodEp == kOTInvalidEndpointRef) return;
-        while (gOtVodSendOff < gOtVodSendLen) {
-            OTResult n = OTSnd(gOtVodEp,
-                               gVodHttpReq + gOtVodSendOff,
-                               (OTByteCount)(gOtVodSendLen - gOtVodSendOff),
-                               0);
-            if (n > 0) {
-                gOtVodSendOff = (unsigned short)(gOtVodSendOff + (unsigned short)n);
-            } else if (n == kOTFlowErr || n == kOTNoDataErr) {
-                gOtVodGoData = false;
-                return;
-            } else if (n == kOTLookErr) {
-                OTResult look = OTLook(gOtVodEp);
-                if (look == T_DISCONNECT) {
-                    OTRcvDisconnect(gOtVodEp, NULL);
-                    OtCloseVodStream();
-                    OtVodFailClosed(connectionTerminated);
-                    return;
-                } else if (look == T_GODATA) {
-                    gOtVodGoData = false;
-                } else {
-                    break;
-                }
-            } else {
-                OtCloseVodStream();
-                OtVodFailClosed((OSErr)n);
-                return;
-            }
-        }
-        gTcpConnState = kVodTcpStreaming;
-        gOtVodHasData = true;
-    }
-
-    if (gTcpConnState != kVodTcpStreaming) return;
-
-    ReapIrqCompletedFrames();
-
-    if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
-        ScanArenaFrames();
-    }
-
-    if (gOtPendingHead != NULL || gOtVodHasData || gOtVodNeedLook ||
-        (gOtVodPausedForRoom && RingCanQueueMore())) {
-        OtDrainIncoming();
-    }
 }
 
 static Boolean OtVodNeedsFastPump(void) {
@@ -2873,143 +2441,7 @@ void NetVodClose(void) {
 }
 
 void NetVodPump(void) {
-    int budget = 8;
-
-    if (!gVodActive) return;
-
-    if (gUseNativeOT) {
-        OtVodPump();
-        return;
-    }
-
-    if (gVodTcpStream == 0) return;
-
-    if (gTcpConnState == kVodTcpOpening) {
-        if (gVodOpenPB.ioResult == 1) return;
-        if (gVodOpenPB.ioResult != noErr) {
-            gLastTcpErr    = gVodOpenPB.ioResult;
-            gVodOpenStatus = NF_OPEN_ERROR;
-            gTcpRemoteEof  = true;
-            gVodEosReached = true;
-            gTcpConnState  = kVodTcpClosed;
-            return;
-        }
-
-        gVodWds[0].length = (unsigned short)strlen(gVodHttpReq);
-        gVodWds[0].ptr    = gVodHttpReq;
-        gVodWds[1].length = 0;
-        gVodWds[1].ptr    = NULL;
-
-        memset(&gVodSendPB, 0, sizeof(gVodSendPB));
-        gVodSendPB.ioCompletion = NULL;
-        gVodSendPB.ioCRefNum = gMacTCPRef;
-        gVodSendPB.csCode = TCPSend;
-        gVodSendPB.tcpStream = gVodTcpStream;
-        gVodSendPB.csParam.send.ulpTimeoutValue = 3;
-        gVodSendPB.csParam.send.ulpTimeoutAction = 1;
-        gVodSendPB.csParam.send.validityFlags = timeoutValue | timeoutAction;
-        gVodSendPB.csParam.send.pushFlag = true;
-        gVodSendPB.csParam.send.urgentFlag = false;
-        gVodSendPB.csParam.send.wdsPtr = (Ptr)gVodWds;
-
-        if (PBControlAsync((ParmBlkPtr)&gVodSendPB) != noErr) {
-            gVodOpenStatus = NF_OPEN_ERROR;
-            gTcpRemoteEof  = true;
-            gVodEosReached = true;
-            gTcpConnState  = kVodTcpClosed;
-            return;
-        }
-        gTcpConnState = kVodTcpSending;
-    }
-
-    if (gTcpConnState == kVodTcpSending) {
-        if (gVodSendPB.ioResult == 1) return;
-        if (gVodSendPB.ioResult != noErr) {
-            gLastTcpErr    = gVodSendPB.ioResult;
-            gVodOpenStatus = NF_OPEN_ERROR;
-            gTcpRemoteEof  = true;
-            gVodEosReached = true;
-            gTcpConnState  = kVodTcpClosed;
-            return;
-        }
-        gTcpConnState = kVodTcpStreaming;
-        ArmTcpRecv();
-    }
-
-    if (gTcpConnState != kVodTcpStreaming) return;
-
-    ReapIrqCompletedFrames();
-
-    if (!gTcpRxArmed[0] && !gTcpRxArmed[1] && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
-        ArmTcpRecvSlot((short)(gTcpRxActiveSlot ^ 1));
-    }
-
-    if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
-        ScanArenaFrames();
-    }
-
-    while (budget-- > 0) {
-        short cur = gTcpRxActiveSlot;
-        if (gTcpRxArmed[cur] && gVodRxPB[cur].ioResult != 1) {
-            OSErr res = gVodRxPB[cur].ioResult;
-            unsigned short got = (res == noErr || res == connectionClosing)
-                ? gVodRxPB[cur].csParam.receive.rcvBuffLen
-                : 0;
-            short nextSlot = (short)(cur ^ 1);
-            gTcpRxArmed[cur] = false;
-
-            if (res == connectionClosing) {
-                gTcpRemoteEof = true;
-            } else if (res != noErr && res != -23016) {
-                gLastTcpErr   = res;
-                gTcpRemoteEof = true;
-                if (!gVodAckReceived) {
-                    gVodOpenStatus = NF_OPEN_ERROR;
-                }
-            }
-
-            if (got > 0) {
-                if (gParsePhase != kParseFrames) {
-                    gArenaWrite += (unsigned long)got;
-                    ParseInitialHandshake();
-                    if (!gTcpRemoteEof && (res == noErr || res == -23016) && RingCanQueueMore()) {
-                        ArmTcpRecvSlot(nextSlot);
-                    }
-                } else {
-                    gArenaWrite += (unsigned long)got;
-                    if (gArenaWrite >= gArenaCap) {
-                        gArenaWrite -= gArenaCap;
-                    }
-                    gArenaUsed         += (unsigned long)got;
-                    gArenaAvailToParse += (unsigned long)got;
-
-                    /* Immediately post alternating PB before CPU-side ScanArenaFrames work */
-                    if (!gTcpRemoteEof && (res == noErr || res == -23016) && RingCanQueueMore()) {
-                        ArmTcpRecvSlot(nextSlot);
-                    }
-                    ScanArenaFrames();
-                }
-            } else if (!gTcpRemoteEof && (res == noErr || res == -23016) && RingCanQueueMore()) {
-                ArmTcpRecvSlot(nextSlot);
-            }
-
-            if (gTcpRemoteEof && gVodAckReceived && !gVodEosReached) {
-                if (gArenaAvailToParse < 8UL) {
-                    gVodEosReached = true;
-                }
-            }
-            if (gTcpRemoteEof && !gVodAckReceived && gVodOpenStatus == NF_OPEN_OK) {
-                gVodOpenStatus = NF_OPEN_ERROR;
-                gVodEosReached = true;
-            }
-        } else {
-            break;
-        }
-    }
-
-    if (!gTcpRxArmed[0] && !gTcpRxArmed[1] && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
-        ArmTcpRecvSlot((short)(gTcpRxActiveSlot ^ 1));
-    }
+    gVodPumpFn();
 }
 
 void NetVodSeek(unsigned long targetFrame) {
@@ -3042,75 +2474,24 @@ Boolean NetVodNeedsFastPump(void) {
     return (gBufferedCount < 16);
 }
 
-const unsigned char *NetVodPeekNextFrameEx(unsigned short *outBytes, unsigned long *outFrameIdx, unsigned char *outFlags) {
-    VodFrameDesc *d;
-    if (!gVodActive || !gVodAckReceived || gRingNumSlots <= 0) return NULL;
-    if (gVodFrameCount > 0 && gNextNeededFrame >= gVodFrameCount) return NULL;
-
-    d = &gDescRing[gNextNeededFrame % NF_INDEX_SLOTS];
-    if (!d->ready || d->frameIdx != gNextNeededFrame) {
-        return NULL;
-    }
-
-    if (outBytes) *outBytes = d->payloadLen;
-    if (outFrameIdx) *outFrameIdx = d->frameIdx;
-    if (outFlags) *outFlags = d->flags;
-    return d->dataPtr;
-}
-
-const unsigned char *NetVodPeekNextFrame(unsigned short *outBytes, unsigned long *outFrameIdx) {
-    return NetVodPeekNextFrameEx(outBytes, outFrameIdx, NULL);
+const NetVodFrameDesc *NetVodPeekNextSlot(void) {
+    return gVodPeekNextSlotFn();
 }
 
 void NetVodConsumeNextFrame(void) {
-    VodFrameDesc *d;
-    if (!gVodActive || gRingNumSlots <= 0) return;
-
-    d = &gDescRing[gNextNeededFrame % NF_INDEX_SLOTS];
-    if (d->ready && d->frameIdx == gNextNeededFrame) {
-        if (gArenaUsed >= d->recordBytes) gArenaUsed -= d->recordBytes;
-        else gArenaUsed = 0;
-        d->ready = false;
-        if (gBufferedCount > 0) gBufferedCount--;
-    }
-    gNextNeededFrame++;
-    if (gReclaimCursor < gNextNeededFrame) {
-        gReclaimCursor = gNextNeededFrame;
-    }
-    if (gIrqCompletedUpTo < gNextNeededFrame) {
-        gIrqCompletedUpTo = gNextNeededFrame;
-    }
-
-    if (gParsePhase == kParseFrames && gArenaAvailToParse >= 8UL && gBufferedCount < gRingNumSlots) {
-        ScanArenaFrames();
-    }
-    if (gUseNativeOT) {
-        if ((gOtPendingHead != NULL || gOtVodHasData || gOtVodNeedLook || gOtVodPausedForRoom) &&
-            !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
-            OtDrainIncoming();
-        }
-    } else if (!gTcpRxArmed[0] && !gTcpRxArmed[1] && !gTcpRemoteEof && !gVodEosReached && RingCanQueueMore()) {
-        ArmTcpRecv();
-    }
+    gVodConsumeFn();
 }
 
-const unsigned char *NetVodIrqPeekFrame(unsigned long frameIdx, unsigned short *outBytes, unsigned char *outFlags) {
-    VodFrameDesc *d;
-    if (!gVodActive || !gVodAckReceived || gRingNumSlots <= 0) return NULL;
-    if (gVodFrameCount > 0 && frameIdx >= gVodFrameCount) return NULL;
-
-    d = &gDescRing[frameIdx % NF_INDEX_SLOTS];
-    if (!d->ready || d->frameIdx != frameIdx) {
-        return NULL;
-    }
-
-    if (outBytes) *outBytes = d->payloadLen;
-    if (outFlags) *outFlags = d->flags;
-    return d->dataPtr;
+const NetVodFrameDesc *NetVodIrqPeekSlot(unsigned long frameIdx) {
+    return gVodIrqPeekSlotFn(frameIdx);
 }
 
 void NetVodIrqSetCompletedUpTo(unsigned long completedUpTo) {
     gIrqCompletedUpTo = completedUpTo;
+}
+
+short NetVodGetBufferedReady(void) {
+    return gBufferedCount;
 }
 
 void NetVodGetInfo(NetVodInfo *outInfo) {

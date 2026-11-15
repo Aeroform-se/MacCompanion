@@ -513,8 +513,8 @@ function createNetflimModule(opts = {}) {
     const STEADY_BATCH_BYTES = 10240;
     const STEADY_TARGET_TICKS = 5; // ~83ms of video per trickle cycle (2-4 frames @ 25-30fps)
     const STEADY_BATCH_FRAMES = 4;
-    const MAX_WIRE_SLICE_BYTES = 8760; // <= 6x 1460B MSS segments per socket write
-    const SUBSLICE_DELAY_MS = 8;
+    const MAX_WIRE_SLICE_BYTES = 2920; // <= 2x 1460B MSS segments per socket write
+    const SUBSLICE_DELAY_MS = 5;
 
     let closed = false;
     let sentHeader = false;
@@ -522,6 +522,18 @@ function createNetflimModule(opts = {}) {
     let emittedTicks = 0;
     let paceTimer = null;
     let nextBatchAtMs = 0;
+
+    let frameReadScratch = Buffer.allocUnsafe(Math.max(32768, maxBytes));
+    const slabInitSize = Math.max(49152, maxBytes + STEADY_BATCH_BYTES + 256);
+    const batchSlabs = [Buffer.allocUnsafe(slabInitSize), Buffer.allocUnsafe(slabInitSize)];
+    let batchSlabIdx = 0;
+
+    const ensureBatchSlab = (idx, minBytes) => {
+      if (batchSlabs[idx].length >= minBytes) return batchSlabs[idx];
+      const grown = Buffer.allocUnsafe(Math.max(minBytes, batchSlabs[idx].length * 2));
+      batchSlabs[idx] = grown;
+      return grown;
+    };
 
     const cleanup = () => {
       if (closed) return;
@@ -616,14 +628,17 @@ function createNetflimModule(opts = {}) {
     const pumpBatch = () => {
       if (closed) return;
       try {
-        const chunks = [];
-        let queued = 0;
+        const slabIdx = batchSlabIdx;
+        batchSlabIdx ^= 1;
+        let outBuf = batchSlabs[slabIdx];
+        let outPos = 0;
         let batchTicks = 0;
         let batchFrames = 0;
 
         if (!sentHeader) {
-          chunks.push(hdr);
-          queued += hdr.length;
+          outBuf = ensureBatchSlab(slabIdx, hdr.length + 16);
+          hdr.copy(outBuf, 0);
+          outPos = hdr.length;
           sentHeader = true;
         }
 
@@ -640,13 +655,15 @@ function createNetflimModule(opts = {}) {
 
         while (nextFrame < toc.frames.length) {
           if (batchFrames > 0 &&
-              (batchFrames >= maxBatchFrames || queued >= maxBatchBytes || batchTicks >= targetBatchTicks)) {
+              (batchFrames >= maxBatchFrames || outPos >= maxBatchBytes || batchTicks >= targetBatchTicks)) {
             break;
           }
           const meta = toc.frames[nextFrame];
-          const raw = Buffer.allocUnsafe(meta.size);
-          const bytesRead = fs.readSync(fd, raw, 0, meta.size, meta.offset);
-          const rawSlice = bytesRead < meta.size ? raw.subarray(0, bytesRead) : raw;
+          if (frameReadScratch.length < meta.size) {
+            frameReadScratch = Buffer.allocUnsafe(meta.size);
+          }
+          const bytesRead = fs.readSync(fd, frameReadScratch, 0, meta.size, meta.offset);
+          const rawSlice = frameReadScratch.subarray(0, bytesRead);
           let payload = stripAudio
             ? stripFrameAudio(rawSlice)
             : (halfAudio ? downsampleFrameAudio11k(rawSlice) : rawSlice);
@@ -677,25 +694,32 @@ function createNetflimModule(opts = {}) {
             ? ((midPad ? 0x0400 : 0) | ((prePad & 3) << 8) | (postPad & 3))
             : postPad;
 
-          const fHdr = Buffer.allocUnsafe(8);
-          fHdr.writeUInt32BE(nextFrame >>> 0, 0);
-          fHdr.writeUInt16BE(wirePayloadLen & 0xffff, 4);
-          fHdr.writeUInt16BE(padWord & 0xffff, 6);
+          const recLen = 8 + prePad + wirePayloadLen + postPad;
+          outBuf = ensureBatchSlab(slabIdx, outPos + recLen + 8);
+          outBuf.writeUInt32BE(nextFrame >>> 0, outPos);
+          outBuf.writeUInt16BE(wirePayloadLen & 0xffff, outPos + 4);
+          outBuf.writeUInt16BE(padWord & 0xffff, outPos + 6);
+          outPos += 8;
 
           if (prePad > 0) {
-            chunks.push(fHdr, ZERO_PAD.subarray(0, prePad));
-          } else {
-            chunks.push(fHdr);
+            outBuf.fill(0, outPos, outPos + prePad);
+            outPos += prePad;
           }
           if (midPad > 0) {
-            chunks.push(payload.subarray(0, vidOff), ZERO_PAD.subarray(0, 1), payload.subarray(vidOff));
+            payload.copy(outBuf, outPos, 0, vidOff);
+            outPos += vidOff;
+            outBuf[outPos++] = 0;
+            payload.copy(outBuf, outPos, vidOff, payload.length);
+            outPos += payload.length - vidOff;
           } else {
-            chunks.push(payload);
+            payload.copy(outBuf, outPos, 0, payload.length);
+            outPos += payload.length;
           }
           if (postPad > 0) {
-            chunks.push(ZERO_PAD.subarray(0, postPad));
+            outBuf.fill(0, outPos, outPos + postPad);
+            outPos += postPad;
           }
-          queued += 8 + prePad + wirePayloadLen + postPad;
+
           batchTicks += frameTicks;
           emittedTicks += frameTicks;
           batchFrames++;
@@ -704,15 +728,14 @@ function createNetflimModule(opts = {}) {
 
         const isEos = nextFrame >= toc.frames.length;
         if (isEos) {
-          const eos = Buffer.alloc(8);
-          eos.writeUInt32BE(toc.frames.length >>> 0, 0);
-          eos.writeUInt16BE(0xffff, 4);
-          eos.writeUInt16BE(0, 6);
-          chunks.push(eos);
+          outBuf = ensureBatchSlab(slabIdx, outPos + 8);
+          outBuf.writeUInt32BE(toc.frames.length >>> 0, outPos);
+          outBuf.writeUInt16BE(0xffff, outPos + 4);
+          outBuf.writeUInt16BE(0, outPos + 6);
+          outPos += 8;
         }
 
-        const batchBuf = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks);
-        emitBatchBuffer(batchBuf, batchTicks, isEos);
+        emitBatchBuffer(outBuf.subarray(0, outPos), batchTicks, isEos);
       } catch {
         cleanup();
         try {
