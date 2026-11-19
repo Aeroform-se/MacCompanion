@@ -1,5 +1,5 @@
 const express = require('express');
-const { createModuleStore } = require('../../core/storage');
+const { createModuleStore, isSpotifyDebugEnabled } = require('../../core/storage');
 const { hasRenderableLatinText, sanitizeField, formatPipeRow, formatPipeTable, sendPipeResponse } = require('../../core/format68k');
 const {
   generateCodeVerifier,
@@ -23,6 +23,25 @@ const router = express.Router();
 
 const DEFAULT_REDIRECT_URI = 'https://aeroform-se.github.io/MacCompanion/callback.html';
 const TOKEN_EXPIRY_BUFFER_MS = 2 * 60 * 1000; // Refresh 2 minutes before expiry
+
+function debugSpotify(tag, message, extra) {
+  if (!isSpotifyDebugEnabled()) return;
+  if (extra !== undefined) {
+    console.log(`[Spotify:Debug][${tag}] ${message}`, extra);
+  } else {
+    console.log(`[Spotify:Debug][${tag}] ${message}`);
+  }
+}
+
+function summarizeSpotifyBody(body) {
+  if (!body) return 'none';
+  if (Array.isArray(body.uris)) {
+    const first = body.uris[0] || '';
+    const off = body.offset ? JSON.stringify(body.offset) : '';
+    return `uris[${body.uris.length}](${first}${body.uris.length > 1 ? '...' : ''}) offset=${off}`;
+  }
+  return JSON.stringify(body);
+}
 
 // Persistent store mounted in ./data/spotify.json
 const store = createModuleStore('spotify', {
@@ -166,11 +185,33 @@ async function getValidAccessToken() {
  */
 async function callSpotify(endpoint, options = {}) {
   const accessToken = await getValidAccessToken();
-  return spotifyFetch(endpoint, {
-    ...options,
-    accessToken,
-    fetchImpl: getFetchImpl(),
-  });
+  const method = (options.method || 'GET').toUpperCase();
+  const isPlayerCmd = endpoint.startsWith('/me/player') && method !== 'GET';
+  const t0 = Date.now();
+  if (isPlayerCmd && !customFetch) {
+    const qStr = options.query ? ` query=${JSON.stringify(options.query)}` : '';
+    debugSpotify('WebAPI', `-> ${method} ${endpoint}${qStr} body=${summarizeSpotifyBody(options.body)}`);
+  }
+  try {
+    const out = await spotifyFetch(endpoint, {
+      ...options,
+      accessToken,
+      fetchImpl: getFetchImpl(),
+    });
+    if (isPlayerCmd && !customFetch) {
+      debugSpotify('WebAPI', `<- OK ${method} ${endpoint} (${Date.now() - t0}ms)`);
+    }
+    return out;
+  } catch (err) {
+    if (!customFetch) {
+      debugSpotify(
+        'WebAPI',
+        `<- ERR ${method} ${endpoint} status=${err.status || '?'} (${Date.now() - t0}ms) msg=${err.message}`,
+        err.details || undefined
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -184,9 +225,14 @@ async function callPlayerCommand(endpoint, options = {}) {
     return await callSpotify(endpoint, options);
   } catch (err) {
     if ((err.status === 404 || err.status === 502 || err.status === 504) && !(options.query && options.query.device_id)) {
+      debugSpotify('PlayerCmd', `Retrying ${endpoint} after HTTP ${err.status} (${err.message})`);
       try {
         const devData = await callSpotify('/me/player/devices');
         const devices = (devData && Array.isArray(devData.devices)) ? devData.devices : [];
+        if (!customFetch) {
+          const summary = devices.map((d) => `${d.name}(${d.is_active ? 'active' : 'idle'})`).join(', ');
+          debugSpotify('PlayerCmd', `Devices: [${summary || 'none'}]`);
+        }
         const saved = store.load();
         const savedId = saved && saved.lastSpeakerId ? String(saved.lastSpeakerId) : '';
         const savedName = saved && saved.lastSpeakerName ? String(saved.lastSpeakerName).toLowerCase() : '';
@@ -199,6 +245,7 @@ async function callPlayerCommand(endpoint, options = {}) {
           devices.find((d) => d.name && audioEngine.isLibrespotDeviceName(d.name) && d.id) ||
           devices.find((d) => d.id);
         if (target && target.id) {
+          debugSpotify('PlayerCmd', `Resolved fallback target="${target.name}" id=${target.id} is_active=${target.is_active}`);
           // If no device was active and this isn't `/me/player/play`, wake the device first
           if (!target.is_active && endpoint !== '/me/player/play') {
             await callSpotify('/me/player', {
@@ -993,12 +1040,26 @@ audioEngine.on('trackChange', () => {
   }, 500);
 });
 
+let lastLoggedCloudSig = '';
+
+function logCloudStateTransition(raw) {
+  if (!isSpotifyDebugEnabled() || customFetch) return;
+  const sig = raw && raw.item
+    ? `${raw.is_playing ? '1' : '0'}|${raw.item.id || ''}|${raw.item.name || ''}|${(raw.device && raw.device.name) || ''}|${(raw.context && raw.context.uri) || ''}`
+    : `NONE|${(raw && raw.device && raw.device.name) || ''}`;
+  if (sig !== lastLoggedCloudSig) {
+    lastLoggedCloudSig = sig;
+    debugSpotify('CloudState', sig);
+  }
+}
+
 async function refreshNowPlayingCache() {
   if (nowPlayingCache.refreshInFlight) return;
   nowPlayingCache.refreshInFlight = true;
   try {
     const raw = await callSpotify('/me/player');
     const playerFetchedAt = Date.now();
+    logCloudStateTransition(raw);
     syncActiveSpeakerFromCloud(raw);
     let isLiked = false;
     if (raw && raw.item && raw.item.id) {
@@ -1055,6 +1116,7 @@ async function getFastNormalizedNowPlaying() {
   } else {
     raw = await callSpotify('/me/player');
     const playerFetchedAt = Date.now();
+    logCloudStateTransition(raw);
     syncActiveSpeakerFromCloud(raw);
     if (raw && raw.item && raw.item.id) {
       prewarmCurrentAndNextTrackArtwork(raw.item);
@@ -1303,6 +1365,9 @@ router.all('/play', async (req, res) => {
     optimisticState.isPlaying = true;
     optimisticState.isPlayingTs = Date.now();
     audioHub.onSpotifyResume();
+    if (!customFetch) {
+      debugSpotify('Route:/play', `req context_uri=${contextUri || '-'} offset_uri=${offsetUri || '-'} uri=${uri || '-'} deviceId=${deviceId || '-'} -> ${summarizeSpotifyBody(body)}`);
+    }
     try {
       await callPlayerCommand('/me/player/play', {
         method: 'PUT',
@@ -1318,6 +1383,7 @@ router.all('/play', async (req, res) => {
             : { position: 0 },
         };
         if (body.position_ms !== undefined) fallbackBody.position_ms = body.position_ms;
+        debugSpotify('Route:/play', `context_uri failed (${playErr.status} ${playErr.message}), retrying uris fallback: ${summarizeSpotifyBody(fallbackBody)}`);
         await callPlayerCommand('/me/player/play', {
           method: 'PUT',
           query: deviceId ? { device_id: deviceId } : undefined,
@@ -1410,6 +1476,7 @@ router.all('/next', async (req, res) => {
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
     audioHub.onSpotifyResume();
+    if (!customFetch) debugSpotify('Route:/next', 'forwarding to /me/player/next');
     await callPlayerCommand('/me/player/next', { method: 'POST' });
     nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
@@ -1430,6 +1497,7 @@ router.all('/previous', async (req, res) => {
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
     audioHub.onSpotifyResume();
+    if (!customFetch) debugSpotify('Route:/previous', 'forwarding to /me/player/previous');
     await callPlayerCommand('/me/player/previous', { method: 'POST' });
     nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
@@ -2109,6 +2177,9 @@ router.all('/transfer', async (req, res) => {
       throw err;
     }
 
+    if (!customFetch) {
+      debugSpotify('Route:/transfer', `target=${target || '-'} deviceId=${deviceId} name="${deviceName}" startup=${isStartup}`);
+    }
     if (!isStartup) {
       audioHub.onSpotifyResume();
       optimisticState.isPlaying = true;

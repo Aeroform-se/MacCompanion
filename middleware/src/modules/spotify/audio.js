@@ -4,7 +4,7 @@ const path = require('path');
 const { spawn, execSync } = require('child_process');
 const { EventEmitter } = require('events');
 const { Transform } = require('stream');
-const { DATA_DIR } = require('../../core/storage');
+const { DATA_DIR, isSpotifyDebugEnabled } = require('../../core/storage');
 const audioHub = require('../../core/audio-hub');
 const {
   generateCodeVerifier,
@@ -16,6 +16,13 @@ const {
 
 const DEFAULT_AUDIO_TCP_PORT = parseInt(process.env.AUDIO_TCP_PORT || '6802', 10);
 const DEVICE_NAME = process.env.SPOTIFY_DEVICE_NAME || 'Macintosh 68k';
+
+function getLibrespotLogFilter() {
+  if (process.env.LIBRESPOT_LOG) return process.env.LIBRESPOT_LOG;
+  return isSpotifyDebugEnabled()
+    ? 'libmdns=info,librespot=info,librespot_connect=debug,librespot_playback=debug,librespot_core::dealer=debug'
+    : 'libmdns=warn,librespot=info';
+}
 
 // Official librespot OAuth Client ID & Scopes required by Spotify's spirc / Connect dealer
 const LIBRESPOT_CLIENT_ID = '65b708073fc0480ea92a077233ca87bd';
@@ -1048,9 +1055,20 @@ class AudioStreamEngine extends EventEmitter {
       librespotArgs.push('--access-token', speakerToken);
     }
 
-    console.log(`[AudioEngine] Starting librespot ("${receiverName}", mode=${speakerToken ? 'oauth' : authModeKey}) -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
+    const rustLog = getLibrespotLogFilter();
+    const safeArgs = speakerToken
+      ? librespotArgs.map((arg, idx) => (librespotArgs[idx - 1] === '--access-token' ? `<token len=${arg.length}>` : arg))
+      : librespotArgs;
+    console.log(`[AudioEngine] Starting librespot ("${receiverName}", mode=${speakerToken ? 'oauth' : authModeKey}, RUST_LOG="${rustLog}") -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
+    if (isSpotifyDebugEnabled()) {
+      console.log(`[AudioEngine:Debug] librespot args: ${safeArgs.join(' ')}`);
+    }
     const lsProc = spawn('librespot', librespotArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        RUST_LOG: rustLog,
+      },
     });
     this.librespotProc = lsProc;
 
@@ -1073,8 +1091,11 @@ class AudioStreamEngine extends EventEmitter {
       if (typeof t.unref === 'function') t.unref();
     });
 
-    lsProc.stderr.on('data', (data) => {
-      const line = data.toString().trim();
+    let lsStderrBuf = '';
+    const handleLibrespotLine = (rawLine) => {
+      const line = rawLine.trim();
+      if (!line) return;
+
       if (line.includes('Authenticated as') || line.includes('Country:')) {
         this.zeroconfAuthenticated = true;
         this.state = 'READY';
@@ -1099,13 +1120,31 @@ class AudioStreamEngine extends EventEmitter {
           this.clearCachedCredentials();
           this.lastError = 'Speaker credentials rejected by Spotify';
         }
-      } else if (line.includes('ERROR') || line.includes('error')) {
+        return;
+      }
+
+      if (line.includes('ERROR') || line.includes('WARN') || line.includes('error')) {
         console.warn('[AudioEngine:librespot]', line);
+      } else if (isSpotifyDebugEnabled()) {
+        console.log('[AudioEngine:librespot]', line);
+      }
+    };
+
+    lsProc.stderr.on('data', (data) => {
+      lsStderrBuf += data.toString();
+      const lines = lsStderrBuf.split(/\r?\n/);
+      lsStderrBuf = lines.pop() || '';
+      for (const l of lines) {
+        handleLibrespotLine(l);
       }
     });
 
-    lsProc.on('exit', (code) => {
-      console.log(`[AudioEngine] librespot exited with code ${code}`);
+    lsProc.on('exit', (code, signal) => {
+      if (lsStderrBuf.trim()) {
+        handleLibrespotLine(lsStderrBuf);
+        lsStderrBuf = '';
+      }
+      console.log(`[AudioEngine] librespot exited with code ${code}${signal ? ` signal=${signal}` : ''}`);
       if (!authResolved && resolveAuthWait) {
         authResolved = true;
         resolveAuthWait();

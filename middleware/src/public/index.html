@@ -222,6 +222,10 @@
       flex-shrink: 0;
     }
 
+    body:not(.show-netflim) #netflim-card-wrap {
+      display: none;
+    }
+
     /* Standalone #drop view (MacDrop-card only) */
     body.drop-only-mode {
       padding: 16px;
@@ -3291,6 +3295,11 @@
         document.getElementById('server-version').textContent = data.server.version;
         checkGitHubUpdate();
       }
+
+      document.body.classList.toggle(
+        'show-netflim',
+        Boolean(data && data.server && data.server.settings && data.server.settings.showNetflimCard)
+      );
 
       if (data.modules && data.modules.macai) {
         renderMacAI(data.modules.macai);

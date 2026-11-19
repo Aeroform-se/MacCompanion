@@ -58,8 +58,59 @@ function createModuleStore(moduleId, defaultState = {}) {
   };
 }
 
+let runtimeSettingsStore = null;
+let cachedRuntimeSettings = null;
+
+function getRuntimeSettingsStore() {
+  if (!runtimeSettingsStore) {
+    runtimeSettingsStore = createModuleStore('system', {
+      showNetflimCard: false,
+      spotifyDebug: false,
+    });
+  }
+  return runtimeSettingsStore;
+}
+
+/**
+ * Returns persisted runtime feature & debug toggles (both default to false).
+ */
+function getRuntimeSettings() {
+  if (!cachedRuntimeSettings) {
+    const raw = getRuntimeSettingsStore().load();
+    cachedRuntimeSettings = {
+      showNetflimCard: Boolean(raw.showNetflimCard),
+      spotifyDebug: Boolean(raw.spotifyDebug),
+    };
+  }
+  return {
+    showNetflimCard: cachedRuntimeSettings.showNetflimCard,
+    spotifyDebug: cachedRuntimeSettings.spotifyDebug || process.env.SPOTIFY_DEBUG === '1',
+  };
+}
+
+/**
+ * Updates persisted runtime feature & debug toggles atomically.
+ */
+function updateRuntimeSettings(patch = {}) {
+  const cur = getRuntimeSettings();
+  const next = {
+    showNetflimCard: patch.showNetflimCard !== undefined ? Boolean(patch.showNetflimCard) : cur.showNetflimCard,
+    spotifyDebug: patch.spotifyDebug !== undefined ? Boolean(patch.spotifyDebug) : cachedRuntimeSettings.spotifyDebug,
+  };
+  getRuntimeSettingsStore().save(next);
+  cachedRuntimeSettings = next;
+  return getRuntimeSettings();
+}
+
+function isSpotifyDebugEnabled() {
+  return getRuntimeSettings().spotifyDebug;
+}
+
 module.exports = {
   DATA_DIR,
   ensureDataDir,
   createModuleStore,
+  getRuntimeSettings,
+  updateRuntimeSettings,
+  isSpotifyDebugEnabled,
 };

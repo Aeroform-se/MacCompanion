@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const registry = require('./core/registry');
-const { ensureDataDir, DATA_DIR } = require('./core/storage');
+const { ensureDataDir, DATA_DIR, getRuntimeSettings, updateRuntimeSettings } = require('./core/storage');
 const { startDiscoveryServer, getLocalIpAddress, recordObservedHost, DEFAULT_UDP_PORT, DISCOVERY_MAGIC } = require('./core/discovery');
 
 // Service Modules & Versioning
@@ -57,9 +57,41 @@ function createApp() {
         udpPort: UDP_PORT,
         dataDir: DATA_DIR,
         uptimeSeconds: Math.floor(process.uptime()),
+        settings: getRuntimeSettings(),
       },
       modules: registry.getAllStatuses(),
     });
+  });
+
+  // Private runtime feature & debug toggles (exposed in /test.html, both OFF by default)
+  app.get('/api/debug-settings', (req, res) => {
+    res.json({ ok: true, settings: getRuntimeSettings() });
+  });
+
+  app.post('/api/debug-settings', async (req, res) => {
+    try {
+      const prev = getRuntimeSettings();
+      const src = req.body && typeof req.body === 'object' ? req.body : {};
+      const patch = {};
+      if (src.showNetflimCard !== undefined) patch.showNetflimCard = Boolean(src.showNetflimCard);
+      if (src.spotifyDebug !== undefined) patch.spotifyDebug = Boolean(src.spotifyDebug);
+
+      const settings = updateRuntimeSettings(patch);
+      let librespotRestarted = false;
+      if (
+        prev.spotifyDebug !== settings.spotifyDebug &&
+        spotifyModule &&
+        spotifyModule.audioEngine &&
+        (spotifyModule.audioEngine.librespotProc || spotifyModule.audioEngine.isPaired())
+      ) {
+        librespotRestarted = true;
+        spotifyModule.audioEngine.ensureStarted({ forceRestart: true }).catch(() => {});
+      }
+
+      res.json({ ok: true, settings, librespotRestarted });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
   });
 
   // Check latest published container version on GitHub Container Registry (ghcr.io/aeroform-se/maccompanion)
