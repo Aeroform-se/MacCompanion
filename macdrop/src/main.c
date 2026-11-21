@@ -76,9 +76,13 @@ static Boolean   gCompactReceiveMode   = false;
 static Boolean   gAutoOpenedForReceive = false;
 static Boolean   gOpeningModalDialog   = false;
 
-static char      gServerIpInput[32]  = "10.0.2.2";
+static char      gServerIpInput[32]  = "";
 static char      gCachedDownloadPath[160] = "";
 static Boolean   gLastDrawnTransferActive = false;
+static short     gLastBarFillW = -1;
+static short     gLastBarLeft  = 0;
+static short     gLastBarTop   = 0;
+static short     gLastBarWidth = 0;
 
 /* UI Rectangles for hit testing */
 static Rect      gStatusRowRect;
@@ -166,18 +170,39 @@ static void DrawButton(const Rect *r, const char *label, Boolean isDefault)
     DrawCString(label);
 }
 
+static unsigned short ScaleRatio32(unsigned long num, unsigned short scale, unsigned long den)
+{
+    unsigned long n = num;
+    unsigned long d = den;
+    if (d == 0 || n == 0 || scale == 0) return 0;
+    if (n > d) n = d;
+    while (d > 0x0000FFFFUL || n > (0xFFFFFFFFUL / (unsigned long)scale)) {
+        n >>= 4;
+        d >>= 4;
+    }
+    if (d == 0) return scale;
+    return (unsigned short)((n * (unsigned long)scale) / d);
+}
+
 static void DrawProgressBar(short left, short top, short width, short height, unsigned long current, unsigned long total)
 {
     Rect barR, fillR;
     short fillW = 0;
 
+    if (total > 0 && current > 0 && width > 4) {
+        fillW = (short)ScaleRatio32(current, (unsigned short)(width - 4), total);
+    }
+
+    if (gLastBarFillW == fillW && gLastBarLeft == left && gLastBarTop == top && gLastBarWidth == width) {
+        return;
+    }
+    gLastBarLeft  = left;
+    gLastBarTop   = top;
+    gLastBarWidth = width;
+    gLastBarFillW = fillW;
+
     SetRect(&barR, left, top, left + width, top + height);
     FrameRoundRect(&barR, 6, 6);
-
-    if (total > 0 && current > 0) {
-        if (current > total) current = total;
-        fillW = (short)(((unsigned long long)(width - 4) * current) / total);
-    }
 
     if (fillW > 0) {
         SetRect(&fillR, left + 2, top + 2, left + 2 + fillW, top + height - 2);
@@ -210,6 +235,9 @@ static void RefreshCachedDownloadPath(void)
 
 static void PrepareServerIpInput(void)
 {
+    if (gOurIP == 0) {
+        NetRefreshOurIP();
+    }
     if (gServerIP != 0) {
         FormatIP(gServerIP, gServerIpInput);
     } else if (gSavedServerIP != 0) {
@@ -219,7 +247,7 @@ static void PrepareServerIpInput(void)
         unsigned char b1 = (unsigned char)((gOurIP >> 16) & 0xFF);
         unsigned char b2 = (unsigned char)((gOurIP >> 8)  & 0xFF);
         snprintf(gServerIpInput, sizeof(gServerIpInput), "%u.%u.%u.", b0, b1, b2);
-    } else if (gServerIpInput[0] == '\0') {
+    } else if ((gOurIP & 0xFFFFFF00UL) == 0x0A000200UL && gServerIpInput[0] == '\0') {
         strcpy(gServerIpInput, "10.0.2.2");
     }
 }
@@ -233,6 +261,7 @@ static void SetCompactReceiveWindowMode(Boolean compact)
             SetWTitle(gWindow, "\pIncoming file - MacDrop");
             SizeWindow(gWindow, MAIN_WIN_WIDTH, COMPACT_WIN_HEIGHT, true);
             gLastDrawnTransferActive = false;
+            gLastBarFillW = -1;
         }
     } else {
         if (gCompactReceiveMode) {
@@ -240,6 +269,7 @@ static void SetCompactReceiveWindowMode(Boolean compact)
             SetWTitle(gWindow, "\pMacDrop");
             SizeWindow(gWindow, MAIN_WIN_WIDTH, MAIN_WIN_HEIGHT, true);
             gLastDrawnTransferActive = false;
+            gLastBarFillW = -1;
         }
     }
 }
@@ -277,7 +307,7 @@ static void DrawTransferProgressOnly(void)
 
     MoveTo(16, y);
     if (gActiveTransferTotal > 0) {
-        unsigned short pct = (unsigned short)(((unsigned long long)gActiveTransferBytes * 100) / gActiveTransferTotal);
+        unsigned short pct = ScaleRatio32(gActiveTransferBytes, 100, gActiveTransferTotal);
         if (gTransferSpeedBps >= 1024) {
             sprintf(buf, "%s / %s (%u%%) - %lu.%lu kB/s", curStr, totStr, pct,
                     gTransferSpeedBps / 1024, (gTransferSpeedBps % 1024) * 10 / 1024);
@@ -290,34 +320,47 @@ static void DrawTransferProgressOnly(void)
     DrawCString(buf);
 }
 
+static void HideAutoOpenedReceiveWindow(void)
+{
+    ProcessSerialNumber frontPSN;
+    Boolean isFront = false;
+
+    gAutoOpenedForReceive = false;
+    if (gWindow && IsWindowVisible(gWindow)) {
+        HideWindow(gWindow);
+    }
+    SetCompactReceiveWindowMode(false);
+    if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
+        GetFrontProcess(&frontPSN);
+        SameProcess(&gMacDropPSN, &frontPSN, &isFront);
+        if (isFront) {
+            SwitchToFinder();
+        }
+    } else {
+        gWasHiddenBeforeNotify = true;
+    }
+    SyncSharedData();
+    UpdateMenuStates();
+}
+
 void UpdateProgressUI(void)
 {
     if (gTransferActive && !gTransferIsUpload) {
         if (!gWindow) return;
         if (!IsWindowVisible(gWindow)) {
+            /* Show compact progress window immediately without blocking in a MultiFinder WaitNextEvent loop mid-burst */
             gAutoOpenedForReceive = true;
             SetCompactReceiveWindowMode(true);
-            EnsureFrontProcess();
             ShowWindow(gWindow);
             SelectWindow(gWindow);
             SetPortWindowPort(gWindow);
-            DrawMenuBar();
+            DrawWindow();
             SyncSharedData();
             UpdateMenuStates();
+            return;
         }
     } else if (!gTransferActive && gAutoOpenedForReceive) {
-        gAutoOpenedForReceive = false;
-        if (gWindow && IsWindowVisible(gWindow)) {
-            HideWindow(gWindow);
-        }
-        SetCompactReceiveWindowMode(false);
-        if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
-            SwitchToFinder();
-        } else {
-            gWasHiddenBeforeNotify = true;
-        }
-        SyncSharedData();
-        UpdateMenuStates();
+        HideAutoOpenedReceiveWindow();
         return;
     }
 
@@ -405,19 +448,29 @@ static pascal OSErr MyDragReceiveHandler(WindowRef theWindow, void *handlerRefCo
     if (err != noErr || numItems == 0) return dragNotAcceptedErr;
 
     SetPortWindowPort(gWindow);
-    GetMouse(&localPt);
+    if (GetDragMouse(theDrag, &localPt, NULL) == noErr) {
+        GlobalToLocal(&localPt);
+    } else {
+        GetMouse(&localPt);
+    }
     targetIdx = FindTargetCardAtPoint(localPt);
     if (targetIdx < 0 && gDragHoverTargetIdx >= 0 && gDragHoverTargetIdx < gTargetCardCount) {
         targetIdx = gDragHoverTargetIdx;
     }
     gDragHoverTargetIdx = -1;
 
-    if (targetIdx >= 0 && targetIdx < gTargetCardCount) {
-        strncpy(targetId, gTargetCardIds[targetIdx], sizeof(targetId) - 1);
-        targetId[sizeof(targetId) - 1] = '\0';
-        strncpy(targetName, gTargetCardNames[targetIdx], sizeof(targetName) - 1);
-        targetName[sizeof(targetName) - 1] = '\0';
+    if (targetIdx < 0) {
+        if (gTargetCardCount <= 0) {
+            SysBeep(1);
+            return dragNotAcceptedErr;
+        }
+        targetIdx = 0;
     }
+
+    strncpy(targetId, gTargetCardIds[targetIdx], sizeof(targetId) - 1);
+    targetId[sizeof(targetId) - 1] = '\0';
+    strncpy(targetName, gTargetCardNames[targetIdx], sizeof(targetName) - 1);
+    targetName[sizeof(targetName) - 1] = '\0';
 
     for (i = 1; i <= numItems; i++) {
         ItemReference item;
@@ -734,7 +787,11 @@ static void ShowSetServerIpDialog(void)
                     NetConnectChannel();
                     done = true;
                 } else {
-                    SetDialogItemText(statusHdl, "\pCould not reach server at this IP.");
+                    /* Persist manually entered IP even if unreachable right now, so it never snaps back */
+                    NetSetServer(parsed, DEFAULT_HTTP_PORT);
+                    FormatIP(gServerIP, gServerIpInput);
+                    NetConnectChannel();
+                    SetDialogItemText(statusHdl, "\pUnreachable now (IP saved; retrying).");
                     SysBeep(1);
                 }
             } else {
@@ -960,7 +1017,8 @@ static void SendFileWithPickerToTarget(const char *targetId, const char *targetN
 
 static void SendFileWithPicker(void)
 {
-    SendFileWithPickerToTarget("SERVER", "MacCompanion Server");
+    const char *srvName = (gServerDisplayName[0] != '\0') ? gServerDisplayName : "MacCompanion Server";
+    SendFileWithPickerToTarget("SERVER", srvName);
 }
 
 static void DrawAboutWindow(void)
@@ -1329,6 +1387,7 @@ static void DrawWindow(void)
     SetPort(gWindow);
     r = gWindow->portRect;
     EraseRect(&r);
+    gLastBarFillW = -1;
 
     TextFont(kFontIDGeneva);
     TextSize(9);
@@ -1358,7 +1417,7 @@ static void DrawWindow(void)
 
         MoveTo(16, y);
         if (gActiveTransferTotal > 0) {
-            unsigned short pct = (unsigned short)(((unsigned long long)gActiveTransferBytes * 100) / gActiveTransferTotal);
+            unsigned short pct = ScaleRatio32(gActiveTransferBytes, 100, gActiveTransferTotal);
             if (gTransferSpeedBps >= 1024) {
                 sprintf(buf, "%s / %s (%u%%) - %lu.%lu kB/s", curStr, totStr, pct,
                         gTransferSpeedBps / 1024, (gTransferSpeedBps % 1024) * 10 / 1024);
@@ -1441,7 +1500,7 @@ static void DrawWindow(void)
 
         MoveTo(16, y);
         if (gActiveTransferTotal > 0) {
-            unsigned short pct = (unsigned short)(((unsigned long long)gActiveTransferBytes * 100) / gActiveTransferTotal);
+            unsigned short pct = ScaleRatio32(gActiveTransferBytes, 100, gActiveTransferTotal);
             if (gTransferSpeedBps >= 1024) {
                 sprintf(buf, "%s / %s (%u%%) - %lu.%lu kB/s", curStr, totStr, pct,
                         gTransferSpeedBps / 1024, (gTransferSpeedBps % 1024) * 10 / 1024);
@@ -1454,15 +1513,42 @@ static void DrawWindow(void)
         DrawCString(buf);
         gLastDrawnTransferActive = true;
     } else {
-        /* Drop Box Area with Server + Peer Macintosh Target Cards */
+        /* Drop Box Area with Active Server (when connected) + Peer Macintosh Target Cards */
         Rect dropBox;
         short boxH = 152;
-        short maxPeers = gOnlinePeerCount > (MAX_TARGET_CARDS - 1) ? (MAX_TARGET_CARDS - 1) : gOnlinePeerCount;
-        short totalCards = 1 + maxPeers;
-        short cardH = (totalCards >= 4) ? 26 : ((totalCards == 3) ? 34 : 36);
-        short cardGap = (totalCards >= 4) ? 4 : 6;
-        short cardTop;
-        short i;
+        short totalCards = 0;
+        Boolean isServerCard[MAX_TARGET_CARDS];
+        const char *cardSub[MAX_TARGET_CARDS];
+        short cardH, cardGap, cardTop, i;
+
+        if (gChannelConnected) {
+            isServerCard[totalCards] = true;
+            strcpy(gTargetCardIds[totalCards], "SERVER");
+            strncpy(gTargetCardNames[totalCards],
+                    gServerDisplayName[0] ? gServerDisplayName : "MacCompanion Server",
+                    sizeof(gTargetCardNames[0]) - 1);
+            gTargetCardNames[totalCards][sizeof(gTargetCardNames[0]) - 1] = '\0';
+            cardSub[totalCards] = gServerDisplaySub[0] ? gServerDisplaySub : "Modern Browser / Web UI";
+            totalCards++;
+        }
+        for (i = 0; i < gOnlinePeerCount && totalCards < MAX_TARGET_CARDS; i++) {
+            if (strcmp(gOnlinePeers[i].id, "SERVER") == 0) continue;
+            if (gChannelConnected && gServerDisplayName[0] != '\0' &&
+                strcmp(gOnlinePeers[i].name, gServerDisplayName) == 0) {
+                continue;
+            }
+            isServerCard[totalCards] = false;
+            strncpy(gTargetCardIds[totalCards], gOnlinePeers[i].id, sizeof(gTargetCardIds[0]) - 1);
+            gTargetCardIds[totalCards][sizeof(gTargetCardIds[0]) - 1] = '\0';
+            strncpy(gTargetCardNames[totalCards], gOnlinePeers[i].name, sizeof(gTargetCardNames[0]) - 1);
+            gTargetCardNames[totalCards][sizeof(gTargetCardNames[0]) - 1] = '\0';
+            cardSub[totalCards] = gOnlinePeers[i].machine;
+            totalCards++;
+        }
+        gTargetCardCount = totalCards;
+
+        cardH = (totalCards >= 4) ? 26 : ((totalCards == 3) ? 34 : 36);
+        cardGap = (totalCards >= 4) ? 4 : 6;
 
         SetRect(&dropBox, 16, y, r.right - 16, y + boxH);
         gDropZoneRect = dropBox;
@@ -1489,23 +1575,12 @@ static void DrawWindow(void)
                gBtnRefreshPeersRect.top + 11);
         DrawCString("Refresh");
 
-        /* Populate Target Cards: Card 0 = Server, Cards 1..N = Online 68k Peers */
-        gTargetCardCount = totalCards;
-        strcpy(gTargetCardIds[0], "SERVER");
-        strcpy(gTargetCardNames[0], "MacCompanion Server");
-        for (i = 0; i < maxPeers; i++) {
-            strncpy(gTargetCardIds[1 + i], gOnlinePeers[i].id, sizeof(gTargetCardIds[0]) - 1);
-            gTargetCardIds[1 + i][sizeof(gTargetCardIds[0]) - 1] = '\0';
-            strncpy(gTargetCardNames[1 + i], gOnlinePeers[i].name, sizeof(gTargetCardNames[0]) - 1);
-            gTargetCardNames[1 + i][sizeof(gTargetCardNames[0]) - 1] = '\0';
-        }
-
         cardTop = dropBox.top + 24;
         for (i = 0; i < totalCards; i++) {
             Rect cardR, badgeR;
-            Boolean isServer = (i == 0);
+            Boolean isServer = isServerCard[i];
             const char *titleStr = gTargetCardNames[i];
-            const char *subStr   = isServer ? "Modern Browser / Web UI" : gOnlinePeers[i - 1].machine;
+            const char *subStr   = cardSub[i];
             short iconY;
 
             SetRect(&cardR, dropBox.left + 10, cardTop, dropBox.right - 10, cardTop + cardH);
@@ -1551,16 +1626,24 @@ static void DrawWindow(void)
             cardTop += cardH + cardGap;
         }
 
-        /* When only the Server is online (0 peer Macs), show a helpful hint in the remaining space */
-        if (totalCards == 1) {
+        if (totalCards == 0) {
+            short hintY = dropBox.top + 52;
+            BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, dropBox.left + 16, hintY, srcCopy);
+            TextFace(bold);
+            MoveTo(dropBox.left + 58, hintY + 13);
+            DrawCString("No server or Macs currently online");
+            TextFace(normal);
+            MoveTo(dropBox.left + 58, hintY + 27);
+            DrawCString("Click Status above to set Server IP or launch MacDrop X.");
+        } else if (totalCards == 1) {
             short hintY = cardTop + 10;
             BlitBitmap(kLogoMacDrop32x32, 4, 32, 32, dropBox.left + 16, hintY, srcCopy);
             TextFace(bold);
             MoveTo(dropBox.left + 58, hintY + 13);
-            DrawCString("No other 68k Macs currently online");
+            DrawCString(isServerCard[0] ? "No other 68k Macs currently online" : "Server offline (peer transfer active)");
             TextFace(normal);
             MoveTo(dropBox.left + 58, hintY + 27);
-            DrawCString("Run MacDrop on another Mac to drop Mac-to-Mac.");
+            DrawCString(isServerCard[0] ? "Run MacDrop on another Mac to drop Mac-to-Mac." : "Launch MacCompanion or MacDrop X for web drop.");
         }
 
         gLastDrawnTransferActive = false;
@@ -1854,7 +1937,9 @@ static void HandleMouseDown(EventRecord *evt)
                         SendFileWithPickerToTarget(chosenId, chosenName);
                         return;
                     }
-                    SendFileWithPickerToTarget("SERVER", "MacCompanion Server");
+                    if (gTargetCardCount > 0) {
+                        SendFileWithPickerToTarget(gTargetCardIds[0], gTargetCardNames[0]);
+                    }
                     return;
                 }
 
@@ -1994,34 +2079,26 @@ int main(void)
 
         ProcessSharedCommand();
 
-        /* If a transfer begins while window is hidden, open compact Incoming window (or full window if upload) */
+        /* If a transfer begins while window is hidden, open compact Incoming window (non-blocking) */
         if (gTransferActive && !lastActive) {
             if (!gTransferIsUpload && gWindow && !IsWindowVisible(gWindow)) {
                 gAutoOpenedForReceive = true;
                 SetCompactReceiveWindowMode(true);
             }
-            EnsureFrontProcess();
+            if (gTransferIsUpload) {
+                EnsureFrontProcess();
+                DrawMenuBar();
+            }
             if (gWindow) {
                 ShowWindow(gWindow);
                 SelectWindow(gWindow);
                 SetPortWindowPort(gWindow);
+                DrawWindow();
             }
-            DrawMenuBar();
             SyncSharedData();
             UpdateMenuStates();
         } else if (!gTransferActive && lastActive && gAutoOpenedForReceive) {
-            gAutoOpenedForReceive = false;
-            if (gWindow && IsWindowVisible(gWindow)) {
-                HideWindow(gWindow);
-            }
-            SetCompactReceiveWindowMode(false);
-            if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
-                SwitchToFinder();
-            } else {
-                gWasHiddenBeforeNotify = true;
-            }
-            SyncSharedData();
-            UpdateMenuStates();
+            HideAutoOpenedReceiveWindow();
         }
 
         gotEvent = WaitNextEvent(everyEvent, &event, sleep, NULL);
@@ -2032,18 +2109,7 @@ int main(void)
         NetIdle();
 
         if (!gTransferActive && gAutoOpenedForReceive) {
-            gAutoOpenedForReceive = false;
-            if (gWindow && IsWindowVisible(gWindow)) {
-                HideWindow(gWindow);
-            }
-            SetCompactReceiveWindowMode(false);
-            if (!gNotifyWindow || !IsWindowVisible(gNotifyWindow)) {
-                SwitchToFinder();
-            } else {
-                gWasHiddenBeforeNotify = true;
-            }
-            SyncSharedData();
-            UpdateMenuStates();
+            HideAutoOpenedReceiveWindow();
         }
 
         if (gChannelConnected && !lastChannel) {
@@ -2057,7 +2123,7 @@ int main(void)
             SyncSharedData();
             UpdateMenuStates();
         } else if (gTransferActive && (gActiveTransferBytes != lastTransferBytes)) {
-            unsigned long nowTick = TickCount();
+            unsigned long nowTick = LMGetTicks();
             if (nowTick - lastDrawTick >= 12) {
                 needProgressDraw = true;
                 lastDrawTick = nowTick;

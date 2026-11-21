@@ -401,6 +401,18 @@ function cleanIpAddress(rawIp = '') {
   return str;
 }
 
+function tightenLibrespotPerms(cacheDir) {
+  try {
+    fs.chmodSync(cacheDir, 0o700);
+  } catch (_) {}
+  try {
+    const credFile = path.join(cacheDir, 'credentials.json');
+    if (fs.existsSync(credFile)) {
+      fs.chmodSync(credFile, 0o600);
+    }
+  } catch (_) {}
+}
+
 class AudioStreamEngine extends EventEmitter {
   constructor({ store, getValidAccessToken, getFetchImpl }) {
     super();
@@ -1031,8 +1043,9 @@ class AudioStreamEngine extends EventEmitter {
 
     const cacheDir = path.join(DATA_DIR, 'librespot');
     if (!fs.existsSync(cacheDir)) {
-      fs.mkdirSync(cacheDir, { recursive: true });
+      fs.mkdirSync(cacheDir, { recursive: true, mode: 0o700 });
     }
+    tightenLibrespotPerms(cacheDir);
 
     const receiverName = this.getLibrespotDeviceName();
     this.librespotReceiverName = receiverName;
@@ -1097,6 +1110,7 @@ class AudioStreamEngine extends EventEmitter {
       if (!line) return;
 
       if (line.includes('Authenticated as') || line.includes('Country:')) {
+        tightenLibrespotPerms(cacheDir);
         this.zeroconfAuthenticated = true;
         this.state = 'READY';
         this.lastError = null;

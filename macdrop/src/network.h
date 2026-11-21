@@ -36,12 +36,17 @@ typedef struct {
 extern MacDropPeer      gOnlinePeers[MAX_MACDROP_PEERS];
 extern short            gOnlinePeerCount;
 extern char             gActiveUploadTargetName[48];
+extern char             gServerDisplayName[48];
+extern char             gServerDisplaySub[48];
 
 /* Cancels active inbound or outbound file transfer */
 void NetCancelActiveTransfer(void);
 
 /* Initializes MacTCP driver and retrieves local IP address */
 Boolean NetInit(void);
+
+/* Refreshes gOurIP from MacTCP / Open Transport if still unknown (0) */
+void NetRefreshOurIP(void);
 
 /* Sends a file to MacCompanion server / modern Mac via HTTP POST MacBinary */
 Boolean NetSendFile(const FSSpec *spec);

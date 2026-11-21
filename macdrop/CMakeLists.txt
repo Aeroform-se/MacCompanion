@@ -38,8 +38,10 @@ add_application(MacDrop
     src/main.c
     src/network.c
     src/file_io.c
+    src/BoltFastCompat.c
     src/resources.r
     ${CMAKE_CURRENT_BINARY_DIR}/MacDropINIT.rsrc.bin
 )
 
-target_compile_options(MacDrop PRIVATE -O2 -Wall -Wno-multichar -Wno-pointer-sign)
+target_compile_options(MacDrop PRIVATE -O3 -fomit-frame-pointer -ffunction-sections -fdata-sections -Wall -Wno-multichar -Wno-pointer-sign)
+set_target_properties(MacDrop PROPERTIES LINK_FLAGS "-Wl,--gc-sections")

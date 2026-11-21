@@ -3608,15 +3608,40 @@ router.get('/stream.pcm', async (req, res) => {
 });
 
 let healthTimer = null;
+let netRecoveryTimer = null;
+
+async function runHealthRecoveryCheck() {
+  const data = store.load();
+  if (!data.refreshToken) return;
+  await validateConnection();
+  await audioEngine.ensureStarted();
+}
+
 function startBackgroundHealthCheck(intervalMs = 10 * 60 * 1000) {
   if (healthTimer) clearInterval(healthTimer);
+  if (netRecoveryTimer) clearTimeout(netRecoveryTimer);
+
+  // If the container booted with a persisted transient NET_ERROR from an earlier sleep/disconnect,
+  // verify connectivity promptly instead of leaving the Web UI stuck in "No Internet Access" for 10 min.
+  const initialData = store.load();
+  if (initialData.refreshToken && initialData.lastErrorCode === 'NET_ERROR') {
+    netRecoveryTimer = setTimeout(() => {
+      runHealthRecoveryCheck().catch(() => {});
+    }, 1500);
+    if (netRecoveryTimer.unref) netRecoveryTimer.unref();
+  }
+
+  let lastRecoveryCheckAt = 0;
   healthTimer = setInterval(async () => {
     const data = store.load();
-    if (data.refreshToken) {
+    if (!data.refreshToken) return;
+    const now = Date.now();
+    if (data.lastErrorCode === 'NET_ERROR' || (now - lastRecoveryCheckAt) >= intervalMs) {
+      lastRecoveryCheckAt = now;
       await validateConnection();
       await audioEngine.ensureStarted();
     }
-  }, intervalMs);
+  }, 30 * 1000);
   if (healthTimer.unref) healthTimer.unref();
 }
 

@@ -1,4 +1,5 @@
 #include "file_io.h"
+#include <stddef.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -165,6 +166,8 @@ Boolean TryLoadSiblingServerIP(unsigned long *outIP)
     SiblingPrefsHeader hdr;
     long count;
     ConstStr255Param names[2] = { "\pSpotiMac Prefs", "\pMacAI Prefs" };
+    unsigned long bestIP = 0;
+    unsigned long bestModDate = 0;
     short i;
 
     if (!outIP) return false;
@@ -174,19 +177,38 @@ Boolean TryLoadSiblingServerIP(unsigned long *outIP)
     }
 
     for (i = 0; i < 2; i++) {
+        CInfoPBRec cinfo;
+        unsigned long modDate = 0;
+        memset(&cinfo, 0, sizeof(cinfo));
+        cinfo.hFileInfo.ioVRefNum   = vRefNum;
+        cinfo.hFileInfo.ioDirID     = dirID;
+        cinfo.hFileInfo.ioNamePtr   = (StringPtr)names[i];
+        cinfo.hFileInfo.ioFDirIndex = 0;
+        if (PBGetCatInfoSync(&cinfo) == noErr) {
+            modDate = cinfo.hFileInfo.ioFlMdDat;
+        }
+
         if (HOpen(vRefNum, dirID, names[i], fsRdPerm, &refNum) == noErr) {
+            OSErr rErr;
             count = sizeof(hdr);
             memset(&hdr, 0, sizeof(hdr));
-            if (FSRead(refNum, &count, &hdr) == noErr && count >= 8) {
+            rErr = FSRead(refNum, &count, &hdr);
+            FSClose(refNum);
+            if ((rErr == noErr || rErr == eofErr) && count >= 8) {
                 if ((hdr.magic == SPOTIMAC_PREFS_MAGIC || hdr.magic == MACAI_PREFS_MAGIC) &&
                     hdr.serverIp != 0) {
-                    FSClose(refNum);
-                    *outIP = hdr.serverIp;
-                    return true;
+                    if (bestIP == 0 || modDate >= bestModDate) {
+                        bestIP = hdr.serverIp;
+                        bestModDate = modDate;
+                    }
                 }
             }
-            FSClose(refNum);
         }
+    }
+
+    if (bestIP != 0) {
+        *outIP = bestIP;
+        return true;
     }
     return false;
 }
@@ -205,7 +227,11 @@ void LoadPreferences(void)
         err = HOpen(vRefNum, dirID, "\pMacDrop Prefs", fsRdPerm, &refNum);
         if (err == noErr) {
             long bytesRead = count;
-            if (FSRead(refNum, &bytesRead, &prefs) == noErr && bytesRead >= 68) {
+            OSErr rErr;
+            memset(&prefs, 0, sizeof(prefs));
+            rErr = FSRead(refNum, &bytesRead, &prefs);
+            FSClose(refNum);
+            if ((rErr == noErr || rErr == eofErr) && bytesRead >= 68) {
                 if (prefs.folderName[0] != '\0') {
                     strncpy(gDestFolderName, prefs.folderName, MAX_FOLDER_NAME - 1);
                     gDestFolderName[MAX_FOLDER_NAME - 1] = '\0';
@@ -222,20 +248,23 @@ void LoadPreferences(void)
                         gClientName[sizeof(gClientName) - 1] = '\0';
                     }
                 }
-                if (bytesRead >= 68 + 64 + 64 + 6) {
+                if (bytesRead >= (long)(offsetof(MacDropPrefsRecord, destDirID) + sizeof(prefs.destDirID))) {
                     if (prefs.destVRefNum != 0 && prefs.destDirID != 0) {
                         gDestVRefNum = prefs.destVRefNum;
                         gDestDirID   = prefs.destDirID;
                     }
                 }
-                if (bytesRead >= (long)sizeof(prefs)) {
+                if (bytesRead >= (long)(offsetof(MacDropPrefsRecord, serverIP) + sizeof(prefs.serverIP))) {
                     if (prefs.serverIP != 0) {
-                        gSavedServerIP   = prefs.serverIP;
-                        gSavedServerPort = prefs.serverPort ? prefs.serverPort : 6800;
+                        gSavedServerIP = prefs.serverIP;
+                        if (bytesRead >= (long)sizeof(prefs) && prefs.serverPort != 0) {
+                            gSavedServerPort = prefs.serverPort;
+                        } else {
+                            gSavedServerPort = 6800;
+                        }
                     }
                 }
             }
-            FSClose(refNum);
         }
     }
 
@@ -335,6 +364,13 @@ OSErr InitFileManager(void)
     return SetDestinationFolderName(gDestFolderName);
 }
 
+static WaitPollHook gWaitPollHook = NULL;
+
+void MacBinaryRx_SetWaitPollHook(WaitPollHook hook)
+{
+    gWaitPollHook = hook;
+}
+
 void MacBinaryRx_Init(MacBinaryRx *rx)
 {
     if (!rx) return;
@@ -347,7 +383,9 @@ OSErr MacBinaryRx_WaitWrite(MacBinaryRx *rx)
     if (!rx || !rx->writePending) return noErr;
 
     while (rx->writePB.ioParam.ioResult > 0) {
-        /* Busy wait until disk driver finishes asynchronous write */
+        if (gWaitPollHook) {
+            gWaitPollHook();
+        }
     }
 
     rx->writePending = false;
@@ -397,189 +435,185 @@ static OSType ReadOSType(const unsigned char *p)
            (OSType)p[3];
 }
 
+static OSErr MacBinaryRx_OpenForksAndPrealloc(MacBinaryRx *rx)
+{
+    Str255 pName;
+    OSErr err;
+    short nameLen = rx->headerBuf[1];
+
+    if (nameLen > 31) nameLen = 31;
+    if (nameLen < 1) nameLen = 1;
+
+    memcpy(rx->fileName, &rx->headerBuf[2], nameLen);
+    rx->fileName[nameLen] = '\0';
+
+    rx->fileType     = ReadOSType(&rx->headerBuf[65]);
+    rx->fileCreator  = ReadOSType(&rx->headerBuf[69]);
+    rx->finderFlags  = ((unsigned short)rx->headerBuf[73] << 8) | rx->headerBuf[101];
+    rx->dataLen      = ReadUInt32(&rx->headerBuf[83]);
+    rx->rsrcLen      = ReadUInt32(&rx->headerBuf[87]);
+    rx->creationDate = ReadUInt32(&rx->headerBuf[91]);
+    rx->modDate      = ReadUInt32(&rx->headerBuf[95]);
+
+    rx->dataBytesTarget = ((rx->dataLen + 127) / 128) * 128;
+    rx->rsrcBytesTarget = ((rx->rsrcLen + 127) / 128) * 128;
+
+    CToPString(rx->fileName, pName);
+
+    /* Delete any existing file to ensure clean overwrite */
+    HDelete(gDestVRefNum, gDestDirID, pName);
+
+    err = HCreate(gDestVRefNum, gDestDirID, pName, rx->fileCreator, rx->fileType);
+    if (err != noErr) {
+        rx->lastError = err;
+        rx->state = RX_ERROR;
+        return err;
+    }
+
+    err = HOpen(gDestVRefNum, gDestDirID, pName, fsWrPerm, &rx->dataRefNum);
+    if (err != noErr) {
+        rx->lastError = err;
+        rx->state = RX_ERROR;
+        return err;
+    }
+
+    if (rx->dataLen > 0) {
+        long preAlloc = (long)rx->dataLen;
+        if (AllocContig(rx->dataRefNum, &preAlloc) != noErr) {
+            preAlloc = (long)rx->dataLen;
+            Allocate(rx->dataRefNum, &preAlloc);
+        }
+        SetEOF(rx->dataRefNum, (long)rx->dataLen);
+        SetFPos(rx->dataRefNum, fsFromStart, 0);
+    }
+
+    if (rx->rsrcLen > 0) {
+        long preAllocRF = (long)rx->rsrcLen;
+        err = HOpenRF(gDestVRefNum, gDestDirID, pName, fsWrPerm, &rx->rsrcRefNum);
+        if (err != noErr) {
+            rx->lastError = err;
+            rx->state = RX_ERROR;
+            return err;
+        }
+        if (AllocContig(rx->rsrcRefNum, &preAllocRF) != noErr) {
+            preAllocRF = (long)rx->rsrcLen;
+            Allocate(rx->rsrcRefNum, &preAllocRF);
+        }
+        SetEOF(rx->rsrcRefNum, (long)rx->rsrcLen);
+        SetFPos(rx->rsrcRefNum, fsFromStart, 0);
+    }
+
+    if (rx->dataBytesTarget > 0) {
+        rx->state = RX_DATA;
+    } else if (rx->rsrcBytesTarget > 0) {
+        rx->state = RX_RSRC;
+    } else {
+        rx->state = RX_COMPLETE;
+    }
+    return noErr;
+}
+
+long MacBinaryRx_ConsumeHeader(MacBinaryRx *rx, const unsigned char *buf, long count)
+{
+    long needed, take;
+
+    if (!rx || !buf || count <= 0 || rx->state != RX_HEADER) return 0;
+
+    needed = 128 - rx->headerBytesRead;
+    take = (count < needed) ? count : needed;
+
+    memcpy(&rx->headerBuf[rx->headerBytesRead], buf, (size_t)take);
+    rx->headerBytesRead += (short)take;
+
+    if (rx->headerBytesRead == 128) {
+        if (MacBinaryRx_OpenForksAndPrealloc(rx) != noErr) {
+            return -1;
+        }
+    }
+    return take;
+}
+
+static OSErr ProcessForkChunk(MacBinaryRx *rx,
+                              short *ioRefNum,
+                              unsigned long *ioBytesWritten,
+                              unsigned long *ioBytesPadded,
+                              unsigned long forkLen,
+                              unsigned long forkTarget,
+                              RxState nextState,
+                              const unsigned char *buf,
+                              long *ioOffset,
+                              long count)
+{
+    unsigned long neededTarget = forkTarget - *ioBytesPadded;
+    long take = count - *ioOffset;
+    long writeAmount;
+    OSErr err;
+
+    if ((unsigned long)take > neededTarget) {
+        take = (long)neededTarget;
+    }
+
+    writeAmount = take;
+    if (*ioBytesWritten + (unsigned long)writeAmount > forkLen) {
+        writeAmount = (long)(forkLen - *ioBytesWritten);
+        if (writeAmount < 0) writeAmount = 0;
+    }
+
+    if (writeAmount > 0) {
+        err = MacBinaryRx_WaitWrite(rx);
+        if (err != noErr) return err;
+
+        memset(&rx->writePB, 0, sizeof(rx->writePB));
+        rx->writePB.ioParam.ioRefNum   = *ioRefNum;
+        rx->writePB.ioParam.ioBuffer   = (Ptr)&buf[*ioOffset];
+        rx->writePB.ioParam.ioReqCount = writeAmount;
+        rx->writePB.ioParam.ioPosMode  = fsAtMark;
+        err = PBWriteAsync((ParmBlkPtr)&rx->writePB);
+        if (err == noErr || rx->writePB.ioParam.ioResult > 0) {
+            rx->writePending = true;
+            *ioBytesWritten += (unsigned long)writeAmount;
+        } else {
+            rx->lastError = err;
+            rx->state = RX_ERROR;
+            return err;
+        }
+    }
+
+    *ioBytesPadded += (unsigned long)take;
+    *ioOffset += take;
+
+    if (*ioBytesPadded >= forkTarget) {
+        err = MacBinaryRx_WaitWrite(rx);
+        if (err != noErr) return err;
+        SetEOF(*ioRefNum, (long)forkLen);
+        FSClose(*ioRefNum);
+        *ioRefNum = 0;
+        rx->state = nextState;
+    }
+    return noErr;
+}
+
 OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long count)
 {
     long offset = 0;
-    Str255 pName;
     OSErr err;
 
     if (!rx || !buf || count <= 0) return noErr;
 
     while (offset < count && rx->state != RX_COMPLETE && rx->state != RX_ERROR) {
         if (rx->state == RX_HEADER) {
-            long needed = 128 - rx->headerBytesRead;
-            long take = count - offset;
-            if (take > needed) take = needed;
-
-            memcpy(&rx->headerBuf[rx->headerBytesRead], &buf[offset], (size_t)take);
-            rx->headerBytesRead += (short)take;
-            offset += take;
-
-            if (rx->headerBytesRead == 128) {
-                /* Parse 128-byte MacBinary II header */
-                short nameLen = rx->headerBuf[1];
-                if (nameLen > 31) nameLen = 31;
-                if (nameLen < 1) nameLen = 1;
-
-                memcpy(rx->fileName, &rx->headerBuf[2], nameLen);
-                rx->fileName[nameLen] = '\0';
-
-                rx->fileType    = ReadOSType(&rx->headerBuf[65]);
-                rx->fileCreator = ReadOSType(&rx->headerBuf[69]);
-                rx->finderFlags = ((unsigned short)rx->headerBuf[73] << 8) | rx->headerBuf[101];
-                rx->dataLen     = ReadUInt32(&rx->headerBuf[83]);
-                rx->rsrcLen     = ReadUInt32(&rx->headerBuf[87]);
-                rx->creationDate= ReadUInt32(&rx->headerBuf[91]);
-                rx->modDate     = ReadUInt32(&rx->headerBuf[95]);
-
-                rx->dataBytesTarget = ((rx->dataLen + 127) / 128) * 128;
-                rx->rsrcBytesTarget = ((rx->rsrcLen + 127) / 128) * 128;
-
-                CToPString(rx->fileName, pName);
-
-                /* If file exists, delete it first to ensure clean overwrite */
-                HDelete(gDestVRefNum, gDestDirID, pName);
-
-                err = HCreate(gDestVRefNum, gDestDirID, pName, rx->fileCreator, rx->fileType);
-                if (err != noErr) {
-                    rx->lastError = err;
-                    rx->state = RX_ERROR;
-                    return err;
-                }
-
-                err = HOpen(gDestVRefNum, gDestDirID, pName, fsWrPerm, &rx->dataRefNum);
-                if (err != noErr) {
-                    rx->lastError = err;
-                    rx->state = RX_ERROR;
-                    return err;
-                }
-
-                if (rx->dataLen > 0) {
-                    long preAlloc = (long)rx->dataLen;
-                    if (AllocContig(rx->dataRefNum, &preAlloc) != noErr) {
-                        preAlloc = (long)rx->dataLen;
-                        Allocate(rx->dataRefNum, &preAlloc);
-                    }
-                }
-
-                if (rx->rsrcLen > 0) {
-                    long preAllocRF = (long)rx->rsrcLen;
-                    err = HOpenRF(gDestVRefNum, gDestDirID, pName, fsWrPerm, &rx->rsrcRefNum);
-                    if (err != noErr) {
-                        rx->lastError = err;
-                        rx->state = RX_ERROR;
-                        return err;
-                    }
-                    if (AllocContig(rx->rsrcRefNum, &preAllocRF) != noErr) {
-                        preAllocRF = (long)rx->rsrcLen;
-                        Allocate(rx->rsrcRefNum, &preAllocRF);
-                    }
-                }
-
-                if (rx->dataBytesTarget > 0) {
-                    rx->state = RX_DATA;
-                } else if (rx->rsrcBytesTarget > 0) {
-                    rx->state = RX_RSRC;
-                } else {
-                    rx->state = RX_COMPLETE;
-                }
-            }
+            long consumed = MacBinaryRx_ConsumeHeader(rx, &buf[offset], count - offset);
+            if (consumed < 0) return rx->lastError;
+            offset += consumed;
         } else if (rx->state == RX_DATA) {
-            unsigned long neededTarget = rx->dataBytesTarget - rx->dataBytesPadded;
-            long take = count - offset;
-            long writeAmount;
-
-            if ((unsigned long)take > neededTarget) {
-                take = (long)neededTarget;
-            }
-
-            /* Only write actual non-padding bytes to the data fork */
-            writeAmount = take;
-            if (rx->dataBytesWritten + writeAmount > rx->dataLen) {
-                writeAmount = rx->dataLen - rx->dataBytesWritten;
-                if (writeAmount < 0) writeAmount = 0;
-            }
-
-            if (writeAmount > 0) {
-                err = MacBinaryRx_WaitWrite(rx);
-                if (err != noErr) return err;
-
-                memset(&rx->writePB, 0, sizeof(rx->writePB));
-                rx->writePB.ioParam.ioRefNum   = rx->dataRefNum;
-                rx->writePB.ioParam.ioBuffer   = (Ptr)&buf[offset];
-                rx->writePB.ioParam.ioReqCount = writeAmount;
-                rx->writePB.ioParam.ioPosMode  = fsAtMark;
-                err = PBWriteAsync((ParmBlkPtr)&rx->writePB);
-                if (err == noErr || rx->writePB.ioParam.ioResult > 0) {
-                    rx->writePending = true;
-                    rx->dataBytesWritten += writeAmount;
-                } else {
-                    rx->lastError = err;
-                    rx->state = RX_ERROR;
-                    return err;
-                }
-            }
-
-            rx->dataBytesPadded += take;
-            offset += take;
-
-            if (rx->dataBytesPadded >= rx->dataBytesTarget) {
-                MacBinaryRx_WaitWrite(rx);
-                SetEOF(rx->dataRefNum, rx->dataLen);
-                FSClose(rx->dataRefNum);
-                rx->dataRefNum = 0;
-
-                if (rx->rsrcBytesTarget > 0) {
-                    rx->state = RX_RSRC;
-                } else {
-                    rx->state = RX_COMPLETE;
-                }
-            }
+            RxState nextState = (rx->rsrcBytesTarget > 0) ? RX_RSRC : RX_COMPLETE;
+            err = ProcessForkChunk(rx, &rx->dataRefNum, &rx->dataBytesWritten, &rx->dataBytesPadded,
+                                   rx->dataLen, rx->dataBytesTarget, nextState, buf, &offset, count);
+            if (err != noErr) return err;
         } else if (rx->state == RX_RSRC) {
-            unsigned long neededTarget = rx->rsrcBytesTarget - rx->rsrcBytesPadded;
-            long take = count - offset;
-            long writeAmount;
-
-            if ((unsigned long)take > neededTarget) {
-                take = (long)neededTarget;
-            }
-
-            writeAmount = take;
-            if (rx->rsrcBytesWritten + writeAmount > rx->rsrcLen) {
-                writeAmount = rx->rsrcLen - rx->rsrcBytesWritten;
-                if (writeAmount < 0) writeAmount = 0;
-            }
-
-            if (writeAmount > 0) {
-                err = MacBinaryRx_WaitWrite(rx);
-                if (err != noErr) return err;
-
-                memset(&rx->writePB, 0, sizeof(rx->writePB));
-                rx->writePB.ioParam.ioRefNum   = rx->rsrcRefNum;
-                rx->writePB.ioParam.ioBuffer   = (Ptr)&buf[offset];
-                rx->writePB.ioParam.ioReqCount = writeAmount;
-                rx->writePB.ioParam.ioPosMode  = fsAtMark;
-                err = PBWriteAsync((ParmBlkPtr)&rx->writePB);
-                if (err == noErr || rx->writePB.ioParam.ioResult > 0) {
-                    rx->writePending = true;
-                    rx->rsrcBytesWritten += writeAmount;
-                } else {
-                    rx->lastError = err;
-                    rx->state = RX_ERROR;
-                    return err;
-                }
-            }
-
-            rx->rsrcBytesPadded += take;
-            offset += take;
-
-            if (rx->rsrcBytesPadded >= rx->rsrcBytesTarget) {
-                MacBinaryRx_WaitWrite(rx);
-                SetEOF(rx->rsrcRefNum, rx->rsrcLen);
-                FSClose(rx->rsrcRefNum);
-                rx->rsrcRefNum = 0;
-                rx->state = RX_COMPLETE;
-            }
+            err = ProcessForkChunk(rx, &rx->rsrcRefNum, &rx->rsrcBytesWritten, &rx->rsrcBytesPadded,
+                                   rx->rsrcLen, rx->rsrcBytesTarget, RX_COMPLETE, buf, &offset, count);
+            if (err != noErr) return err;
         }
     }
 

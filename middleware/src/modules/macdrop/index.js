@@ -110,6 +110,9 @@ class MacDropModule {
     // Pending transfer callbacks: transferId -> { resolve, reject, timer }
     this.pendingTransfers = new Map();
 
+    // Short-lived cache for early transfer ACKs that arrive before waitForTransferAck() is entered
+    this.recentTransferAcks = new Map();
+
     // Map of staged inbound transfers (68k -> Modern Web / PC): transferId -> transferObj
     this.inboundTransfers = new Map();
 
@@ -526,9 +529,35 @@ class MacDropModule {
   }
 
   /**
+   * Resolves or rejects a transfer confirmation payload uniformly.
+   */
+  _settleTransferAck(transferId, status, bytes, resolve, reject) {
+    if (status === 'OK') {
+      resolve({ ok: true, bytes });
+    } else if (status === 'CANCELLED') {
+      if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
+        this.activeTransfer.status = 'CANCELLED';
+        this.activeTransfer.error = 'Transfer cancelled by Macintosh client';
+        this.activeTransfer.speedFormatted = 'Cancelled';
+      }
+      reject(new Error('Transfer cancelled by Macintosh client'));
+    } else {
+      reject(new Error(`Macintosh reported write failure (${status})`));
+    }
+  }
+
+  /**
    * Waits for transfer completion ACK from the 68k Mac client.
    */
   waitForTransferAck(transferId, timeoutMs = 60000, clientId = null) {
+    const earlyAck = this.recentTransferAcks.get(transferId);
+    if (earlyAck) {
+      this.recentTransferAcks.delete(transferId);
+      return new Promise((resolve, reject) => {
+        this._settleTransferAck(transferId, earlyAck.status, earlyAck.bytes, resolve, reject);
+      });
+    }
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingTransfers.delete(transferId);
@@ -558,19 +587,40 @@ class MacDropModule {
     if (!transferId) return;
     const pending = this.pendingTransfers.get(transferId);
     if (pending) {
-      if (status === 'OK') {
-        pending.resolve({ ok: true, bytes });
-      } else if (status === 'CANCELLED') {
-        if (this.activeTransfer && this.activeTransfer.transferId === transferId) {
-          this.activeTransfer.status = 'CANCELLED';
-          this.activeTransfer.error = 'Transfer cancelled by Macintosh client';
-          this.activeTransfer.speedFormatted = 'Cancelled';
-        }
-        pending.reject(new Error('Transfer cancelled by Macintosh client'));
-      } else {
-        pending.reject(new Error(`Macintosh reported write failure (${status})`));
+      this._settleTransferAck(transferId, status, bytes, pending.resolve, pending.reject);
+      return;
+    }
+
+    // Small transfers (< 1 MB) can receive their ACK before deliverToTarget() exits socket drain wait.
+    const now = Date.now();
+    this.recentTransferAcks.set(transferId, { status, bytes, receivedAt: now });
+    for (const [id, entry] of this.recentTransferAcks.entries()) {
+      if (now - entry.receivedAt > 120000) {
+        this.recentTransferAcks.delete(id);
       }
     }
+  }
+
+  /**
+   * Reads a Linux /proc/net/tcp* table and returns the tx_queue hex value for a socket,
+   * or null if the socket entry is not found or the proc file is unavailable.
+   */
+  _parseProcTcpTxQueue(procPath, localPortHex, remotePortHex) {
+    if (!fs.existsSync(procPath)) return null;
+    const content = fs.readFileSync(procPath, 'utf8');
+    const lines = content.split('\n');
+    const localSuffix = ':' + localPortHex;
+    const remoteSuffix = ':' + remotePortHex;
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const parts = line.split(/\s+/);
+      if (parts.length >= 5 && parts[1].endsWith(localSuffix) && parts[2].endsWith(remoteSuffix)) {
+        const [txHex] = parts[4].split(':');
+        return parseInt(txHex, 16) || 0;
+      }
+    }
+    return null;
   }
 
   /**
@@ -584,39 +634,55 @@ class MacDropModule {
       const localPortHex = socket.localPort.toString(16).toUpperCase().padStart(4, '0');
       const remotePortHex = socket.remotePort.toString(16).toUpperCase().padStart(4, '0');
 
-      if (fs.existsSync('/proc/net/tcp')) {
-        const content = fs.readFileSync('/proc/net/tcp', 'utf8');
-        const lines = content.split('\n');
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          const parts = line.split(/\s+/);
-          if (parts.length >= 5) {
-            if (parts[1].endsWith(':' + localPortHex) && parts[2].endsWith(':' + remotePortHex)) {
-              const [txHex] = parts[4].split(':');
-              return parseInt(txHex, 16) || 0;
-            }
-          }
-        }
-      }
+      const v4 = this._parseProcTcpTxQueue('/proc/net/tcp', localPortHex, remotePortHex);
+      if (v4 !== null) return v4;
 
-      if (fs.existsSync('/proc/net/tcp6')) {
-        const content = fs.readFileSync('/proc/net/tcp6', 'utf8');
-        const lines = content.split('\n');
-        for (let i = 1; i < lines.length; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          const parts = line.split(/\s+/);
-          if (parts.length >= 5) {
-            if (parts[1].endsWith(':' + localPortHex) && parts[2].endsWith(':' + remotePortHex)) {
-              const [txHex] = parts[4].split(':');
-              return parseInt(txHex, 16) || 0;
-            }
-          }
-        }
-      }
+      const v6 = this._parseProcTcpTxQueue('/proc/net/tcp6', localPortHex, remotePortHex);
+      if (v6 !== null) return v6;
     } catch (_) {}
     return (socket.writableLength || 0);
+  }
+
+  /**
+   * Throttles /proc/net/tcp* sampling to at most once per 100 ms inside tight write loops.
+   */
+  _createTxQueueSampler(socket, intervalMs = 100) {
+    let lastSampleAt = 0;
+    let lastTxQueue = 0;
+    return (force = false) => {
+      const now = Date.now();
+      if (force || (now - lastSampleAt) >= intervalMs) {
+        lastTxQueue = this._getSocketTxQueue(socket);
+        lastSampleAt = now;
+      }
+      return lastTxQueue;
+    };
+  }
+
+  /**
+   * Builds an HTTP 200 response header map padded with X-Pad so the serialized wire header
+   * is always a 4-byte multiple (keeps MacBinary/payload 32-bit aligned in BoltTcp's RX ring).
+   */
+  _buildAlignedStreamHeaders(fileName, contentLength, transferId) {
+    const headers = {
+      'Content-Type': 'application/x-macbinary',
+      'Content-Length': String(contentLength),
+      'Connection': 'close',
+      'X-MacDrop-Status': 'STREAM',
+      'X-Filename': encodeURIComponent(fileName),
+      'X-Transfer-Id': transferId,
+    };
+    const headerLines = ['HTTP/1.1 200 OK'];
+    for (const [k, v] of Object.entries(headers)) {
+      headerLines.push(`${k}: ${v}`);
+    }
+    headerLines.push('', '');
+    const baseLen = Buffer.byteLength(headerLines.join('\r\n'), 'latin1');
+    if ((baseLen % 4) !== 0) {
+      const padChars = (4 - ((baseLen + 9) % 4)) % 4; // "X-Pad: " (7) + "\r\n" (2) = 9
+      headers['X-Pad'] = '0'.repeat(padChars);
+    }
+    return headers;
   }
 
   /**
@@ -977,7 +1043,7 @@ class MacDropModule {
         clearInterval(pollTimer);
         const curr = this.activeClients.get(clientId);
         if (curr && curr.res === res) {
-          if (curr.transferInProgress) {
+          if (curr.transferInProgress && !curr.allChunksQueued) {
             console.log(`[MacDrop] Client socket closed while streaming data: ${name} (${clientId})`);
             for (const [xferId, pending] of this.pendingTransfers.entries()) {
               if (pending.clientId === clientId) {
@@ -985,7 +1051,7 @@ class MacDropModule {
               }
             }
             this.activeClients.delete(clientId);
-          } else if (curr.writingDisk) {
+          } else if (curr.writingDisk || curr.allChunksQueued) {
             console.log(`[MacDrop] Reverse channel stream completed; awaiting disk write ACK from ${name}`);
           } else if (curr.probing) {
             // Intentionally closed for probe/poll: probe logic handles reconnection
@@ -1414,6 +1480,8 @@ class MacDropModule {
         }
 
         if (!transferObj) {
+          res.shouldKeepAlive = false;
+          res.setHeader('Connection', 'close');
           return res.json({ ok: false, error: 'Empty payload' });
         }
 
@@ -1437,6 +1505,8 @@ class MacDropModule {
           }, 30000);
         }
 
+        res.shouldKeepAlive = false;
+        res.setHeader('Connection', 'close');
         res.json({
           ok: true,
           message: 'File staged on server',
@@ -1903,7 +1973,18 @@ class MacDropModule {
         }
 
         if (!fileBuffer || fileBuffer.length === 0) {
-          return res.status(400).json({ ok: false, error: 'No file payload received' });
+          let emptyName = '';
+          try {
+            emptyName = decodeURIComponent(req.headers['x-filename'] || req.query.filename || '');
+          } catch (_) {
+            emptyName = req.headers['x-filename'] || req.query.filename || '';
+          }
+          return res.status(400).json({
+            ok: false,
+            error: emptyName
+              ? `No file payload received for "${emptyName}" (0-byte Data Fork). Web browsers cannot read macOS Resource Forks on Classic applications or extensions — package as .bin/.sit/.hqx first or use MacDrop X.`
+              : 'No file payload received (0-byte file or Resource-Fork-only Classic application/extension). Package as .bin/.sit/.hqx first or use MacDrop X.',
+          });
         }
 
         // Prepare MacBinary II payload
@@ -2115,9 +2196,19 @@ class MacDropModule {
         }
       }
 
-      // 3. Fallback: if the stored selectedTargetId is offline/stale, fall back to any online client
-      if (targetQuery === this.selectedTargetId && activeList.length > 0) {
-        return [activeList[0]];
+      // 3. Fallback: if the stored selectedTargetId is offline/stale, fall back to any online client or direct target
+      if (targetQuery === this.selectedTargetId) {
+        if (activeList.length > 0) {
+          return [activeList[0]];
+        }
+        for (const t of [...(data.targets || []), ...(data.knownDevices || [])]) {
+          if (t && t.ip) {
+            const isOnline = Boolean(this.pingCache.get(`${t.ip}:${t.port || DEFAULT_MACDROP_PORT}`)?.online);
+            if (isOnline) {
+              return [{ ...t, mode: 'DIRECT' }];
+            }
+          }
+        }
       }
       return [];
     }
@@ -2175,30 +2266,39 @@ class MacDropModule {
           target.lastSeen = Date.now();
 
           clientRes.shouldKeepAlive = false;
+          clientRes.sendDate = false;
           if (clientRes.socket && typeof clientRes.socket.setNoDelay === 'function') {
             clientRes.socket.setNoDelay(true);
           }
 
-          clientRes.writeHead(200, {
-            'Content-Type': 'application/x-macbinary',
-            'Content-Length': buffer.length,
-            'Connection': 'close',
-            'X-MacDrop-Status': 'STREAM',
-            'X-Filename': encodeURIComponent(macInfo.fileName),
-            'X-Transfer-Id': transferId,
-          });
+          const streamHeaders = this._buildAlignedStreamHeaders(macInfo.fileName, buffer.length, transferId);
+          clientRes.writeHead(200, streamHeaders);
+
+          const sampleTxQueue = this._createTxQueueSampler(clientRes.socket, 100);
 
           const CHUNK_SIZE = 32768; // 32 KB chunk streaming
           let offset = 0;
+          let allChunksQueued = false;
+          let clientClosedDuringDrain = false;
           let transferAborted = false;
           let abortReason = null;
 
           const onStreamError = (err) => {
+            if (allChunksQueued && err && (err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_PREMATURE_CLOSE')) {
+              clientClosedDuringDrain = true;
+              return;
+            }
             transferAborted = true;
             abortReason = new Error(`Network error during transfer: ${err.message || err}`);
           };
 
           const onStreamClose = () => {
+            if (allChunksQueued) {
+              // Small transfers (< ~1 MB) can finish reading & closing TCP on the 68k Mac
+              // while the post-write txQueue drain loop is still polling; defer final pass/fail to ACK.
+              clientClosedDuringDrain = true;
+              return;
+            }
             transferAborted = true;
             abortReason = new Error('Macintosh client closed connection during file streaming');
           };
@@ -2226,8 +2326,8 @@ class MacDropModule {
             target.lastSeen = Date.now();
             const now = Date.now();
 
-            // Track genuine wire-delivered bytes via kernel TCP send queue
-            const txQueue = this._getSocketTxQueue(clientRes.socket);
+            // Track genuine wire-delivered bytes via kernel TCP send queue (throttled to <= 10 Hz)
+            const txQueue = sampleTxQueue(offset >= buffer.length);
             const delivered = Math.max(0, offset - txQueue);
 
             if (this.activeTransfer) {
@@ -2275,10 +2375,13 @@ class MacDropModule {
             }
           }
 
+          allChunksQueued = true;
+          target.allChunksQueued = true;
+
           // All chunks have been queued into the socket.
           // Now wait for the remaining kernel socket buffer to actually drain across the wire to the Mac!
-          while (!transferAborted && !clientRes.destroyed) {
-            const txQueue = this._getSocketTxQueue(clientRes.socket);
+          while (!transferAborted && !clientClosedDuringDrain && !clientRes.destroyed && !this.recentTransferAcks.has(transferId)) {
+            const txQueue = sampleTxQueue(true);
             const now = Date.now();
             const delivered = Math.max(0, buffer.length - txQueue);
 
@@ -2304,11 +2407,21 @@ class MacDropModule {
             }
 
             if (txQueue <= 0) break;
-            await new Promise(r => setTimeout(r, 40));
+            await new Promise((r) => {
+              let timer = setTimeout(() => {
+                clientRes.removeListener('close', onWake);
+                r();
+              }, 40);
+              const onWake = () => {
+                clearTimeout(timer);
+                r();
+              };
+              clientRes.once('close', onWake);
+            });
           }
 
           // Wait for any remaining buffer in socket to drain to wire
-          if (clientRes.socket && clientRes.socket.writableLength > 0) {
+          if (!transferAborted && !clientClosedDuringDrain && clientRes.socket && clientRes.socket.writableLength > 0) {
             await new Promise((resolveDrain) => {
               let timer = setTimeout(resolveDrain, 5000);
               clientRes.socket.once('drain', () => {
@@ -2327,10 +2440,12 @@ class MacDropModule {
 
           // Mark disk-write phase ONLY now that ALL bytes have genuinely been transmitted over the wire
           target.transferInProgress = false;
+          delete target.allChunksQueued;
           target.writingDisk = true;
           target.lastSeen = Date.now();
 
           if (this.activeTransfer) {
+            this.activeTransfer.bytesSent = buffer.length;
             this.activeTransfer.writingDisk = true;
             this.activeTransfer.status = 'WRITING_DISK';
             this.activeTransfer.writingDiskStartedAt = Date.now();
@@ -2341,9 +2456,11 @@ class MacDropModule {
           }
 
           // Complete HTTP stream and send TCP FIN immediately (Connection: close)
-          await new Promise((resolveEnd) => {
-            clientRes.end(resolveEnd);
-          });
+          if (!clientRes.writableEnded && !clientRes.destroyed) {
+            await new Promise((resolveEnd) => {
+              clientRes.end(resolveEnd);
+            });
+          }
 
           // Dynamic timeout for disk write based on file size:
           // Base 45s + 1s per 3MB (e.g. 200MB gets 45 + 66 = 111s)
@@ -2379,6 +2496,7 @@ class MacDropModule {
         } catch (err) {
           if (target) {
             target.transferInProgress = false;
+            delete target.allChunksQueued;
             target.writingDisk = false;
           }
           if (this.activeTransfer) {
@@ -2401,6 +2519,7 @@ class MacDropModule {
             const CHUNK_SIZE = 32768;
             let offset = 0;
             const directStartTime = Date.now();
+            const sampleTxQueue = this._createTxQueueSampler(socket, 100);
 
             while (offset < buffer.length) {
               if (socket.destroyed) break;
@@ -2410,7 +2529,7 @@ class MacDropModule {
 
               const ok = socket.write(chunk);
               const now = Date.now();
-              const txQueue = this._getSocketTxQueue(socket);
+              const txQueue = sampleTxQueue(offset >= buffer.length);
               const delivered = Math.max(0, offset - txQueue);
 
               if (this.activeTransfer) {

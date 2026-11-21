@@ -86,8 +86,12 @@ typedef struct {
     Boolean         writePending;
 } MacBinaryRx;
 
+typedef void (*WaitPollHook)(void);
+void MacBinaryRx_SetWaitPollHook(WaitPollHook hook);
+
 void MacBinaryRx_Init(MacBinaryRx *rx);
 OSErr MacBinaryRx_WaitWrite(MacBinaryRx *rx);
+long MacBinaryRx_ConsumeHeader(MacBinaryRx *rx, const unsigned char *buf, long count);
 OSErr MacBinaryRx_ProcessBytes(MacBinaryRx *rx, const unsigned char *buf, long count);
 void MacBinaryRx_Finish(MacBinaryRx *rx);
 void MacBinaryRx_FlushDestVolume(void);

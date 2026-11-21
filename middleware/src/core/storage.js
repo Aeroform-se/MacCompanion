@@ -37,7 +37,10 @@ function createModuleStore(moduleId, defaultState = {}) {
     const current = load();
     const next = { ...current, ...data, updatedAt: new Date().toISOString() };
     const tmpPath = `${filePath}.tmp`;
-    fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), 'utf8');
+    fs.writeFileSync(tmpPath, JSON.stringify(next, null, 2), { encoding: 'utf8', mode: 0o600 });
+    try {
+      fs.chmodSync(tmpPath, 0o600);
+    } catch (_) {}
     fs.renameSync(tmpPath, filePath);
     return next;
   }
