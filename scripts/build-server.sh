@@ -43,6 +43,9 @@ services:
     volumes:
       - /share/CACHEDEV1_DATA/Container/maccompanion/data:/app/data
     restart: unless-stopped
+    # For Spotify Soloist (Recommended) mDNS/Zeroconf pairing on QNAP/Linux,
+    # uncomment network_mode: host and comment out the ports block below:
+    # network_mode: host
     ports:
       - 6800:6800 # Web GUI & HTTP API
       - 6801:6801/udp # Local LAN Discovery
@@ -59,6 +62,7 @@ COPYFILE_DISABLE=1 tar -czf "$SRC_ARCHIVE" \
     .dockerignore \
     package.json \
     package-lock.json \
+    native \
     src
 
 # 4. Save complete offline Docker container image archive (.tar.gz)

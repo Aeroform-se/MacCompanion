@@ -1,11 +1,14 @@
 const net = require('net');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const { EventEmitter } = require('events');
 const { Transform } = require('stream');
 const { DATA_DIR, isSpotifyDebugEnabled } = require('../../core/storage');
 const audioHub = require('../../core/audio-hub');
+const { SoloistBinaryManager, maskApiKey } = require('./soloist-manager');
+const { SoloistWsClient } = require('./soloist-ws');
 const {
   generateCodeVerifier,
   generateCodeChallenge,
@@ -413,6 +416,32 @@ function tightenLibrespotPerms(cacheDir) {
   } catch (_) {}
 }
 
+function hasBinaryInPath(binName) {
+  try {
+    execSync(`which ${binName}`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fast check whether an S16_LE PCM buffer contains any non-zero audio sample.
+ * Used to suppress continuous zero-filled idle silence from PulseAudio when Soloist is paused/idle.
+ */
+function isNonZeroPcm(buf) {
+  if (!buf || buf.length === 0) return false;
+  const len = buf.length;
+  const aligned = len - (len % 4);
+  for (let i = 0; i < aligned; i += 4) {
+    if (buf.readUInt32LE(i) !== 0) return true;
+  }
+  for (let i = aligned; i < len; i++) {
+    if (buf[i] !== 0) return true;
+  }
+  return false;
+}
+
 class AudioStreamEngine extends EventEmitter {
   constructor({ store, getValidAccessToken, getFetchImpl }) {
     super();
@@ -420,6 +449,9 @@ class AudioStreamEngine extends EventEmitter {
     this.getValidAccessToken = getValidAccessToken;
     this.getFetchImpl = getFetchImpl || (() => global.fetch);
     this.librespotProc = null;
+    this.soloistProc = null;
+    this.pulseProc = null;
+    this.parecProc = null;
     this.ffmpegProc = null;
     this.pacer = null;
     this.tcpServer = null;
@@ -435,7 +467,23 @@ class AudioStreamEngine extends EventEmitter {
     this.bytesBroadcast = 0;
     this.lastMusicChunkAt = 0;
     this.librespotStartedToken = null;
-    this.hasBinaries = this.checkBinaries();
+    this.activeBackendStarted = null;
+
+    this.soloistManager = new SoloistBinaryManager({
+      store,
+      dataDir: DATA_DIR,
+      getFetchImpl: () => this.getFetchImpl(),
+    });
+    this.soloistWs = new SoloistWsClient();
+    this.soloistReceiverName = null;
+    this.soloistDeviceId = null;
+    this.soloistZeroconfPort = null;
+    this.soloistZeroconfPath = null;
+    this.soloistSessionRestored = null;
+    this._pulseRuntimeDir = path.join(os.tmpdir(), `maccompanion-pulse-${process.pid}`);
+
+    this._wireSoloistWsEvents();
+    this.checkBinaries();
 
     // Multi-Mac network speaker registry: Map<clientId, { id, ip, baseName, lastSeen }>
     this.macClients = new Map();
@@ -446,6 +494,62 @@ class AudioStreamEngine extends EventEmitter {
     // Cache of Linux kernel TCP send buffer (`tx_queue` in `/proc/net/tcp`) per remotePort
     this._procTcpCacheAt = 0;
     this._procTcpTxByRemotePort = new Map();
+  }
+
+  _wireSoloistWsEvents() {
+    this.soloistWs.on('authState', (msg) => {
+      const loggedIn = Boolean(msg && msg.logged_in);
+      this.soloistSessionRestored = loggedIn;
+      if (loggedIn) {
+        this.lastError = null;
+        if (this.state === 'AWAITING_SPEAKER_AUTH' || this.state === 'STARTING') {
+          this.state = 'READY';
+        }
+        const saved = this.store.load();
+        if (!saved.soloistSessionPaired) {
+          this.store.save({ soloistSessionPaired: true });
+        }
+      } else if (this.isSoloistBackendActive()) {
+        if (this.state === 'READY' || this.state === 'PLAYING') {
+          this.state = 'AWAITING_SPEAKER_AUTH';
+        }
+      }
+      this.emit('soloistEvent', { kind: 'authState', data: msg });
+    });
+
+    this.soloistWs.on('playbackState', (msg) => {
+      if (msg && msg.status === 'playing' && this.state === 'READY') {
+        this.state = 'PLAYING';
+      } else if (msg && msg.status === 'paused') {
+        this.onPause({ discardMs: 250 });
+        if (this.state === 'PLAYING') this.state = 'READY';
+      }
+      this.emit('soloistEvent', { kind: 'playbackState', data: msg });
+    });
+
+    this.soloistWs.on('playbackChanged', (msg) => {
+      const status = msg && msg.status ? String(msg.status).toLowerCase() : '';
+      if (status === 'paused' || status === 'idle' || status === 'stopped') {
+        this.onPause({ discardMs: 250 });
+        if (this.state === 'PLAYING') this.state = 'READY';
+      } else if (status === 'playing') {
+        this.onResume();
+        this.state = 'PLAYING';
+      }
+      this.emit('soloistEvent', { kind: 'playbackChanged', data: msg });
+    });
+
+    this.soloistWs.on('trackChange', (item) => {
+      const uri = (item && item.uri) || '';
+      this.emit('trackChange', uri || 'soloist:track');
+      this.emit('soloistEvent', { kind: 'trackChange', data: item });
+    });
+
+    for (const evt of ['positionSync', 'volumeChanged', 'optionsChanged', 'deviceChanged']) {
+      this.soloistWs.on(evt, (payload) => {
+        this.emit('soloistEvent', { kind: evt, data: payload });
+      });
+    }
   }
 
   /**
@@ -509,12 +613,153 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   checkBinaries() {
+    this.hasFfmpeg = hasBinaryInPath('ffmpeg');
+    this.hasLibrespot = hasBinaryInPath('librespot');
+    this.hasPulseAudio = hasBinaryInPath('pulseaudio') && hasBinaryInPath('parec');
+    this.hasBinaries = Boolean(this.hasFfmpeg && (this.hasLibrespot || this.hasPulseAudio));
+    return this.hasBinaries;
+  }
+
+  getEffectiveSoloistApiKey() {
+    const envKey = process.env.SOLOIST_API_KEY ? process.env.SOLOIST_API_KEY.trim() : '';
+    const data = this.store.load();
+    const storeKey = data.soloistApiKey ? String(data.soloistApiKey).trim() : '';
+    const apiKey = envKey || storeKey || '';
+    return {
+      apiKey,
+      source: envKey ? 'env' : (storeKey ? 'store' : 'none'),
+      masked: maskApiKey(apiKey),
+    };
+  }
+
+  getActiveAudioBackend() {
+    const envBackend = String(process.env.SPOTIFY_AUDIO_BACKEND || '').toLowerCase().trim();
+    if (envBackend === 'soloist' || envBackend === 'librespot') {
+      return envBackend;
+    }
+    const data = this.store.load();
+    if (data.audioBackend === 'soloist' || data.audioBackend === 'librespot') {
+      return data.audioBackend;
+    }
+    if (this.getEffectiveSoloistApiKey().apiKey) {
+      return 'soloist';
+    }
+    return 'librespot';
+  }
+
+  isSoloistBackendActive() {
+    return this.getActiveAudioBackend() === 'soloist';
+  }
+
+  isSoloistActiveSpeaker() {
+    return Boolean(
+      this.isSoloistBackendActive() &&
+      this.soloistProc &&
+      this.soloistWs.connected &&
+      this.soloistWs.loggedIn &&
+      this.soloistWs.isActiveDevice
+    );
+  }
+
+  hasSoloistBackendChosen() {
+    const envBackend = String(process.env.SPOTIFY_AUDIO_BACKEND || '').toLowerCase().trim();
+    if (envBackend === 'soloist' || envBackend === 'librespot') return true;
+    const data = this.store.load();
+    if (data.audioBackend === 'soloist' || data.audioBackend === 'librespot') return true;
+    return Boolean(this.getEffectiveSoloistApiKey().apiKey || this.isPairedLibrespot());
+  }
+
+  async trySoloistCommand(command, params = {}) {
+    if (!this.isSoloistActiveSpeaker()) return false;
     try {
-      execSync('which librespot && which ffmpeg', { stdio: 'ignore' });
+      await this.soloistWs.sendCommand(command, params);
       return true;
     } catch {
       return false;
     }
+  }
+
+  async configureSoloist({ backend, apiKey, clearKey = false } = {}) {
+    const updates = {};
+    if (backend === 'soloist' || backend === 'librespot') {
+      updates.audioBackend = backend;
+    }
+    if (clearKey) {
+      updates.soloistApiKey = null;
+      this.clearSoloistSession();
+    } else if (typeof apiKey === 'string' && apiKey.trim()) {
+      updates.soloistApiKey = apiKey.trim();
+      if (!updates.audioBackend) {
+        updates.audioBackend = 'soloist';
+      }
+    }
+
+    this.lastError = null;
+    if (Object.keys(updates).length > 0) {
+      this.store.save(updates);
+    }
+
+    const activeBackend = this.getActiveAudioBackend();
+    if (activeBackend === 'librespot') {
+      this._stopPulseAudio();
+      await this.ensureStarted({ forceRestart: true });
+      return this.getStatus();
+    }
+
+    const effectiveKey = this.getEffectiveSoloistApiKey().apiKey;
+    if (effectiveKey) {
+      await this.soloistManager.ensureBinary();
+      await this.ensureStarted({ forceRestart: true });
+    } else {
+      this.stopProcesses();
+      this._stopPulseAudio();
+      this.state = 'AWAITING_SPEAKER_AUTH';
+    }
+    return this.getStatus();
+  }
+
+  async applyUploadedSoloistAuth(archiveBuffer) {
+    this.stopProcesses();
+    this.lastError = null;
+    await this.soloistManager.importAuthArchive(archiveBuffer);
+    this.soloistSessionRestored = true;
+    this.store.save({
+      audioBackend: 'soloist',
+      soloistSessionPaired: true,
+    });
+
+    const effectiveKey = this.getEffectiveSoloistApiKey().apiKey;
+    if (effectiveKey) {
+      await this.soloistManager.ensureBinary();
+      await this.ensureStarted({ forceRestart: true });
+      // Wait briefly for Soloist WebSocket auth_state verification so caller gets live login feedback
+      if (!this.soloistWs.loggedIn) {
+        await new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            this.soloistWs.removeListener('authState', onAuth);
+            resolve();
+          };
+          const timer = setTimeout(finish, 3500);
+          const onAuth = (msg) => {
+            if (msg && msg.logged_in) {
+              finish();
+            }
+          };
+          this.soloistWs.on('authState', onAuth);
+        });
+      }
+      if (!this.soloistWs.loggedIn && this.soloistSessionRestored === false) {
+        throw new Error('Uploaded credentials could not be restored — make sure the same SOLOIST_API_KEY was used when pairing.');
+      }
+    } else {
+      this._stopPulseAudio();
+      this.state = 'AWAITING_SPEAKER_AUTH';
+    }
+    return this.getStatus();
   }
 
   getSampleRateConfig() {
@@ -534,6 +779,23 @@ class AudioStreamEngine extends EventEmitter {
     const { hz } = this.getSampleRateConfig();
     const filterChain = buildFfmpegFilterChain(hz, dsp);
     return { profile, dsp, filterChain };
+  }
+
+  _maybeScheduleRenameRestart(desiredReceiverName, { force = false } = {}) {
+    const activeProc = this.soloistProc || this.librespotProc;
+    const activeReceiverName = this.soloistProc ? this.soloistReceiverName : this.librespotReceiverName;
+    if (
+      activeProc &&
+      activeReceiverName &&
+      activeReceiverName !== desiredReceiverName &&
+      (force || activeReceiverName === DEVICE_NAME)
+    ) {
+      if (this._renameRestartTimer) clearTimeout(this._renameRestartTimer);
+      this._renameRestartTimer = setTimeout(() => {
+        this._renameRestartTimer = null;
+        this.ensureStarted({ forceRestart: true }).catch(() => {});
+      }, 250);
+    }
   }
 
   /**
@@ -578,18 +840,9 @@ class AudioStreamEngine extends EventEmitter {
       if (stored.speakerDeviceName !== desiredReceiverName) {
         this.store.save({ speakerDeviceName: desiredReceiverName });
       }
-      if (
-        this.librespotProc &&
-        this.librespotReceiverName &&
-        this.librespotReceiverName !== desiredReceiverName &&
-        (forceRename || nameChanged || (this.librespotReceiverName === DEVICE_NAME && desiredReceiverName !== DEVICE_NAME))
-      ) {
-        if (this._renameRestartTimer) clearTimeout(this._renameRestartTimer);
-        this._renameRestartTimer = setTimeout(() => {
-          this._renameRestartTimer = null;
-          this.ensureStarted({ forceRestart: true }).catch(() => {});
-        }, 250);
-      }
+      this._maybeScheduleRenameRestart(desiredReceiverName, {
+        force: Boolean(forceRename || nameChanged),
+      });
     }
 
     return activeEntry;
@@ -658,13 +911,7 @@ class AudioStreamEngine extends EventEmitter {
       if (stored.speakerDeviceName !== desiredName) {
         this.store.save({ speakerDeviceName: desiredName });
       }
-      if (this.librespotProc && this.librespotReceiverName && this.librespotReceiverName !== desiredName) {
-        if (this._renameRestartTimer) clearTimeout(this._renameRestartTimer);
-        this._renameRestartTimer = setTimeout(() => {
-          this._renameRestartTimer = null;
-          this.ensureStarted({ forceRestart: true }).catch(() => {});
-        }, 250);
-      }
+      this._maybeScheduleRenameRestart(desiredName, { force: true });
       return found;
     }
     return null;
@@ -696,6 +943,7 @@ class AudioStreamEngine extends EventEmitter {
     if (!lower) return false;
     if (lower.includes('macintosh 68k')) return true;
     if (this.librespotReceiverName && lower === this.librespotReceiverName.toLowerCase()) return true;
+    if (this.soloistReceiverName && lower === this.soloistReceiverName.toLowerCase()) return true;
     const targetName = this.getLibrespotDeviceName().toLowerCase();
     if (targetName && lower === targetName) return true;
     for (const m of this.getMacClientList()) {
@@ -774,7 +1022,7 @@ class AudioStreamEngine extends EventEmitter {
     }
   }
 
-  isPaired() {
+  isPairedLibrespot() {
     const data = this.store.load();
     return Boolean(
       data.librespotRefreshToken ||
@@ -782,6 +1030,32 @@ class AudioStreamEngine extends EventEmitter {
       this.zeroconfAuthenticated ||
       this.hasCachedCredentials()
     );
+  }
+
+  isPairedSoloist() {
+    if (!this.getEffectiveSoloistApiKey().apiKey) return false;
+    if (this.soloistWs.loggedIn) return true;
+    if (this.soloistSessionRestored === false) return false;
+    const data = this.store.load();
+    return Boolean(this.soloistSessionRestored || data.soloistSessionPaired);
+  }
+
+  isPaired() {
+    return this.isSoloistBackendActive() ? this.isPairedSoloist() : this.isPairedLibrespot();
+  }
+
+  clearSoloistSession() {
+    this.soloistSessionRestored = false;
+    this.soloistWs.disconnect();
+    this.soloistDeviceId = null;
+    this.soloistZeroconfPort = null;
+    this.soloistZeroconfPath = null;
+    try {
+      fs.rmSync(this.soloistManager.stateDir, { recursive: true, force: true });
+    } catch {}
+    if (this.store) {
+      this.store.save({ soloistSessionPaired: false });
+    }
   }
 
   /**
@@ -1013,8 +1287,394 @@ class AudioStreamEngine extends EventEmitter {
   }
 
   async _ensureStartedImpl({ forceRestart = false } = {}) {
-    if (!this.hasBinaries) {
+    const backend = this.getActiveAudioBackend();
+    if (backend === 'soloist') {
+      return this._ensureStartedSoloistImpl({ forceRestart });
+    }
+    return this._ensureStartedLibrespotImpl({ forceRestart });
+  }
+
+  _buildPulseEnv() {
+    const pulseDir = path.join(this._pulseRuntimeDir, 'pulse');
+    if (!fs.existsSync(pulseDir)) {
+      fs.mkdirSync(pulseDir, { recursive: true, mode: 0o700 });
+    }
+    return {
+      ...process.env,
+      XDG_RUNTIME_DIR: this._pulseRuntimeDir,
+      PULSE_RUNTIME_PATH: pulseDir,
+    };
+  }
+
+  _hasPulseNativeSocket() {
+    return (
+      fs.existsSync(path.join(this._pulseRuntimeDir, 'pulse', 'native')) ||
+      fs.existsSync(path.join(this._pulseRuntimeDir, 'native'))
+    );
+  }
+
+  _stopPulseAudio() {
+    if (this.parecProc) {
+      const oldParec = this.parecProc;
+      this.parecProc = null;
+      try { oldParec.kill('SIGKILL'); } catch {}
+    }
+    if (this.pulseProc) {
+      const oldPulse = this.pulseProc;
+      this.pulseProc = null;
+      try { oldPulse.kill('SIGTERM'); } catch {}
+    }
+  }
+
+  async _ensurePulseAudio() {
+    const pulseEnv = this._buildPulseEnv();
+
+    if (!this.pulseProc || this.pulseProc.exitCode !== null || !this._hasPulseNativeSocket()) {
+      if (this.pulseProc) {
+        try { this.pulseProc.kill('SIGKILL'); } catch {}
+        this.pulseProc = null;
+      }
+      const pulseArgs = [
+        '--daemonize=no',
+        '--system=false',
+        '--disallow-exit=true',
+        '--exit-idle-time=-1',
+        '-n',
+        '-L', 'module-native-protocol-unix',
+        '-L', 'module-null-sink sink_name=soloist_sink sink_properties=device.description=MacCompanion_Soloist',
+      ];
+      const paProc = spawn('pulseaudio', pulseArgs, {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: pulseEnv,
+      });
+      this.pulseProc = paProc;
+
+      paProc.stderr.on('data', (data) => {
+        const msg = data.toString().trim();
+        if (msg && isSpotifyDebugEnabled()) {
+          console.log('[AudioEngine:pulseaudio]', msg);
+        }
+      });
+
+      paProc.on('exit', (code, signal) => {
+        if (this.pulseProc === paProc) {
+          this.pulseProc = null;
+          if (isSpotifyDebugEnabled()) {
+            console.log(`[AudioEngine:pulseaudio] exited code=${code}${signal ? ` signal=${signal}` : ''}`);
+          }
+        }
+      });
+
+      const deadline = Date.now() + 2500;
+      while (!this._hasPulseNativeSocket() && Date.now() < deadline) {
+        if (paProc.exitCode !== null) {
+          throw new Error(`PulseAudio exited prematurely with code ${paProc.exitCode}`);
+        }
+        await new Promise((r) => setTimeout(r, 40));
+      }
+      if (!this._hasPulseNativeSocket()) {
+        throw new Error('Timed out waiting for PulseAudio runtime socket');
+      }
+    }
+
+    return pulseEnv;
+  }
+
+  _spawnParecCapture(pulseEnv) {
+    if (this.parecProc) {
+      const oldParec = this.parecProc;
+      this.parecProc = null;
+      try { oldParec.kill('SIGKILL'); } catch {}
+    }
+
+    const parecProc = spawn('parec', [
+      '--raw',
+      '--format=s16le',
+      '--rate=44100',
+      '--channels=2',
+      '--device=soloist_sink.monitor',
+      '--latency-msec=20',
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: pulseEnv,
+    });
+    this.parecProc = parecProc;
+
+    parecProc.stdout.on('data', (chunk) => {
+      if (!this.pacer || this.parecProc !== parecProc) return;
+      if (audioHub.isVoiceGateBlockingSpotify()) return;
+
+      const wsPlaying = this.soloistWs.connected && this.soloistWs.playbackStatus === 'playing';
+      const wsPausedOrIdle = this.soloistWs.connected &&
+        (this.soloistWs.playbackStatus === 'paused' || this.soloistWs.playbackStatus === 'idle');
+      if (wsPausedOrIdle) return;
+      if (!wsPlaying && !isNonZeroPcm(chunk)) return;
+
+      this.pacer.write(chunk);
+    });
+
+    parecProc.stderr.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (msg && isSpotifyDebugEnabled()) {
+        console.log('[AudioEngine:parec]', msg);
+      }
+    });
+
+    parecProc.on('exit', (code, signal) => {
+      if (this.parecProc === parecProc) {
+        this.parecProc = null;
+        if (this.soloistProc && this.state !== 'STOPPED' && this.isSoloistBackendActive()) {
+          setTimeout(() => {
+            if (this.soloistProc && this.state !== 'STOPPED' && this.isSoloistBackendActive()) {
+              this._spawnParecCapture(this._buildPulseEnv());
+            }
+          }, 300);
+        } else if (isSpotifyDebugEnabled()) {
+          console.log(`[AudioEngine:parec] exited code=${code}${signal ? ` signal=${signal}` : ''}`);
+        }
+      }
+    });
+  }
+
+  async _ensureStartedSoloistImpl({ forceRestart = false } = {}) {
+    if (!this.hasFfmpeg || !this.hasPulseAudio) {
       this.state = 'UNAVAILABLE';
+      this.lastError = 'FFmpeg or PulseAudio runtime missing for Spotify Soloist';
+      return false;
+    }
+
+    const { apiKey } = this.getEffectiveSoloistApiKey();
+    if (!apiKey) {
+      this.stopProcesses();
+      this.state = 'AWAITING_SPEAKER_AUTH';
+      this.lastError = null;
+      return false;
+    }
+
+    const { hz } = this.getSampleRateConfig();
+    const { filterChain } = this.getDspConfig();
+    const receiverName = this.getLibrespotDeviceName();
+
+    if (
+      !forceRestart &&
+      this.soloistProc &&
+      this.activeBackendStarted === 'soloist' &&
+      this.soloistReceiverName === receiverName &&
+      this.pacer
+    ) {
+      if (!this.ffmpegProc || this.currentRateHz !== hz || this.currentFilterChain !== filterChain) {
+        this.spawnFfmpegTranscoder(hz);
+      }
+      return true;
+    }
+
+    this.stopProcesses();
+    this.state = 'STARTING';
+    this.activeBackendStarted = 'soloist';
+    this.lastError = null;
+
+    let binPath;
+    try {
+      binPath = await this.soloistManager.ensureBinary();
+    } catch (err) {
+      this.lastError = `Failed to download Spotify Soloist binary: ${err.message}`;
+      this.state = 'AWAITING_SPEAKER_AUTH';
+      console.error('[AudioEngine:soloist]', this.lastError);
+      return false;
+    }
+
+    let pulseEnv;
+    try {
+      pulseEnv = await this._ensurePulseAudio();
+    } catch (err) {
+      this.lastError = err.message;
+      this.state = 'UNAVAILABLE';
+      console.error('[AudioEngine:soloist]', err.message);
+      return false;
+    }
+
+    this.soloistManager.ensureDirs();
+    this.soloistReceiverName = receiverName;
+    this.soloistDeviceId = null;
+    this.soloistZeroconfPort = null;
+    this.soloistZeroconfPath = null;
+
+    this.pacer = new RealTimePacer();
+    this.pacer.on('error', () => {});
+    this.spawnFfmpegTranscoder(hz);
+    this._spawnParecCapture(pulseEnv);
+
+    const soloistArgs = [
+      '-n', receiverName,
+      '-D', this.soloistManager.stateDir,
+      '-C', this.soloistManager.cacheDir,
+      '-z', '256',
+      '-i', '100',
+      '-w', '127.0.0.1:0',
+      '-k', apiKey,
+      '-v',
+    ];
+
+    const safeArgs = soloistArgs.map((arg, idx) => (soloistArgs[idx - 1] === '-k' ? `<apiKey len=${arg.length}>` : arg));
+    console.log(`[AudioEngine] Starting Spotify Soloist ("${receiverName}") -> PulseAudio -> FFmpeg (8-bit unsigned mono @ ${hz} Hz)`);
+    if (isSpotifyDebugEnabled()) {
+      console.log(`[AudioEngine:Debug] soloist args: ${safeArgs.join(' ')}`);
+    }
+
+    const solProc = spawn(binPath, soloistArgs, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: pulseEnv,
+    });
+    this.soloistProc = solProc;
+
+    let authResolved = false;
+    let resolveAuthWait = null;
+    const authWaitPromise = new Promise((resolve) => {
+      resolveAuthWait = resolve;
+      const t = setTimeout(() => {
+        if (!authResolved) {
+          authResolved = true;
+          resolve();
+        }
+      }, 2000);
+      if (typeof t.unref === 'function') t.unref();
+    });
+
+    const handleSoloistLine = (rawLine) => {
+      // eslint-disable-next-line no-control-regex
+      const line = rawLine.replace(/\x1b\[[0-9;]*m/g, '').trim();
+      if (!line) return;
+
+      const expiryMatch = line.match(/client expires in\s+(\d+)\s+days/i);
+      if (expiryMatch) {
+        this.soloistManager.recordExpiryDays(parseInt(expiryMatch[1], 10));
+      }
+
+      const wsMatch = line.match(/websocket server listening on\s+([\d.]+):(\d+)/i);
+      if (wsMatch) {
+        const wsPort = parseInt(wsMatch[2], 10);
+        if (wsPort > 0) {
+          this.soloistWs.connect(wsPort, wsMatch[1]);
+        }
+      }
+
+      const devMatch = line.match(/ready,\s+device_name=(.+?)\s+device_id=([0-9a-f-]+)/i);
+      if (devMatch) {
+        this.soloistDeviceId = devMatch[2];
+      }
+
+      const zcMatch = line.match(/Started ZeroConf service on port\s+(\d+)\s+path\s+(\S+)/i);
+      if (zcMatch) {
+        this.soloistZeroconfPort = parseInt(zcMatch[1], 10);
+        this.soloistZeroconfPath = zcMatch[2];
+      }
+
+      if (line.includes('No session to restore') || line.includes('waiting for login')) {
+        this.soloistSessionRestored = false;
+        this.store.save({ soloistSessionPaired: false });
+        if (this.state === 'STARTING') {
+          this.state = 'AWAITING_SPEAKER_AUTH';
+        }
+      }
+
+      if (line.includes('Authenticated as') || line.includes('session restored') || line.includes('Logged in')) {
+        this.soloistSessionRestored = true;
+        this.store.save({ soloistSessionPaired: true });
+        this.state = 'READY';
+        this.lastError = null;
+        if (!authResolved && resolveAuthWait) {
+          authResolved = true;
+          resolveAuthWait();
+        }
+      }
+
+      if (line.includes('invalid api key') || line.includes('API key') && line.toLowerCase().includes('error')) {
+        this.lastError = 'Spotify Soloist rejected the configured API key.';
+      }
+
+      if ((line.includes(' E [') && !line.includes('Unable to open settings file')) || (line.toLowerCase().includes('error') && !line.includes('Unable to open settings file'))) {
+        console.warn('[AudioEngine:soloist]', line);
+      } else if (isSpotifyDebugEnabled()) {
+        console.log('[AudioEngine:soloist]', line);
+      }
+    };
+
+    let solOutBuf = '';
+    let solErrBuf = '';
+    const feedStream = (isErr, data) => {
+      if (isErr) {
+        solErrBuf += data.toString();
+        const lines = solErrBuf.split(/\r?\n/);
+        solErrBuf = lines.pop() || '';
+        for (const l of lines) handleSoloistLine(l);
+      } else {
+        solOutBuf += data.toString();
+        const lines = solOutBuf.split(/\r?\n/);
+        solOutBuf = lines.pop() || '';
+        for (const l of lines) handleSoloistLine(l);
+      }
+    };
+
+    solProc.stdout.on('data', (d) => feedStream(false, d));
+    solProc.stderr.on('data', (d) => feedStream(true, d));
+
+    solProc.on('exit', (code, signal) => {
+      if (solOutBuf.trim()) handleSoloistLine(solOutBuf);
+      if (solErrBuf.trim()) handleSoloistLine(solErrBuf);
+      solOutBuf = '';
+      solErrBuf = '';
+      console.log(`[AudioEngine] soloist exited with code ${code}${signal ? ` signal=${signal}` : ''}`);
+
+      if (!authResolved && resolveAuthWait) {
+        authResolved = true;
+        resolveAuthWait();
+      }
+
+      if (this.soloistProc === solProc) {
+        this.soloistProc = null;
+        this.soloistWs.disconnect();
+        if (this.activeBackendStarted === 'soloist') {
+          this.activeBackendStarted = null;
+        }
+        if (code === 10 && this.state !== 'STOPPED' && this.isSoloistBackendActive()) {
+          console.warn('[AudioEngine:soloist] Build expired (exit code 10); renewing from Spotify CDN...');
+          this.soloistManager.ensureBinary({ forceDownload: true })
+            .then(() => {
+              if (this.state !== 'STOPPED' && this.isSoloistBackendActive()) {
+                return this.ensureStarted({ forceRestart: true });
+              }
+            })
+            .catch((renewErr) => {
+              this.lastError = `Soloist binary refresh failed: ${renewErr.message}`;
+              this.state = 'AWAITING_SPEAKER_AUTH';
+            });
+          return;
+        }
+
+        if (code !== 0 && this.lastError) {
+          this.state = 'AWAITING_SPEAKER_AUTH';
+        } else if (this.state !== 'STOPPED' && this.isSoloistBackendActive()) {
+          setTimeout(() => {
+            if (this.state !== 'STOPPED' && this.isSoloistBackendActive()) {
+              this.ensureStarted({ forceRestart: true }).catch(() => {});
+            }
+          }, 800);
+        }
+      }
+    });
+
+    this.state = this.isPairedSoloist() ? 'READY' : 'AWAITING_SPEAKER_AUTH';
+    await authWaitPromise;
+    if (this.isPairedSoloist() && this.state === 'AWAITING_SPEAKER_AUTH') {
+      this.state = 'READY';
+    }
+    return true;
+  }
+
+  async _ensureStartedLibrespotImpl({ forceRestart = false } = {}) {
+    if (!this.hasFfmpeg || !this.hasLibrespot) {
+      this.state = 'UNAVAILABLE';
+      this.lastError = 'FFmpeg or librespot binary missing in container';
       return false;
     }
 
@@ -1030,7 +1690,13 @@ class AudioStreamEngine extends EventEmitter {
 
     const authModeKey = speakerToken || (this.hasCachedCredentials() ? 'cached_credentials' : 'zeroconf_discovery');
 
-    if (!forceRestart && this.librespotProc && this.pacer && this.librespotStartedToken === authModeKey) {
+    if (
+      !forceRestart &&
+      this.librespotProc &&
+      this.activeBackendStarted === 'librespot' &&
+      this.pacer &&
+      this.librespotStartedToken === authModeKey
+    ) {
       if (!this.ffmpegProc || this.currentRateHz !== hz || this.currentFilterChain !== filterChain) {
         this.spawnFfmpegTranscoder(hz);
       }
@@ -1038,8 +1704,11 @@ class AudioStreamEngine extends EventEmitter {
     }
 
     this.stopProcesses();
+    this._stopPulseAudio();
     this.state = 'STARTING';
+    this.activeBackendStarted = 'librespot';
     this.librespotStartedToken = authModeKey;
+    this.lastError = null;
 
     const cacheDir = path.join(DATA_DIR, 'librespot');
     if (!fs.existsSync(cacheDir)) {
@@ -1166,12 +1835,15 @@ class AudioStreamEngine extends EventEmitter {
       if (this.librespotProc === lsProc) {
         this.librespotProc = null;
         this.librespotStartedToken = null;
+        if (this.activeBackendStarted === 'librespot') {
+          this.activeBackendStarted = null;
+        }
         if (code !== 0 && this.lastError) {
           this.state = 'AWAITING_SPEAKER_AUTH';
-        } else if (this.state !== 'STOPPED') {
+        } else if (this.state !== 'STOPPED' && !this.isSoloistBackendActive()) {
           // Auto-restart librespot immediately with refreshed OAuth token if it exited
           setTimeout(() => {
-            if (this.state !== 'STOPPED') {
+            if (this.state !== 'STOPPED' && !this.isSoloistBackendActive()) {
               this.ensureStarted({ forceRestart: true }).catch(() => {});
             }
           }, 500);
@@ -1222,7 +1894,7 @@ class AudioStreamEngine extends EventEmitter {
     this.store.save(updates);
 
     const { hz } = this.getSampleRateConfig();
-    if (this.librespotProc && this.pacer) {
+    if ((this.librespotProc || this.soloistProc) && this.pacer) {
       this.spawnFfmpegTranscoder(hz);
     } else {
       await this.ensureStarted();
@@ -1365,6 +2037,26 @@ class AudioStreamEngine extends EventEmitter {
 
   stopProcesses() {
     this.clearTcpPending();
+    this.activeBackendStarted = null;
+    if (this.parecProc) {
+      const oldParec = this.parecProc;
+      this.parecProc = null;
+      try {
+        oldParec.kill('SIGKILL');
+      } catch {}
+    }
+    this.soloistWs.disconnect();
+    if (this.soloistProc) {
+      const oldSol = this.soloistProc;
+      this.soloistProc = null;
+      try {
+        oldSol.kill('SIGTERM');
+      } catch {}
+    }
+    this.soloistReceiverName = null;
+    this.soloistDeviceId = null;
+    this.soloistZeroconfPort = null;
+    this.soloistZeroconfPath = null;
     if (this.pacer) {
       try {
         this.pacer.destroy();
@@ -1388,11 +2080,16 @@ class AudioStreamEngine extends EventEmitter {
         oldLs.kill('SIGKILL');
       } catch {}
     }
+    this.librespotReceiverName = null;
   }
 
   close() {
     this.state = 'STOPPED';
     this.stopProcesses();
+    this._stopPulseAudio();
+    try {
+      fs.rmSync(this._pulseRuntimeDir, { recursive: true, force: true });
+    } catch {}
     if (this.tcpServer) {
       this.tcpServer.close();
       this.tcpServer = null;
@@ -1403,13 +2100,42 @@ class AudioStreamEngine extends EventEmitter {
     const { mode, hz } = this.getSampleRateConfig();
     const { profile, dsp, filterChain } = this.getDspConfig();
     const macClients = this.getMacClientList();
+    const backend = this.getActiveAudioBackend();
+    const soloistKeyInfo = this.getEffectiveSoloistApiKey();
+    const soloistBinStatus = this.soloistManager.getStatus();
+    const backendAvailable = backend === 'soloist'
+      ? Boolean(this.hasFfmpeg && this.hasPulseAudio)
+      : Boolean(this.hasFfmpeg && this.hasLibrespot);
+
     return {
+      backend,
+      backendChosen: this.hasSoloistBackendChosen(),
       deviceName: this.getActiveMacSpeakerName(),
       receiverDeviceName: this.getLibrespotDeviceName(),
-      available: this.hasBinaries,
+      available: backendAvailable,
+      capabilities: {
+        ffmpeg: Boolean(this.hasFfmpeg),
+        librespot: Boolean(this.hasLibrespot),
+        pulseAudio: Boolean(this.hasPulseAudio),
+      },
       paired: this.isPaired(),
-      running: Boolean(this.librespotProc),
+      running: Boolean(this.librespotProc || this.soloistProc),
       state: this.state,
+      lastError: this.lastError || null,
+      soloist: {
+        hasApiKey: Boolean(soloistKeyInfo.apiKey),
+        apiKeySource: soloistKeyInfo.source,
+        apiKeyMasked: soloistKeyInfo.masked,
+        ...soloistBinStatus,
+        running: Boolean(this.soloistProc),
+        paired: this.isPairedSoloist(),
+        wsConnected: Boolean(this.soloistWs.connected),
+        loggedIn: Boolean(this.soloistWs.loggedIn),
+        isActiveDevice: Boolean(this.soloistWs.isActiveDevice),
+        deviceId: this.soloistDeviceId || null,
+        zeroconfPort: this.soloistZeroconfPort || null,
+        zeroconfPath: this.soloistZeroconfPath || null,
+      },
       sampleRateMode: mode,
       sampleRateHz: hz,
       profile,

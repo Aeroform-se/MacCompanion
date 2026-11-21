@@ -1440,7 +1440,134 @@
           </div>
 
           <div id="step3-unlocked-content" class="hidden" style="display:flex; flex-direction:column; gap:12px;">
-            <!-- Speaker Pairing Guide -->
+            <!-- Audio Engine Selector: Spotify Soloist (Recommended) vs librespot (Classic) -->
+            <div id="audio-backend-selector" style="display:flex; flex-direction:column; gap:8px;">
+              <div class="section-title-row">
+                <span>Spotify Audio Engine:</span>
+                <span id="audio-backend-hint" style="font-size:12px; color:#444;">Choose receiver engine</span>
+              </div>
+
+              <div class="sound-profiles-grid">
+                <div class="sound-profile-card-wrap" id="backend-wrap-soloist" onclick="selectAudioBackend('soloist')">
+                  <div class="sound-profile-card pixel-pill-clip" id="backend-card-soloist">
+                    <div class="profile-card-header">
+                      <div class="profile-card-title">
+                        <img src="/img/status-off.png" id="backend-icon-soloist" class="status-icon" width="8" height="8" alt="Soloist" />
+                        <span>Spotify Soloist <span style="font-weight:normal;">(Recommended)</span></span>
+                      </div>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge badge-select pixel-pill-clip" id="backend-badge-soloist">Recommended</span>
+                      </div>
+                    </div>
+                    <p class="profile-card-desc">
+                      Official Spotify playback engine (most reliable, Lossless-ready, prevents 10s skips). Requires a personal Soloist API Key from the Spotify Developer Dashboard (Premium) and running Docker with <code>network_mode: host</code> on a native Linux host (e.g. QNAP / Raspberry Pi) so LAN mDNS pairing works. On macOS OrbStack, run <code>node scripts/macos-soloist-mdns-proxy.js</code> during dev pairing.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="sound-profile-card-wrap" id="backend-wrap-librespot" onclick="selectAudioBackend('librespot')">
+                  <div class="sound-profile-card pixel-pill-clip" id="backend-card-librespot">
+                    <div class="profile-card-header">
+                      <div class="profile-card-title">
+                        <img src="/img/status-off.png" id="backend-icon-librespot" class="status-icon" width="8" height="8" alt="librespot" />
+                        <span>librespot <span style="font-weight:normal;">(Classic / Bridged Docker)</span></span>
+                      </div>
+                      <div class="profile-badge-wrap">
+                        <span class="profile-badge badge-select pixel-pill-clip" id="backend-badge-librespot">Select</span>
+                      </div>
+                    </div>
+                    <p class="profile-card-desc">
+                      Open-source community receiver. Recommended if you run Docker on macOS (OrbStack / Docker Desktop) or bridged container ports without LAN mDNS discovery, since it supports manual browser OAuth pairing without <code>network_mode: host</code> or a Soloist API key.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Soloist Configuration & Connect Pairing Guide -->
+            <div id="soloist-config-section" class="hidden" style="display:flex; flex-direction:column; gap:8px;">
+              <div id="soloist-pairing-guide-box" style="margin-top:2px; padding:12px; border:1px solid #000; background:#ffffff; display:flex; flex-direction:column; gap:10px; font-size:13px; line-height:1.45;">
+                <div>
+                  <strong>Spotify Soloist API Key &amp; Binary Setup:</strong><br/>
+                  Generate a personal API key under <em>Spotify Soloist API Key</em> in the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a> (Spotify Premium required):
+                </div>
+
+                <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                  <input
+                    type="password"
+                    id="soloist-api-key-input"
+                    placeholder="spak_... (Spotify Soloist API Key)"
+                    style="flex:1; min-width:220px; font-family:monospace; font-size:12px; padding:6px 8px; border:2px solid #000; background:#fff;"
+                  />
+                  <div class="action-btn-wrap">
+                    <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-save-key-btn" style="background:#000; color:#fff;" onclick="saveSoloistApiKey()">Save &amp; Start</button>
+                  </div>
+                  <div class="action-btn-wrap hidden" id="soloist-clear-key-wrap">
+                    <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-clear-key-btn" onclick="clearSoloistApiKey()">Clear Key</button>
+                  </div>
+                </div>
+
+                <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; font-size:12px; padding-top:4px; border-top:1px dashed #ccc;">
+                  <span id="soloist-binary-meta">Binary: Checked on first activation (~13–14 MB from Spotify CDN)</span>
+                  <div style="display:flex; gap:8px;">
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-update-btn" onclick="refreshSoloistBinary()">Update Binary</button>
+                    </div>
+                    <div class="action-btn-wrap hidden" id="soloist-unpair-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-unpair-btn" onclick="unpairSoloist()">Reset Pairing</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="soloist-pairing-instructions" style="padding-top:4px; border-top:1px dashed #ccc;">
+                  <strong>Pairing via Spotify Connect (mDNS / Zeroconf):</strong><br/>
+                  Ensure your container runs with <code>network_mode: host</code> on native Linux, then select <strong>&ldquo;Macintosh 68k&rdquo;</strong> in any official Spotify app on your local network.
+                </div>
+
+                <div id="soloist-backup-pair-box" class="hidden" style="padding-top:8px; border-top:1px dashed #ccc; display:flex; flex-direction:column; gap:8px;">
+                  <div>
+                    <strong>Option 2 (Backup — No mDNS Required): Pair on Another Computer</strong><br/>
+                    <span style="font-size:12px; color:#333;">For bridged Docker, Synology/QNAP, or macOS OrbStack: run this one-time helper on a Mac, Windows PC, or Linux desktop on the same Wi-Fi as your Spotify app (no Node.js needed).</span>
+                  </div>
+
+                  <div style="display:flex; gap:6px; flex-wrap:wrap;">
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-pair-os-mac" onclick="selectPairOs('mac')">macOS (Apple Silicon)</button>
+                    </div>
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-pair-os-win" onclick="selectPairOs('win')">Windows</button>
+                    </div>
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-pair-os-linux" onclick="selectPairOs('linux')">Linux</button>
+                    </div>
+                  </div>
+
+                  <div id="soloist-pair-os-note" style="font-size:11px; color:#555;"></div>
+
+                  <div style="display:flex; gap:6px; align-items:stretch; flex-wrap:wrap;">
+                    <code id="soloist-pair-cmd-code" style="flex:1; min-width:240px; padding:6px 8px; background:#f5f5f5; border:1px solid #000; font-family:monospace; font-size:11px; word-break:break-all; user-select:all;"></code>
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-copy-cmd-btn" onclick="copySoloistPairCommand()">Copy Command</button>
+                    </div>
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-download-script-btn" onclick="downloadSoloistPairScript()">Download Script</button>
+                    </div>
+                  </div>
+
+                  <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:12px; padding-top:4px; border-top:1px dotted #ccc;">
+                    <span>Or upload auth bundle (<code>.tar.gz</code> / <code>.zip</code>):</span>
+                    <input type="file" id="soloist-auth-file-input" accept=".tar.gz,.tgz,.zip,application/gzip,application/x-gzip,application/zip" style="font-size:11px; max-width:240px;" />
+                    <div class="action-btn-wrap">
+                      <button type="button" class="action-btn-sm pixel-pill-clip" id="soloist-upload-auth-btn" onclick="uploadSoloistAuthFile()">Upload Auth File</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="soloist-feedback" style="font-size:12px; font-weight:bold; display:none;"></div>
+              </div>
+            </div>
+
+            <!-- librespot Speaker Pairing Guide -->
             <div id="speaker-pairing-section" style="display:flex; flex-direction:column; gap:8px;">
               <div id="speaker-pairing-guide-box" style="margin-top:2px; padding:12px; border:1px solid #000; background:#ffffff; display:flex; flex-direction:column; gap:10px; font-size:13px; line-height:1.45;">
                 <div>
@@ -1969,12 +2096,243 @@
     function toggleSpeakerPairingGuide() {
       speakerGuideExpanded = !speakerGuideExpanded;
       const box = document.getElementById('speaker-pairing-guide-box');
+      const solBox = document.getElementById('soloist-pairing-guide-box');
       const btn = document.getElementById('speaker-pair-toggle-btn');
       if (box) {
         box.classList.toggle('hidden', !speakerGuideExpanded);
       }
+      if (solBox) {
+        solBox.classList.toggle('hidden', !speakerGuideExpanded);
+      }
       if (btn) {
-        btn.textContent = speakerGuideExpanded ? 'Hide Pairing Guide' : 'Re-Pair Speaker';
+        btn.textContent = speakerGuideExpanded ? 'Hide Speaker Setup' : 'Configure / Re-Pair';
+      }
+    }
+
+    function setSoloistFeedback(message, color = '#1a7f37') {
+      const fb = document.getElementById('soloist-feedback');
+      if (!fb) return;
+      if (!message) {
+        fb.style.display = 'none';
+        fb.textContent = '';
+        return;
+      }
+      fb.style.display = 'block';
+      fb.style.color = color;
+      fb.textContent = message;
+    }
+
+    async function selectAudioBackend(backend) {
+      try {
+        speakerGuideExpanded = true;
+        setSoloistFeedback(
+          backend === 'soloist'
+            ? 'Switching audio engine to Spotify Soloist...'
+            : 'Switching audio engine to librespot...',
+          '#555'
+        );
+        const res = await fetch('/api/spotify/soloist-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backend }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'Failed to switch audio engine');
+        }
+        setSoloistFeedback('');
+        await pollStatus();
+      } catch (err) {
+        setSoloistFeedback(`✗ ${err.message}`, '#cf222e');
+        await pollStatus();
+      }
+    }
+
+    async function saveSoloistApiKey() {
+      const inputEl = document.getElementById('soloist-api-key-input');
+      const btnEl = document.getElementById('soloist-save-key-btn');
+      const apiKey = inputEl ? inputEl.value.trim() : '';
+      if (!apiKey) {
+        setSoloistFeedback('Please paste your Spotify Soloist API key (spak_...).', '#cf222e');
+        return;
+      }
+      if (btnEl) btnEl.disabled = true;
+      setSoloistFeedback('Saving API key & preparing Spotify Soloist binary (~13–14 MB on first run)...', '#555');
+      try {
+        const res = await fetch('/api/spotify/soloist-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ backend: 'soloist', apiKey }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'Failed to save Soloist configuration');
+        }
+        if (inputEl) inputEl.value = '';
+        speakerGuideExpanded = true;
+        setSoloistFeedback('✓ Soloist started! Select your speaker in any Spotify app on your LAN to pair.', '#1a7f37');
+        await pollStatus();
+      } catch (err) {
+        setSoloistFeedback(`✗ ${err.message}`, '#cf222e');
+      } finally {
+        if (btnEl) btnEl.disabled = false;
+      }
+    }
+
+    async function clearSoloistApiKey() {
+      try {
+        const res = await fetch('/api/spotify/soloist-config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clearKey: true }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to clear Soloist key');
+        setSoloistFeedback('Soloist API key cleared.', '#555');
+        await pollStatus();
+      } catch (err) {
+        setSoloistFeedback(`✗ ${err.message}`, '#cf222e');
+      }
+    }
+
+    async function refreshSoloistBinary() {
+      const btnEl = document.getElementById('soloist-update-btn');
+      if (btnEl) btnEl.disabled = true;
+      setSoloistFeedback('Downloading latest Spotify Soloist build from Spotify CDN...', '#555');
+      try {
+        const res = await fetch('/api/spotify/soloist-update-binary', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Binary update failed');
+        setSoloistFeedback('✓ Updated Spotify Soloist binary.', '#1a7f37');
+        await pollStatus();
+      } catch (err) {
+        setSoloistFeedback(`✗ ${err.message}`, '#cf222e');
+      } finally {
+        if (btnEl) btnEl.disabled = false;
+      }
+    }
+
+    async function unpairSoloist() {
+      try {
+        speakerGuideExpanded = true;
+        const res = await fetch('/api/spotify/soloist-unpair', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to reset pairing');
+        setSoloistFeedback('Soloist Connect session reset. Re-select your speaker in Spotify to pair again.', '#555');
+        await pollStatus();
+      } catch (err) {
+        setSoloistFeedback(`✗ ${err.message}`, '#cf222e');
+      }
+    }
+
+    let selectedPairOs = (() => {
+      const plat = `${navigator.platform || ''} ${navigator.userAgent || ''}`.toLowerCase();
+      if (plat.includes('win')) return 'win';
+      if (plat.includes('mac')) return 'mac';
+      return 'linux';
+    })();
+
+    function buildSoloistPairHelperUrls() {
+      const safeOrigin = window.location.origin.replace(/'/g, '');
+      const qs = `os=${encodeURIComponent(selectedPairOs)}&origin=${encodeURIComponent(safeOrigin)}`;
+      const scriptUrl = `${safeOrigin}/api/spotify/soloist-pair-script?${qs}`;
+      const downloadUrl = `${scriptUrl}&download=1`;
+      const cmd = selectedPairOs === 'win'
+        ? `irm '${scriptUrl}' | iex`
+        : `bash -c "$(curl -fsSL '${scriptUrl}')"`;
+      return { scriptUrl, downloadUrl, cmd };
+    }
+
+    function updatePairHelperSnippet() {
+      const notes = {
+        mac: 'Paste in Terminal on an Apple Silicon Mac (M1–M4). When "pairing mode" appears, tap your speaker in Spotify.',
+        win: 'Paste in Windows PowerShell. When "pairing mode" appears, tap your speaker in Spotify.',
+        linux: 'Paste in a Linux desktop/laptop terminal with curl and tar. When "pairing mode" appears, tap your speaker in Spotify.',
+      };
+      const osList = ['mac', 'win', 'linux'];
+      for (const id of osList) {
+        const btn = document.getElementById(`soloist-pair-os-${id}`);
+        if (!btn) continue;
+        const active = id === selectedPairOs;
+        btn.style.background = active ? '#000' : '#fff';
+        btn.style.color = active ? '#fff' : '#000';
+      }
+      const noteEl = document.getElementById('soloist-pair-os-note');
+      if (noteEl) noteEl.textContent = notes[selectedPairOs] || notes.mac;
+      const codeEl = document.getElementById('soloist-pair-cmd-code');
+      if (codeEl) codeEl.textContent = buildSoloistPairHelperUrls().cmd;
+    }
+
+    function selectPairOs(os) {
+      if (os !== 'mac' && os !== 'win' && os !== 'linux') return;
+      selectedPairOs = os;
+      updatePairHelperSnippet();
+    }
+
+    async function copySoloistPairCommand() {
+      const { cmd } = buildSoloistPairHelperUrls();
+      try {
+        await navigator.clipboard.writeText(cmd);
+        setSoloistFeedback('✓ Command copied — paste it into your computer’s terminal.', '#1a7f37');
+      } catch (_) {
+        const codeEl = document.getElementById('soloist-pair-cmd-code');
+        if (codeEl && window.getSelection) {
+          const range = document.createRange();
+          range.selectNodeContents(codeEl);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        setSoloistFeedback('Command selected — press Cmd+C / Ctrl+C to copy.', '#555');
+      }
+    }
+
+    function downloadSoloistPairScript() {
+      const { downloadUrl } = buildSoloistPairHelperUrls();
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    async function uploadSoloistAuthFile() {
+      const inputEl = document.getElementById('soloist-auth-file-input');
+      const btnEl = document.getElementById('soloist-upload-auth-btn');
+      const file = inputEl && inputEl.files && inputEl.files[0];
+      if (!file) {
+        setSoloistFeedback('Please select a .tar.gz or .zip auth bundle first.', '#cf222e');
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        setSoloistFeedback('Archive exceeds the 5 MB limit.', '#cf222e');
+        return;
+      }
+      if (btnEl) btnEl.disabled = true;
+      setSoloistFeedback('Uploading & verifying Soloist credentials...', '#555');
+      try {
+        const buf = await file.arrayBuffer();
+        const res = await fetch('/api/spotify/soloist-upload-auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: buf,
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Failed to import Soloist auth archive');
+        inputEl.value = '';
+        const pairedNow = Boolean(data.status && data.status.audio && data.status.audio.paired);
+        if (pairedNow) {
+          speakerGuideExpanded = false;
+          setSoloistFeedback('✓ Soloist credentials uploaded and activated!', '#1a7f37');
+        } else {
+          setSoloistFeedback('✓ Credentials saved. Starting Soloist session...', '#1a7f37');
+        }
+        await pollStatus();
+      } catch (err) {
+        setSoloistFeedback(`✗ ${err.message}`, '#cf222e');
+      } finally {
+        if (btnEl) btnEl.disabled = false;
       }
     }
 
@@ -3347,29 +3705,117 @@
         // Update the 3 separate Sound Profile Option Cards
         updateSoundProfileUI(spotify.audio.profile);
 
+        // Update Audio Engine Selector & Contextual Pairing UI
+        const backend = spotify.audio.backend || 'librespot';
+        const isSoloist = backend === 'soloist';
+        const solWrap = document.getElementById('backend-wrap-soloist');
+        const libWrap = document.getElementById('backend-wrap-librespot');
+        const solIcon = document.getElementById('backend-icon-soloist');
+        const libIcon = document.getElementById('backend-icon-librespot');
+        const solBadge = document.getElementById('backend-badge-soloist');
+        const libBadge = document.getElementById('backend-badge-librespot');
+        const backendHint = document.getElementById('audio-backend-hint');
+        const soloistSec = document.getElementById('soloist-config-section');
+        const librespotSec = document.getElementById('speaker-pairing-section');
+
+        if (solWrap) solWrap.classList.toggle('active', isSoloist);
+        if (libWrap) libWrap.classList.toggle('active', !isSoloist);
+        if (solIcon) setIconStatus(solIcon, isSoloist ? (spotify.audio.paired && spotify.audio.running ? 'ok' : 'off') : 'off');
+        if (libIcon) setIconStatus(libIcon, !isSoloist ? (spotify.audio.paired && spotify.audio.running ? 'ok' : 'off') : 'off');
+        if (solBadge) {
+          solBadge.textContent = isSoloist ? 'Active' : 'Recommended';
+          solBadge.classList.toggle('badge-active', isSoloist);
+          solBadge.classList.toggle('badge-select', !isSoloist);
+        }
+        if (libBadge) {
+          libBadge.textContent = !isSoloist ? 'Active' : 'Select';
+          libBadge.classList.toggle('badge-active', !isSoloist);
+          libBadge.classList.toggle('badge-select', isSoloist);
+        }
+        if (backendHint) {
+          backendHint.textContent = isSoloist ? 'Engine: Spotify Soloist' : 'Engine: librespot (Classic)';
+        }
+        if (soloistSec) soloistSec.classList.toggle('hidden', !isSoloist);
+        if (librespotSec) librespotSec.classList.toggle('hidden', isSoloist);
+
+        if (isSoloist && spotify.audio.soloist) {
+          const sol = spotify.audio.soloist;
+          const keyInput = document.getElementById('soloist-api-key-input');
+          const clearWrap = document.getElementById('soloist-clear-key-wrap');
+          const unpairWrap = document.getElementById('soloist-unpair-wrap');
+          const metaEl = document.getElementById('soloist-binary-meta');
+          const pairInfoEl = document.getElementById('soloist-pairing-instructions');
+          const backupBoxEl = document.getElementById('soloist-backup-pair-box');
+
+          if (keyInput && !keyInput.matches(':focus')) {
+            keyInput.placeholder = sol.hasApiKey
+              ? `Configured (${sol.apiKeySource === 'env' ? 'ENV: ' : ''}${sol.apiKeyMasked}) — enter new key to replace`
+              : 'spak_... (Spotify Soloist API Key)';
+          }
+          if (clearWrap) {
+            clearWrap.classList.toggle('hidden', !(sol.hasApiKey && sol.apiKeySource === 'store'));
+          }
+          if (unpairWrap) {
+            unpairWrap.classList.toggle('hidden', !sol.paired);
+          }
+          if (metaEl) {
+            if (sol.downloading) {
+              metaEl.textContent = 'Binary: Downloading from Spotify CDN...';
+            } else if (sol.installed) {
+              const expPart = typeof sol.expiresDaysLeft === 'number' ? ` • Expires in ${sol.expiresDaysLeft} days` : '';
+              metaEl.textContent = `Binary: ${sol.version || 'Installed'}${expPart}`;
+            } else {
+              metaEl.textContent = 'Binary: Not downloaded yet (~13–14 MB from Spotify CDN on first start)';
+            }
+          }
+          if (pairInfoEl) {
+            const safeDevName = escapeHtml(spotify.audio.deviceName || 'Macintosh 68k');
+            const zcPortNote = sol.zeroconfPort ? ` (ZeroConf port ${Number(sol.zeroconfPort)})` : '';
+            if (sol.paired) {
+              pairInfoEl.innerHTML = `<strong>Status: Paired via Spotify Connect</strong> (&ldquo;${safeDevName}&rdquo;${zcPortNote}). Audio flows through FFmpeg DSP to 68k Macs automatically.`;
+            } else if (!sol.hasApiKey) {
+              pairInfoEl.innerHTML = `<strong>Next:</strong> Paste your <code>spak_...</code> Spotify Soloist API Key above and click <strong>Save &amp; Start</strong>.`;
+            } else {
+              pairInfoEl.innerHTML = `<strong>Waiting for Connect Pairing (&ldquo;${safeDevName}&rdquo;${zcPortNote}):</strong><br/><strong>Option 1 (Native Linux <code>network_mode: host</code>):</strong> Select <strong>&ldquo;${safeDevName}&rdquo;</strong> inside any official Spotify app on your local network.`;
+            }
+          }
+          if (backupBoxEl) {
+            const showBackup = Boolean(sol.hasApiKey && !sol.paired);
+            backupBoxEl.classList.toggle('hidden', !showBackup);
+            if (showBackup) updatePairHelperSnippet();
+          }
+          if (spotify.audio.lastError) {
+            setSoloistFeedback(`✗ ${spotify.audio.lastError}`, '#cf222e');
+          }
+        }
+
         const speakerIcon = document.getElementById('sub-speaker-icon');
         const speakerLabel = document.getElementById('speaker-status-label');
         const speakerToggleWrap = document.getElementById('speaker-pair-toggle-wrap');
         const speakerToggleBtn = document.getElementById('speaker-pair-toggle-btn');
         const speakerGuideBox = document.getElementById('speaker-pairing-guide-box');
+        const soloistGuideBox = document.getElementById('soloist-pairing-guide-box');
+        const engineLabel = isSoloist ? 'Soloist' : 'librespot';
         if (isReady && spotify.audio.paired && spotify.audio.running) {
           const macCount = Array.isArray(spotify.audio.macClients) ? spotify.audio.macClients.length : 0;
           const suffix = macCount > 1 ? ` (${macCount} Macs online)` : '';
-          const spkText = `Local playback: ${spotify.audio.deviceName}${suffix}`;
-          speakerLabel.textContent = `Step 3: Local playback active ("${spotify.audio.deviceName}"${suffix})`;
+          const spkText = `Local playback: ${spotify.audio.deviceName} (${engineLabel})${suffix}`;
+          speakerLabel.textContent = `Step 3: Local playback active ("${spotify.audio.deviceName}" via ${engineLabel}${suffix})`;
           if (speakerToggleWrap) speakerToggleWrap.classList.remove('hidden');
-          if (speakerToggleBtn) speakerToggleBtn.textContent = speakerGuideExpanded ? 'Hide Pairing Guide' : 'Re-Pair Speaker';
+          if (speakerToggleBtn) speakerToggleBtn.textContent = speakerGuideExpanded ? 'Hide Speaker Setup' : 'Configure / Re-Pair';
           if (speakerGuideBox) speakerGuideBox.classList.toggle('hidden', !speakerGuideExpanded);
+          if (soloistGuideBox) soloistGuideBox.classList.toggle('hidden', !speakerGuideExpanded);
           setIconStatus(speakerIcon, 'ok');
           setIconStatus(dashSpotimacSpeakerIcon, 'ok');
           dashSpotimacSpeaker.textContent = spkText;
           dashSpotimacSpeakerBtn.textContent = 'Re-Activate';
         } else {
           speakerLabel.textContent = isReady
-            ? 'Step 3 — Activate Local 68k Playback (Not activated yet)'
+            ? `Step 3 — Activate Local 68k Playback (${engineLabel} — Not paired yet)`
             : 'Step 3 — Activate Local 68k Playback';
           if (speakerToggleWrap) speakerToggleWrap.classList.add('hidden');
           if (speakerGuideBox) speakerGuideBox.classList.remove('hidden');
+          if (soloistGuideBox) soloistGuideBox.classList.remove('hidden');
           setIconStatus(speakerIcon, 'off');
           setIconStatus(dashSpotimacSpeakerIcon, 'off');
           dashSpotimacSpeaker.textContent = 'Local playback: Not activated';

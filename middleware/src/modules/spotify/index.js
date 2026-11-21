@@ -17,6 +17,7 @@ const {
   generatePlaceholderArtwork,
 } = require('../../core/dither');
 const { AudioStreamEngine } = require('./audio');
+const { buildPairScript } = require('./soloist-pair-scripts');
 const audioHub = require('../../core/audio-hub');
 
 const router = express.Router();
@@ -54,6 +55,14 @@ const store = createModuleStore('spotify', {
   oauthState: null,
   userProfile: null,
   smartShuffleActive: false,
+  audioBackend: null, // null (not chosen yet) | 'soloist' | 'librespot'
+  soloistApiKey: null,
+  soloistSessionPaired: false,
+  soloistBinaryVersion: null,
+  soloistBinaryArch: null,
+  soloistBinaryDownloadedAt: null,
+  soloistExpiresDaysLeft: null,
+  soloistExpiresAt: null,
   audioSampleRate: '22k',
   audioProfile: 'warm',
   audioDsp: null,
@@ -84,7 +93,9 @@ audioHub.registerSpotifyEngine(
         optimisticState.isPlaying = false;
         optimisticState.isPlayingTs = Date.now();
         audioEngine.onPause({ discardMs: 0 });
-        await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+        if (!(await audioEngine.trySoloistCommand('pause'))) {
+          await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+        }
         audioEngine.onPause({ discardMs: 0 });
         nowPlayingCache.fetchedAt = 0;
         return true;
@@ -97,7 +108,9 @@ audioHub.registerSpotifyEngine(
       optimisticState.isPlaying = true;
       optimisticState.isPlayingTs = Date.now();
       audioEngine.onResume();
-      await callPlayerCommand('/me/player/play', { method: 'PUT' });
+      if (!(await audioEngine.trySoloistCommand('play'))) {
+        await callPlayerCommand('/me/player/play', { method: 'PUT' });
+      }
       nowPlayingCache.fetchedAt = 0;
       return true;
     } catch {}
@@ -952,9 +965,12 @@ router.post('/logout', (req, res) => {
   const clearConfig = Boolean(req.body && req.body.clearConfig);
   audioEngine.stopProcesses();
   audioEngine.clearCachedCredentials();
+  audioEngine.clearSoloistSession();
   store.save({
     clientId: clearConfig ? null : data.clientId,
     redirectUri: clearConfig ? null : data.redirectUri,
+    soloistApiKey: clearConfig ? null : data.soloistApiKey,
+    audioBackend: clearConfig ? null : data.audioBackend,
     accessToken: null,
     refreshToken: null,
     expiresAt: null,
@@ -1019,6 +1035,116 @@ router.post('/audio-callback-manual', async (req, res) => {
   }
 });
 
+router.post('/soloist-config', async (req, res) => {
+  try {
+    const { backend, apiKey, clearKey } = req.body || {};
+    if (backend !== undefined && backend !== 'soloist' && backend !== 'librespot') {
+      return res.status(400).json({ ok: false, error: 'Invalid backend; must be "soloist" or "librespot"', status: getStatus() });
+    }
+    await audioEngine.configureSoloist({
+      backend,
+      apiKey,
+      clearKey: Boolean(clearKey),
+    });
+    res.json({ ok: true, status: getStatus() });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      ok: false,
+      error: err.message,
+      status: getStatus(),
+    });
+  }
+});
+
+router.post('/soloist-update-binary', async (req, res) => {
+  try {
+    await audioEngine.soloistManager.ensureBinary({ forceDownload: true });
+    if (audioEngine.isSoloistBackendActive() && audioEngine.getEffectiveSoloistApiKey().apiKey) {
+      await audioEngine.ensureStarted({ forceRestart: true });
+    }
+    res.json({ ok: true, status: getStatus() });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      ok: false,
+      error: err.message,
+      status: getStatus(),
+    });
+  }
+});
+
+router.post('/soloist-unpair', async (req, res) => {
+  try {
+    audioEngine.stopProcesses();
+    audioEngine.clearSoloistSession();
+    if (audioEngine.isSoloistBackendActive() && audioEngine.getEffectiveSoloistApiKey().apiKey) {
+      await audioEngine.ensureStarted({ forceRestart: true });
+    }
+    res.json({ ok: true, status: getStatus() });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      ok: false,
+      error: err.message,
+      status: getStatus(),
+    });
+  }
+});
+
+router.get('/soloist-pair-script', (req, res) => {
+  try {
+    const osParam = req.query.os || 'mac';
+    const hostHeader = req.get('host') || '127.0.0.1:6800';
+    const fallbackOrigin = `${req.protocol || 'http'}://${hostHeader}`;
+    const origin = req.query.origin || fallbackOrigin;
+    const { apiKey } = audioEngine.getEffectiveSoloistApiKey();
+    const deviceName = req.query.device_name || audioEngine.getActiveMacSpeakerName() || 'Macintosh 68k';
+
+    const script = buildPairScript({
+      os: osParam,
+      origin,
+      deviceName,
+      apiKey,
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    if (req.query.download === '1') {
+      res.setHeader('Content-Disposition', `attachment; filename="${script.filename}"`);
+    }
+    return res.send(script.content);
+  } catch (err) {
+    return res.status(400).send(`# Error: ${err.message}\n`);
+  }
+});
+
+router.post(
+  '/soloist-upload-auth',
+  express.raw({
+    type: ['application/octet-stream', 'application/gzip', 'application/x-gzip', 'application/zip', 'application/x-zip-compressed', 'application/x-tar'],
+    limit: '5mb',
+  }),
+  async (req, res) => {
+    try {
+      let archiveBuffer = null;
+      if (Buffer.isBuffer(req.body)) {
+        archiveBuffer = req.body;
+      } else if (req.body && typeof req.body.archiveBase64 === 'string') {
+        archiveBuffer = Buffer.from(req.body.archiveBase64, 'base64');
+      }
+      if (!archiveBuffer || archiveBuffer.length === 0) {
+        return res.status(400).json({ ok: false, error: 'Missing auth archive payload (.tar.gz or .zip)', status: getStatus() });
+      }
+      await audioEngine.applyUploadedSoloistAuth(archiveBuffer);
+      return res.json({ ok: true, status: getStatus() });
+    } catch (err) {
+      return res.status(400).json({
+        ok: false,
+        error: err.message,
+        status: getStatus(),
+      });
+    }
+  }
+);
+
 // ============================================================================
 // 1. NOW PLAYING & TIMELINE STATUS / SEEKING
 // ============================================================================
@@ -1038,6 +1164,29 @@ audioEngine.on('trackChange', () => {
     nowPlayingCache.fetchedAt = 0;
     refreshNowPlayingCache().catch(() => {});
   }, 500);
+});
+
+audioEngine.on('soloistEvent', ({ kind, data }) => {
+  if (!audioEngine.isSoloistActiveSpeaker() || !nowPlayingCache.raw) return;
+  const cachedUri = nowPlayingCache.raw.item && nowPlayingCache.raw.item.uri;
+  const wsUri = audioEngine.soloistWs.lastTrackUri;
+  if (wsUri && cachedUri && wsUri !== cachedUri) return;
+
+  if (kind === 'playbackChanged' && data && data.status) {
+    nowPlayingCache.raw.is_playing = String(data.status).toLowerCase() === 'playing';
+    const est = audioEngine.soloistWs.getEstimatedPositionMs();
+    if (typeof est === 'number') {
+      nowPlayingCache.raw.progress_ms = est;
+      nowPlayingCache.fetchedAt = Date.now();
+    }
+  } else if (kind === 'positionSync' && data && typeof data.position_ms === 'number') {
+    nowPlayingCache.raw.progress_ms = data.position_ms;
+    nowPlayingCache.fetchedAt = data.timestamp_ms || Date.now();
+  } else if (kind === 'volumeChanged' && typeof audioEngine.soloistWs.volumePercent === 'number') {
+    if (nowPlayingCache.raw.device) {
+      nowPlayingCache.raw.device.volume_percent = audioEngine.soloistWs.volumePercent;
+    }
+  }
 });
 
 let lastLoggedCloudSig = '';
@@ -1286,10 +1435,12 @@ router.all('/seek', async (req, res) => {
       nowPlayingCache.raw.progress_ms = targetMs;
       nowPlayingCache.fetchedAt = now;
     }
-    await callSpotify('/me/player/seek', {
-      method: 'PUT',
-      query: { position_ms: targetMs },
-    });
+    if (!(await audioEngine.trySoloistCommand('seek', { position_ms: targetMs }))) {
+      await callSpotify('/me/player/seek', {
+        method: 'PUT',
+        query: { position_ms: targetMs },
+      });
+    }
     optimisticState.progressTs = Date.now();
     const pipe = `${formatPipeRow(['OK', 'SEEK', targetMs, formatTimeMmSs(targetMs)])}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, positionMs: targetMs, pipe: pipe.trim() });
@@ -1369,11 +1520,14 @@ router.all('/play', async (req, res) => {
       debugSpotify('Route:/play', `req context_uri=${contextUri || '-'} offset_uri=${offsetUri || '-'} uri=${uri || '-'} deviceId=${deviceId || '-'} -> ${summarizeSpotifyBody(body)}`);
     }
     try {
-      await callPlayerCommand('/me/player/play', {
-        method: 'PUT',
-        query: deviceId ? { device_id: deviceId } : undefined,
-        body,
-      });
+      const canResumeLocal = !body && !deviceId;
+      if (!(canResumeLocal && await audioEngine.trySoloistCommand('play'))) {
+        await callPlayerCommand('/me/player/play', {
+          method: 'PUT',
+          query: deviceId ? { device_id: deviceId } : undefined,
+          body,
+        });
+      }
     } catch (playErr) {
       if (body && body.context_uri && !customFetch && lastTrackListUris.length > 0) {
         const fallbackBody = {
@@ -1424,7 +1578,9 @@ router.all('/pause', async (req, res) => {
     optimisticState.isPlaying = false;
     optimisticState.isPlayingTs = now;
     audioEngine.onPause();
-    await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+    if (!(await audioEngine.trySoloistCommand('pause'))) {
+      await callPlayerCommand('/me/player/pause', { method: 'PUT' });
+    }
     nowPlayingCache.fetchedAt = 0;
     const pipe = 'OK|PAUSE\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
@@ -1476,11 +1632,14 @@ router.all('/next', async (req, res) => {
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
     audioHub.onSpotifyResume();
-    if (!customFetch) debugSpotify('Route:/next', 'forwarding to /me/player/next');
-    await callPlayerCommand('/me/player/next', { method: 'POST' });
+    if (!customFetch) debugSpotify('Route:/next', 'forwarding skip_next');
+    const handledNextLocal = await audioEngine.trySoloistCommand('skip_next');
+    if (!handledNextLocal) {
+      await callPlayerCommand('/me/player/next', { method: 'POST' });
+    }
     nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, handledNextLocal ? 100 : 250));
     }
     const pipe = 'OK|NEXT\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
@@ -1497,11 +1656,14 @@ router.all('/previous', async (req, res) => {
     optimisticState.progressMs = 0;
     optimisticState.progressTs = Date.now();
     audioHub.onSpotifyResume();
-    if (!customFetch) debugSpotify('Route:/previous', 'forwarding to /me/player/previous');
-    await callPlayerCommand('/me/player/previous', { method: 'POST' });
+    if (!customFetch) debugSpotify('Route:/previous', 'forwarding skip_prev');
+    const handledPrevLocal = await audioEngine.trySoloistCommand('skip_prev');
+    if (!handledPrevLocal) {
+      await callPlayerCommand('/me/player/previous', { method: 'POST' });
+    }
     nowPlayingCache.fetchedAt = 0;
     if (!customFetch) {
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, handledPrevLocal ? 100 : 250));
     }
     const pipe = 'OK|PREVIOUS\n';
     if (req.query.format === 'json') return res.json({ ok: true, pipe: pipe.trim() });
@@ -1524,10 +1686,12 @@ router.all('/volume', async (req, res) => {
     }
     optimisticState.volumePct = vol;
     optimisticState.volumeTs = Date.now();
-    await callPlayerCommand('/me/player/volume', {
-      method: 'PUT',
-      query: { volume_percent: vol },
-    });
+    if (!(await audioEngine.trySoloistCommand('set_volume', { volume: vol }))) {
+      await callPlayerCommand('/me/player/volume', {
+        method: 'PUT',
+        query: { volume_percent: vol },
+      });
+    }
     const pipe = `OK|VOLUME|${vol}\n`;
     if (req.query.format === 'json') return res.json({ ok: true, volume: vol, pipe: pipe.trim() });
     return sendPipeResponse(req, res, pipe);

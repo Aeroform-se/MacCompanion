@@ -6,6 +6,9 @@ services:
     image: maccompanion:latest
     container_name: maccompanion
     restart: unless-stopped
+    # Note: To use Spotify Soloist mDNS/Zeroconf pairing directly on a native Linux host
+    # (or QNAP Container Station), uncomment `network_mode: host` and comment out `ports:`.
+    # network_mode: host
     ports:
       - "6800:6800/tcp"
       - "6801:6801/udp"
@@ -20,6 +23,8 @@ services:
       - DATA_DIR=/app/data
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
       - SPOTIFY_REDIRECT_URI=${SPOTIFY_REDIRECT_URI:-https://aeroform-se.github.io/MacCompanion/callback.html}
+      - SOLOIST_API_KEY=${SOLOIST_API_KEY:-}
+      - SPOTIFY_AUDIO_BACKEND=${SPOTIFY_AUDIO_BACKEND:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
